@@ -210,7 +210,7 @@ class HX71X:
         w = int.from_bytes(response, byteorder='little', signed=True)
         self.weight = w * self.scale # weight scale
 
-        logging.info(" read hx711 @ %.3f , weight:%.2f", eventtime, self.weight)
+        logging.info("Senser:%s,  read hx711 @ %.3f , weight:%.2f", self.name, eventtime, self.weight)
 
         # timer interval is short when homing
         if (self._endstop is not None) and self._endstop.bHoming :
