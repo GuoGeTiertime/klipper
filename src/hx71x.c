@@ -19,6 +19,7 @@ struct hx71x_s {
     struct gpio_in dt_in;
     long weight_tare;
     long pulse_count;
+    long measure_count;
 };
 
 long HX711_Read(struct hx71x_s *dev);
@@ -35,6 +36,7 @@ void command_config_hx71x(uint32_t *args)
     gpio_out_write(hx71x->sck_out, 0);
 
     hx71x->weight_tare = 0;
+    hx71x->measure_count = 0;
 }
 DECL_COMMAND(command_config_hx71x,
     "config_hx71x oid=%c sck_pin=%u dout_pin=%u");
@@ -137,15 +139,10 @@ void HX711_Get_WeightTare(struct hx71x_s* dev)
 //get weight
 long HX711_Get_Weight(struct hx71x_s* dev)
 {
-    static int s_nCnt = 0;
-
     long value = HX711_Read(dev);
 
-    if( s_nCnt<2 ) //reset weight tare at 1/2 times.
-    {
-        s_nCnt++;
+    if( dev->measure_count++<2 ) //reset weight tare at 1/2 times.
         dev->weight_tare = value;
-    }
 
     return value - dev->weight_tare;
 }
