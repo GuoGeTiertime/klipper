@@ -177,7 +177,26 @@ class HX71X:
         self.cmd_queue = self.mcu.alloc_command_queue()
         self.mcu.register_config_callback(self.build_config)
 
+        # register a sensor type for HX71X
+        pheaters = self.printer.load_object(config, 'heaters')
+        pheaters.add_sensor_factory("HX71X", HX71X)
+        # self.sensor = pheaters.setup_sensor(config)
+        # self.min_temp = config.getfloat('min_temp', KELVIN_TO_CELSIUS,
+        #                                 minval=KELVIN_TO_CELSIUS)
+        # self.max_temp = config.getfloat('max_temp', 99999999.9,
+        #                                 above=self.min_temp)
+        # self.sensor.setup_minmax(self.min_temp, self.max_temp)
+        # self.setup_callback(self.temperature_callback)
+        # self._callback = self.temperature_callback
+        # pheaters.register_sensor(config, self)
 
+        # add variable for temperature sensor.
+        self.last_temp = 0.
+        self.measured_min = 99999999.
+        self.measured_max = 0.
+
+        # callback function, call the function to update heater's temperature data.
+        self._callback = None
 
     def handle_connect(self):
         self.reactor.update_timer(self.sample_timer, self.reactor.NOW)
@@ -219,9 +238,12 @@ class HX71X:
         else:
             self.weight -= self._sample_tare
 
-        self.last_temp = self.weight
-
         logging.info("Senser:%s,  read hx711 @ %.3f , weight:%.2f", self.name, eventtime, self.weight)
+
+        # use weight as temperature.
+        self.last_temp = self.weight
+        if self._callback is not None:
+            self._callback(eventtime, self.last_temp) #callback to update the temperature of heaters.
 
         # timer interval is short when homing
         if (self._endstop is not None) and self._endstop.bHoming :
@@ -233,7 +255,10 @@ class HX71X:
 
     def get_status(self, eventtime):
         return {
-            'weight': round(self.weight, 2)
+            'weight': round(self.weight, 2),
+            'temperature': round(self.last_temp, 2),
+            'measured_min_temp': round(self.measured_min, 2),
+            'measured_max_temp': round(self.measured_max, 2)
         }
 
     def setup_pin(self, pin_type, pin_params):
@@ -245,6 +270,19 @@ class HX71X:
         
         self._endstop = HX71X_endstop(self, pin_params)
         return self._endstop
+
+    def get_temp(self, eventtime):
+        logging.info("call HX71X.get_temp() of %s ,eventtime: %.2f ", self.name, eventtime)
+        return self.last_temp, 0.
+    
+    def stats(self, eventtime):
+        logging.info("call HX71X.stats() of %s, eventtime: %.2f, temp:%.2f ", self.name, eventtime, self.last_temp)
+        return False, '%s: temp=%.1f' % (self.name, self.last_temp)
+
+    def setup_minmax(self, min_temp, max_temp):
+        self.min_temp = min_temp
+        self.max_temp = max_temp
+        return
 
 
 def load_config(config):
