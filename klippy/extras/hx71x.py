@@ -142,6 +142,8 @@ class HX71X:
         self.mcu = mcu.get_printer_mcu(self.printer, config.get('hx71x_mcu', 'mcu'))
         self.oid = self.mcu.create_oid()
         self._endstop = None
+        self._sample_cnt = 0
+        self._sample_tare = 0.0
 
         # Determine pin from config
         ppins = config.get_printer().lookup_object("pins")
@@ -209,6 +211,15 @@ class HX71X:
         response = bytearray(params['response'])
         w = int.from_bytes(response, byteorder='little', signed=True)
         self.weight = w * self.scale # weight scale
+
+        self._sample_cnt += 1
+        
+        if self._sample_cnt < 5 :
+            self._sample_tare = self.weight
+        else:
+            self.weight -= self._sample_tare
+
+        self.last_temp = self.weight
 
         logging.info("Senser:%s,  read hx711 @ %.3f , weight:%.2f", self.name, eventtime, self.weight)
 
