@@ -91,7 +91,8 @@ class CartKinematics:
             else:
                 self.home_axis(homing_state, axis, self.rails[axis])
     def _motor_off(self, print_time):
-        self.limits = [(1.0, -1.0)] * 3
+        # self.limits = [(1.0, -1.0)] * 3
+        self.limits = [(-100.0, 100.0)] * 3
     def _check_endstops(self, move):
         end_pos = move.end_pos
         for i in (0, 1, 2):
