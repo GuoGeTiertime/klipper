@@ -18,6 +18,7 @@ PID_PARAM_BASE = 255.
 class Heater:
     def __init__(self, config, sensor):
         self.printer = config.get_printer()
+        self.reactor = self.printer.get_reactor() #add by guoge 20231130.
         self.name = config.get_name().split()[-1]
         # Setup sensor
         self.sensor = sensor
@@ -77,6 +78,8 @@ class Heater:
         #              self.last_temp, self.last_temp_time, self.target_temp)
     def temperature_callback(self, read_time, temp):
         with self.lock:
+            last_time = self.last_temp_time;
+            curtime = self.reactor.monotonic()
             time_diff = read_time - self.last_temp_time
             self.last_temp = temp
             self.last_temp_time = read_time
@@ -84,6 +87,14 @@ class Heater:
             temp_diff = temp - self.smoothed_temp
             adj_time = min(time_diff * self.inv_smooth_time, 1.)
             self.smoothed_temp += temp_diff * adj_time
+            if self.smoothed_temp > 500 :
+                logging.info("Temp callbacke Error @ %.3f, heater: %s temp:%.3f/%.3f @ read time:%.3f - %.3f, timeDiff:%.2f, tempDiff:%.3f, too high, *** add by tiertime 231130", 
+                             curtime, self.name, self.smoothed_temp, temp, read_time, last_time, time_diff, temp_diff)
+                self.smoothed_temp = 500;
+            if self.smoothed_temp < -100 :
+                logging.info("Temp callbacke Error @% .3f, heater: %s temp:%.3f/%.3f @ read time:%.3f - %.3f, timeDiff:%.2f, tempDiff:%.3f, too low, *** add by tiertime 231130", 
+                             curtime, self.name, self.smoothed_temp, temp, read_time, last_time, time_diff, temp_diff)
+                self.smoothed_temp = -100
             self.can_extrude = (self.smoothed_temp >= self.min_extrude_temp)
         #logging.debug("temp: %.3f %f = %f", read_time, temp)
     # External commands
