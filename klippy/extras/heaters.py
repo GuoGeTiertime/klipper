@@ -88,11 +88,11 @@ class Heater:
             adj_time = min(time_diff * self.inv_smooth_time, 1.)
             self.smoothed_temp += temp_diff * adj_time
             if self.smoothed_temp > 500 :
-                logging.info("Temp callbacke Error @ %.3f, heater: %s temp:%.3f/%.3f @ read time:%.3f - %.3f, timeDiff:%.2f, tempDiff:%.3f, too high, *** add by tiertime 231130", 
+                logging.info(" *** Temp callbacke Error @ %.3f, heater: %s temp:%.3f/%.3f @ read time:%.3f - %.3f, timeDiff:%.2f, tempDiff:%.3f, too high", 
                              curtime, self.name, self.smoothed_temp, temp, read_time, last_time, time_diff, temp_diff)
                 self.smoothed_temp = 500;
             if self.smoothed_temp < -100 :
-                logging.info("Temp callbacke Error @% .3f, heater: %s temp:%.3f/%.3f @ read time:%.3f - %.3f, timeDiff:%.2f, tempDiff:%.3f, too low, *** add by tiertime 231130", 
+                logging.info(" *** Temp callbacke Error @% .3f, heater: %s temp:%.3f/%.3f @ read time:%.3f - %.3f, timeDiff:%.2f, tempDiff:%.3f, too low", 
                              curtime, self.name, self.smoothed_temp, temp, read_time, last_time, time_diff, temp_diff)
                 self.smoothed_temp = -100
             self.can_extrude = (self.smoothed_temp >= self.min_extrude_temp)

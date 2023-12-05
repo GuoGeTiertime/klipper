@@ -217,5 +217,9 @@ class SecondarySync(ClockSync):
         # Apply new values
         self.clock_adj = (adjusted_offset, adjusted_freq)
         self.last_sync_time = sync2_print_time
-        logging.info(" *** Sync clock by Second clock sync. print time: %.3f @ event time: %.3f, adj off: %.3f, freq: %.3f", print_time, eventtime, adjusted_offset, adjusted_freq)
+        logging.info("\n *** Sync clock by Second clock sync. print time: %.3f @ event time: %.3f, adj off: %.3f, freq: %.3f", print_time, eventtime, adjusted_offset, adjusted_freq)
+        if abs(adjusted_offset) > 0.005 :
+            logging.info("ser_time:%.3f, ser_clock:%.3f, ser_freq:%.3f", ser_time, ser_clock, ser_freq )
+            logging.info("est_main_clock:%.3f, est_print_time:%.3f, sync1_print_time:%.3f, sync2_print_time:%.3f", est_main_clock, est_print_time, sync1_print_time, sync2_print_time )
+            logging.info("sync2_main_clock:%.3f, sync2_sys_time:%.3f, sync1_clock:%.3f, sync2_clock:%.3f", sync2_main_clock, sync2_sys_time, sync1_clock, sync2_clock )
         return self.clock_adj

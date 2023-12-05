@@ -282,7 +282,7 @@ class ToolHead:
         fft = self.force_flush_time
         while 1:
             self.print_time = min(self.print_time + batch_time, next_print_time)
-            logging.info(" *** update movetime, new print time:%.3f, next_print_time:%.3f", self.print_time, next_print_time);
+            #logging.info(" *** update movetime, new print time:%.3f, next_print_time:%.3f", self.print_time, next_print_time);
 
             sg_flush_time = max(fft, self.print_time - kin_flush_delay)
             for sg in self.step_generators:
@@ -305,7 +305,7 @@ class ToolHead:
             self.print_time = min_print_time
             self.printer.send_event("toolhead:sync_print_time",
                                     curtime, est_print_time, self.print_time)
-            logging.info(" *** calc print time:%.3f, est:%.3f", self.print_time, est_print_time);
+            # logging.info(" *** calc print time:%.3f, est:%.3f", self.print_time, est_print_time);
     def _process_moves(self, moves):
         # Resync print_time if necessary
         if self.special_queuing_state:
@@ -494,6 +494,7 @@ class ToolHead:
         self.flush_step_generation()
     # Misc commands
     def stats(self, eventtime):
+        # self._calc_print_time()
         for m in self.all_mcus:
             m.check_active(self.print_time, eventtime)
         buffer_time = self.print_time - self.mcu.estimated_print_time(eventtime)
