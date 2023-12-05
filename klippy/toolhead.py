@@ -496,6 +496,7 @@ class ToolHead:
     def stats(self, eventtime):
         # self._calc_print_time()
         for m in self.all_mcus:
+            logging.info("\n --- check active mcu: %s", m.get_name())
             m.check_active(self.print_time, eventtime)
         buffer_time = self.print_time - self.mcu.estimated_print_time(eventtime)
         is_active = buffer_time > -60. or not self.special_queuing_state

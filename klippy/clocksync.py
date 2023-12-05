@@ -214,10 +214,16 @@ class SecondarySync(ClockSync):
         adjusted_freq = ((sync2_clock - sync1_clock)
                          / (sync2_print_time - sync1_print_time))
         adjusted_offset = sync1_print_time - sync1_clock / adjusted_freq
+
+        # add by guoge, avoid adjust vibration. 20231205
+        if abs(adjusted_offset) > 0.1 :
+            logging.info("\n *** Sync clock adjust too high, offset: %.3f freq:%.3f ", adjusted_offset, adjusted_freq)
+            adjusted_freq = self.mcu_freq + 1000 if adjusted_freq > self.mcu_freq else self.mcu_freq - 1000
+            adjusted_offset = 0.011 if adjusted_offset >0 else -0.011
         # Apply new values
         self.clock_adj = (adjusted_offset, adjusted_freq)
         self.last_sync_time = sync2_print_time
-        logging.info("\n *** Sync clock by Second clock sync. print time: %.3f @ event time: %.3f, adj off: %.3f, freq: %.3f", print_time, eventtime, adjusted_offset, adjusted_freq)
+        logging.info(" *** Sync clock by Second clock sync. print time: %.3f @ event time: %.3f, adj off: %.3f, freq: %.3f", print_time, eventtime, adjusted_offset, adjusted_freq)
         if abs(adjusted_offset) > 0.005 :
             logging.info("ser_time:%.3f, ser_clock:%.3f, ser_freq:%.3f", ser_time, ser_clock, ser_freq )
             logging.info("est_main_clock:%.3f, est_print_time:%.3f, sync1_print_time:%.3f, sync2_print_time:%.3f", est_main_clock, est_print_time, sync1_print_time, sync2_print_time )
