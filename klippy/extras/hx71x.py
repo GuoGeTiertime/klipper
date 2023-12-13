@@ -238,7 +238,7 @@ class HX71X:
         else:
             self.weight -= self._sample_tare
 
-        logging.info("Senser:%s,  read hx711 @ %.3f , weight:%.2f", self.name, eventtime, self.weight)
+        # logging.info("Senser:%s,  read hx711 @ %.3f , weight:%.2f", self.name, eventtime, self.weight)
 
         # use weight as temperature.
         self.last_temp = self.weight
