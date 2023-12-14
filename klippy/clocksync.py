@@ -213,8 +213,10 @@ class SecondarySync(ClockSync):
         #所以这种估算频率和时间偏移的算法对频率有较大误差时会造成无法同步.
         sync1_clock = self.print_time_to_clock(sync1_print_time) #int((print_time - adjusted_offset) * adjusted_freq)
         sync2_clock = self.get_clock(sync2_sys_time) #int(clock + (eventtime - sample_time) * freq) (clock_est的时钟,频率,估算值,不是标准值)
-        adjusted_freq = ((sync2_clock - sync1_clock)
-                         / (sync2_print_time - sync1_print_time))
+        # adjusted_freq = ((sync2_clock - sync1_clock)
+        #                  / (sync2_print_time - sync1_print_time))
+        # adjusted_offset = sync1_print_time - sync1_clock / adjusted_freq
+        adjusted_freq = sync2_clock / sync2_print_time
         adjusted_offset = sync1_print_time - sync1_clock / adjusted_freq
 
         # add by guoge, avoid adjust vibration. 20231205. adjust offset can't less 0.
