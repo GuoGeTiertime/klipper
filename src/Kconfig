@@ -34,6 +34,16 @@ choice
         bool "Host simulator"
 endchoice
 
+choice
+    prompt "MCU function"
+    config MACH_MAINBOARD
+        bool "Main Board"
+    config MACH_EXTRUDER
+        bool "Extruder"
+    config MACH_BED
+        bool "Bed"
+endchoice
+
 source "src/avr/Kconfig"
 source "src/atsam/Kconfig"
 source "src/atsamd/Kconfig"
@@ -187,3 +197,9 @@ config INLINE_STEPPER_HACK
     bool
     depends on HAVE_GPIO
     default y
+
+config MCUFUNC
+    string
+    default "MainBoard"   if MACH_MAINBOARD
+    default "Extruder"    if MACH_EXTRUDER
+    default "Bed"         if MACH_BED
