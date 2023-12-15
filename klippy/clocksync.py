@@ -221,6 +221,18 @@ class SecondarySync(ClockSync):
         sync2_clock = self.get_clock(sync2_sys_time) #int(clock + (eventtime - sample_time) * freq) (clock_est的时钟,频率,估算值,不是标准值)
         adjusted_freq = ((sync2_clock - sync1_clock)
                          / (sync2_print_time - sync1_print_time))
+        
+        # 防止校准频率离原有频率相差太大.设一个范围.
+        maxFreqErr = self.mcu_freq * 0.00005;
+        sample_time, clock, freq = self.clock_est
+        # adjusted_freq = limit(adjusted_freq, freq - maxFreqErr, freq + maxFreqErr)
+        maxFreq = freq + maxFreqErr
+        minFreq = freq - maxFreqErr
+        if adjusted_freq > maxFreq :
+            adjusted_freq = maxFreq
+        elif adjusted_freq < minFreq :
+            adjusted_freq = minFreq
+            
         # adjusted_freq = sync2_clock / sync2_print_time
         adjusted_offset = sync1_print_time - sync1_clock / adjusted_freq
 
@@ -239,7 +251,6 @@ class SecondarySync(ClockSync):
             logging.info("ser_time:%.3f, ser_clock:%.3f, ser_freq:%.3f", ser_time, ser_clock, ser_freq )
             logging.info("est_main_clock:%.3f, est_print_time:%.3f, sync1_print_time:%.3f, sync2_print_time:%.3f", est_main_clock, est_print_time, sync1_print_time, sync2_print_time )
             logging.info("sync2_main_clock:%.3f, sync2_sys_time:%.3f, sync1_clock:%.3f, sync2_clock:%.3f", sync2_main_clock, sync2_sys_time, sync1_clock, sync2_clock )
-            sample_time, clock, freq = self.clock_est
             logging.info("child mcu - sample_time:%.3f, clock:%.3f, freq:%.3f", sample_time, clock, freq )
 
         return self.clock_adj
