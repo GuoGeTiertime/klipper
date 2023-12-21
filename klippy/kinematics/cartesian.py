@@ -48,8 +48,7 @@ class CartKinematics:
                                               above=0., maxval=max_velocity)
         self.max_z_accel = config.getfloat('max_z_accel', max_accel,
                                            above=0., maxval=max_accel)
-        # self.limits = [(1.0, -1.0)] * 3
-        self.limits = [(-100.0, 100.0)] * 3
+        self.limits = [(1.0, -1.0)] * 3
     def get_steppers(self):
         return [s for rail in self.rails for s in rail.get_steppers()]
     def calc_position(self, stepper_positions):
@@ -91,8 +90,7 @@ class CartKinematics:
             else:
                 self.home_axis(homing_state, axis, self.rails[axis])
     def _motor_off(self, print_time):
-        # self.limits = [(1.0, -1.0)] * 3
-        self.limits = [(-100.0, 100.0)] * 3
+        self.limits = [(1.0, -1.0)] * 3
     def _check_endstops(self, move):
         end_pos = move.end_pos
         for i in (0, 1, 2):
