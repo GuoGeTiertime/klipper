@@ -154,7 +154,6 @@ class HX71X:
         # register chip for add endstop by setup_pin
         ppins.register_chip(self.name, self)
 
-
         self.mcu.add_config_cmd(
             "config_hx71x oid=%d  sck_pin=%s dout_pin=%s"
             % (self.oid, sck_params['pin'], dout_params['pin']))
@@ -209,36 +208,39 @@ class HX71X:
         #     "read_hx71x oid=%c read_len=%u",
         #     "read_hx71x_response oid=%c response=%*s", oid=self.oid,
         #     cq=self.cmd_queue)
-        ticks = int(self.report_time * self.mcu._mcu_freq)
+        ticks = self.mcu.seconds_to_clock(self.report_time)
         self.mcu.add_config_cmd( "query_hx71x oid=%d ticks=%d times=%d pulse_cnt=%d" % 
             (self.oid, ticks, self._sample_times, self.pulse_cnt))
         self.mcu.register_response(self._handle_hx71x_state, "hx71x_state", self.oid)
 
     def _handle_hx71x_state(self, params):
         value = params['value']
-        cnt = params['cnt']
-        
+        # self._sample_cnt += 1
+        self._sample_cnt = params['cnt']
+        # get hx71x sample time.
+        next_clock = self.mcu.clock32_to_clock64(params['next_clock'])
+        last_read_time = self.mcu.clock_to_print_time(next_clock)
+
+        if value == 0 :
+            logging.info("  *** Error Senser:%s(oid:%d) can't read hx711 @ %.3f, cnt:%d, value:%d", self.name, self.oid, last_read_time, self._sample_cnt, value)
+            return
+                
         self.weight = value * self.scale # weight scale
 
-        self._sample_cnt = cnt
         
         # 头五次作去皮处理
         if self._sample_cnt < 5 :
             self._sample_tare = self.weight
-        else:
-            self.weight -= self._sample_tare
+            
+        self.weight -= self._sample_tare
 
         # use weight as temperature.
         self.last_temp = self.weight
         self.measured_min = min(self.measured_min, self.last_temp)
         self.measured_max = max(self.measured_max, self.last_temp)
 
-        
-        # get hx71x sample time.
-        next_clock = self.mcu.clock32_to_clock64(params['next_clock'])
-        last_read_time = self.mcu.clock_to_print_time(next_clock)
-
-        logging.info("Senser:%s,  read hx711 @ %.3f , weight:%.2f", self.name, last_read_time, self.weight)
+    
+        logging.info("Senser:%s(oid:%d) read hx711 @ %.3f , weight:%.2f, cnt:%d, tare:%.2f, value:%d", self.name, self.oid, last_read_time, self.weight, self._sample_cnt, self._sample_tare, value)
 
         if self._callback is not None:
             self._callback(last_read_time, self.last_temp) #callback to update the temperature of heaters.
