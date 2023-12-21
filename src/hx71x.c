@@ -126,7 +126,7 @@ hx71x_udelay(uint32_t usecs)
 //read data form HX711
 long HX711_Read(struct hx71x_s *dev)
 {
-    //gpio_out_reset(dev->sck_out, 0);
+    // gpio_out_reset(dev->sck_out, 0);
     gpio_out_write(dev->sck_out, 0);
     hx71x_udelay(1);
 
@@ -171,6 +171,9 @@ long HX711_Read(struct hx71x_s *dev)
         hx71x_udelay(1);
     }
 
+    //完成采样,计数+1.
+    dev->sample_cnt++;
+
     count ^= 0x800000;
     return count;
 }
@@ -185,9 +188,6 @@ void HX711_Get_WeightTare(struct hx71x_s* dev)
 long HX711_Get_Weight(struct hx71x_s* dev)
 {
     long value = HX711_Read(dev);
-
-//    if( dev->sample_cnt++<2 ) //reset weight tare at 1/2 times.
-//        dev->weight_tare = value;
 
     return value - dev->weight_tare;
 }
