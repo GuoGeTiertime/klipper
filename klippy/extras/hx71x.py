@@ -143,6 +143,7 @@ class HX71X:
         self.oid = self.mcu.create_oid()
         self._endstop = None
         self._sample_cnt = 0
+        self._sample_times = 100000
         self._sample_tare = 0.0
 
         # Determine pin from config
@@ -160,6 +161,7 @@ class HX71X:
 
         #update period
         self.report_time = config.getfloat('hx71x_report_time', 1, minval=0.02)
+        self.pulse_cnt = 25
 
         #unit scale
         self.scale = config.getfloat('hx71x_scale', 0.001)
@@ -170,7 +172,7 @@ class HX71X:
         self.endstop_report_time = config.getfloat('endstop_report_time', 0.05, minval=0.02)
 
         self.weight = 0.0
-        self.sample_timer = self.reactor.register_timer(self._sample_hx71x)
+        # self.sample_timer = self.reactor.register_timer(self._sample_hx71x)
         self.printer.add_object("hx71x " + self.name, self)
         self.printer.register_event_handler("klippy:connect", self.handle_connect)
 
@@ -199,17 +201,55 @@ class HX71X:
         self._callback = None
 
     def handle_connect(self):
-        self.reactor.update_timer(self.sample_timer, self.reactor.NOW)
+        # self.reactor.update_timer(self.sample_timer, self.reactor.NOW)
         return
 
     def build_config(self):
-        self.read_hx71x_cmd = self.mcu.lookup_query_command(
-            "read_hx71x oid=%c read_len=%u",
-            "read_hx71x_response oid=%c response=%*s", oid=self.oid,
-            cq=self.cmd_queue)
+        # self.read_hx71x_cmd = self.mcu.lookup_query_command(
+        #     "read_hx71x oid=%c read_len=%u",
+        #     "read_hx71x_response oid=%c response=%*s", oid=self.oid,
+        #     cq=self.cmd_queue)
+        ticks = int(self.report_time * self.mcu._mcu_freq)
+        self.mcu.add_config_cmd( "query_hx71x oid=%d ticks=%d times=%d pulse_cnt=%d" % 
+            (self.oid, ticks, self._sample_times, self.pulse_cnt))
+        self.mcu.register_response(self._handle_hx71x_state, "hx71x_state", self.oid)
 
-    def read_hx71x(self, read_len):
-        return self.read_hx71x_cmd.send([self.oid, read_len])
+    def _handle_hx71x_state(self, params):
+        value = params['value']
+        cnt = params['cnt']
+        
+        self.weight = value * self.scale # weight scale
+
+        self._sample_cnt = cnt
+        
+        # 头五次作去皮处理
+        if self._sample_cnt < 5 :
+            self._sample_tare = self.weight
+        else:
+            self.weight -= self._sample_tare
+
+        # use weight as temperature.
+        self.last_temp = self.weight
+        self.measured_min = min(self.measured_min, self.last_temp)
+        self.measured_max = max(self.measured_max, self.last_temp)
+
+        
+        # get hx71x sample time.
+        next_clock = self.mcu.clock32_to_clock64(params['next_clock'])
+        last_read_time = self.mcu.clock_to_print_time(next_clock)
+
+        logging.info("Senser:%s,  read hx711 @ %.3f , weight:%.2f", self.name, last_read_time, self.weight)
+
+        if self._callback is not None:
+            self._callback(last_read_time, self.last_temp) #callback to update the temperature of heaters.
+
+        # timer interval is short when homing
+        if (self._endstop is not None) and self._endstop.bHoming :
+            if self.weight > (self.endstop_base + self.endstop_threshold) :
+                self._endstop.trigger(last_read_time)
+
+    # def read_hx71x(self, read_len):
+    #     return self.read_hx71x_cmd.send([self.oid, read_len])
 
     def setup_callback(self, cb):
         self._callback = cb
@@ -224,34 +264,34 @@ class HX71X:
         self.reactor.update_timer(self.sample_timer, self.reactor.NOW)
         return
 
-    def _sample_hx71x(self, eventtime):
-        params = self.read_hx71x(4)
+    # def _sample_hx71x(self, eventtime):
+    #     params = self.read_hx71x(4)
 
-        response = bytearray(params['response'])
-        w = int.from_bytes(response, byteorder='little', signed=True)
-        self.weight = w * self.scale # weight scale
+    #     response = bytearray(params['response'])
+    #     w = int.from_bytes(response, byteorder='little', signed=True)
+    #     self.weight = w * self.scale # weight scale
 
-        self._sample_cnt += 1
+    #     self._sample_cnt += 1
         
-        if self._sample_cnt < 5 :
-            self._sample_tare = self.weight
-        else:
-            self.weight -= self._sample_tare
+    #     if self._sample_cnt < 5 :
+    #         self._sample_tare = self.weight
+    #     else:
+    #         self.weight -= self._sample_tare
 
-        # logging.info("Senser:%s,  read hx711 @ %.3f , weight:%.2f", self.name, eventtime, self.weight)
+    #     # logging.info("Senser:%s,  read hx711 @ %.3f , weight:%.2f", self.name, eventtime, self.weight)
 
-        # use weight as temperature.
-        self.last_temp = self.weight
-        if self._callback is not None:
-            self._callback(eventtime, self.last_temp) #callback to update the temperature of heaters.
+    #     # use weight as temperature.
+    #     self.last_temp = self.weight
+    #     if self._callback is not None:
+    #         self._callback(eventtime, self.last_temp) #callback to update the temperature of heaters.
 
-        # timer interval is short when homing
-        if (self._endstop is not None) and self._endstop.bHoming :
-            if self.weight > (self.endstop_base + self.endstop_threshold) :
-                self._endstop.trigger(eventtime)
-            return eventtime + self.endstop_report_time
-        else :
-            return eventtime + self.report_time
+    #     # timer interval is short when homing
+    #     if (self._endstop is not None) and self._endstop.bHoming :
+    #         if self.weight > (self.endstop_base + self.endstop_threshold) :
+    #             self._endstop.trigger(eventtime)
+    #         return eventtime + self.endstop_report_time
+    #     else :
+    #         return eventtime + self.report_time
 
     def get_status(self, eventtime):
         return {
