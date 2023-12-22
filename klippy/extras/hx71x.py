@@ -144,6 +144,7 @@ class HX71X:
         self.oid = self.mcu.create_oid()
         self._endstop = None
         self._sample_cnt = 0
+        self._sample_cnt_total = 0
         self._sample_times = 1000000000
         self._sample_tare = 0.0
         self._error_cnt = 0
@@ -231,9 +232,13 @@ class HX71X:
             return
                 
         self.weight = value * self.scale # weight scale
+        
+        self._sample_cnt_total += 1
 
         # 头五次作去皮处理
-        if self._sample_cnt < 5 :
+        # if self._sample_cnt < 5 :
+        #     self._sample_tare = self.weight
+        if self._sample_cnt_total < 5 :
             self._sample_tare = self.weight
             
         self.weight -= self._sample_tare
