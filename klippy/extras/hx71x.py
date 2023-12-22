@@ -144,8 +144,9 @@ class HX71X:
         self.oid = self.mcu.create_oid()
         self._endstop = None
         self._sample_cnt = 0
-        self._sample_times = 100000
+        self._sample_times = 1000000000
         self._sample_tare = 0.0
+        self._error_cnt = 0
 
         # Determine pin from config
         ppins = config.get_printer().lookup_object("pins")
@@ -223,12 +224,14 @@ class HX71X:
         last_read_time = self.mcu.clock_to_print_time(next_clock)
 
         if value == 0 :
-            logging.info("  *** Error Senser:%s(oid:%d) can't read hx711 @ %.3f, cnt:%d, value:%d", self.name, self.oid, last_read_time, self._sample_cnt, value)
+            self._error_cnt += 1
+            if  self._error_cnt>100 and (self._error_cnt % 16) :
+                return
+            logging.info("  *** Error Senser:%s(oid:%d) can't read hx711 @ %.3f, cnt:%d, value:%d, errcnt:%d", self.name, self.oid, last_read_time, self._sample_cnt, value, self._error_cnt)
             return
                 
         self.weight = value * self.scale # weight scale
 
-        
         # 头五次作去皮处理
         if self._sample_cnt < 5 :
             self._sample_tare = self.weight
@@ -240,8 +243,9 @@ class HX71X:
         self.measured_min = min(self.measured_min, self.last_temp)
         self.measured_max = max(self.measured_max, self.last_temp)
 
-    
-        logging.info("Senser:%s(oid:%d) read hx711 @ %.3f , weight:%.2f, cnt:%d, tare:%.2f, value:%d", self.name, self.oid, last_read_time, self.weight, self._sample_cnt, self._sample_tare, value)
+
+        if  self._sample_cnt<1000 or (self._sample_cnt % 32)==0 :
+            logging.info("Senser:%s(oid:%d) read hx711 @ %.3f , weight:%.2f, cnt:%d, tare:%.2f, value:%d", self.name, self.oid, last_read_time, self.weight, self._sample_cnt, self._sample_tare, value)
 
         if self._callback is not None:
             self._callback(last_read_time, self.last_temp) #callback to update the temperature of heaters.
@@ -327,7 +331,7 @@ class HX71X:
         return self.last_temp, 0.
     
     def stats(self, eventtime):
-        logging.info("call HX71X.stats() of %s, eventtime: %.2f, temp:%.2f ", self.name, eventtime, self.last_temp)
+        # logging.info("call HX71X.stats() of %s, eventtime: %.2f, temp:%.2f ", self.name, eventtime, self.last_temp)
         return False, '%s: temp=%.1f' % (self.name, self.last_temp)
 
     def setup_minmax(self, min_temp, max_temp):
