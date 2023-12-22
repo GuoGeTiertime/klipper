@@ -100,6 +100,7 @@ class HX71X_endstop:
         # # 注销定时器,停止更新限位状态
         # self._reactor.unregister_timer(self._sample_timer)
         self.bHoming = False
+        self._hx71x.updateNow() #update sensor weight NOW! stop endstop mode.
 
         etrsync = self._trsyncs[0]
         etrsync.set_home_end_time(home_end_time)
@@ -263,7 +264,15 @@ class HX71X:
             return self.report_time
 
     def updateNow(self):
-        self.reactor.update_timer(self.sample_timer, self.reactor.NOW)
+        # self.reactor.update_timer(self.sample_timer, self.reactor.NOW)
+        ticks = self.mcu.seconds_to_clock(self.report_time)
+        if (self._endstop is not None) and self._endstop.bHoming : #在回零期间.
+            ticks = self.mcu.seconds_to_clock(self.endstop_report_time)
+            logging.info("Start update hx71x at endstop mode, ticks:%d, time:%.3f", ticks, self.endstop_report_time)
+
+        # 发送配置命令. 不能用add_config_cmd
+        self.mcu._serial.send("query_hx71x oid=%d ticks=%d times=%d pulse_cnt=%d" % 
+            (self.oid, ticks, self._sample_times, self.pulse_cnt))
         return
 
     # def _sample_hx71x(self, eventtime):
