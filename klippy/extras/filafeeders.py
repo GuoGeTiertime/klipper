@@ -23,7 +23,6 @@ class Feeder: #Heater:
         # Setup distance sensor
         self.sensor = sensor
         self.hold_dis = config.getfloat('hold_dis', minval=-1000)
-        self.feed_len = config.getfloat('feed_len', minval=0.1)
         self.min_dis = config.getfloat('min_dis', minval=-1000)
         self.max_dis = config.getfloat('max_dis', above=self.min_dis)
         self.sensor.setup_minmax(self.min_dis, self.max_dis)
@@ -36,6 +35,7 @@ class Feeder: #Heater:
         # is_fileoutput = (self.printer.get_start_args().get('debugoutput')
         #                  is not None)
         # self.can_extrude = self.min_extrude_temp <= 0. or is_fileoutput
+        self.min_feed_len = config.getfloat('min_feed_len', minval=0.1) #min feed length. not feed if len < min_feed_len.
         self.max_speed = config.getfloat('max_speed', 1., above=0., maxval=1000.)
         self.smooth_time = config.getfloat('smooth_time', 1., above=0.)
         self.inv_smooth_time = 1. / self.smooth_time
@@ -52,6 +52,7 @@ class Feeder: #Heater:
         self.control = algo(self, config)
         # Setup output feeder motor
         self.feeder_motor = config.get('feeder_motor')
+        self.stepper = self.printer.lookup_object(self.feeder_motor)
         # ppins = self.printer.lookup_object('pins')
         # self.mcu_pwm = ppins.setup_pin('pwm', feeder_pin)
         # pwm_cycle_time = config.getfloat('pwm_cycle_time', 0.100, above=0.,
@@ -68,7 +69,7 @@ class Feeder: #Heater:
     def set_feed(self, read_time, value): #set feed len with speed. value is the length to feed.
         if self.target_dis <= 0.:
             value = 0.
-        if (read_time < self.next_feed_time or value < self.feed_len): 
+        if (read_time < self.next_feed_time or value < self.min_feed_len): 
             # not reach the next feed time or the feed len is too short.
             return
         self.next_feed_time = read_time + self.feed_delay #set the next feed time as now + feed_delay(sensor report time).
@@ -76,8 +77,17 @@ class Feeder: #Heater:
         speed = self.last_feed_len / self.feed_delay #calculate the speed.
         if( speed > self.max_speed ):
             speed = self.max_speed
+            self.last_feed_len = speed * self.feed_delay
         self.last_feed_speed = speed
-        logging.debug("Feeder%.3f feed:%.3fmm @ %.3f mm/s, time:%.3f", self.name, self.last_feed_len, self.last_feed_speed, read_time)
+        logging.info("Feeder%s feed:%.3fmm / %.3fmm/s, @time:%.3f", self.name, self.last_feed_len, self.last_feed_speed, read_time)
+        # execute gcode command to feed filament.
+        gcode = self.printer.lookup_object("gcode")
+        speed = speed * 60. #convert to mm/min.
+        pos = self.stepper.get_position() + self.last_feed_len
+        cmd = "MANUAL_STEPPER STEPPER=%s ENABLE=1 SPEED=%d ACCEL=1000 MOVE=%.3f " % (self.feeder_motor, speed, pos)
+        gcode.do_command(cmd)
+        logging.info("run filament feed gcode: %s", cmd)
+        
     def distance_callback(self, read_time, distance):
         with self.lock:
             curtime = self.reactor.monotonic()
@@ -138,9 +148,9 @@ class Feeder: #Heater:
     def get_status(self, eventtime):
         with self.lock:
             target_dis = self.target_dis
-            smoothed_temp = self.smoothed_temp
+            smoothed_dis = self.smoothed_dis
             last_pwm_value = self.last_pwm_value
-        return {'temperature': round(smoothed_temp, 2), 'target': target_dis,
+        return {'distance': round(smoothed_dis, 2), 'target': target_dis,
                 'power': last_pwm_value}
     cmd_SET_FEEDER_DISTANCE_help = "Sets a feeder hold distance"
     def cmd_SET_FEEDER_DISTANCE(self, gcmd):
@@ -152,13 +162,11 @@ class Feeder: #Heater:
 # Bang-bang control algo
 ######################################################################
 # send filament with max speed when the distance is below target_dis-max_delta.
-# seed length is mini(max_speed * feed_delay, feeder.feed_len)
+# feed length is min_feed_len.
 class ControlBangBang:
     def __init__(self, feeder, config):
         self.feeder = feeder
-        self.feed_max_len = feeder.get_max_speed() * feeder.get_feed_delay()
-        if(  feed_max_len > feeder.feed_len ):
-            feed_max_len = feeder.feed_len
+        self.feed_len = feeder.min_feed_len
         self.max_delta = config.getfloat('max_delta', 2.0, above=0.) #stop feeding when the distance over target + max_delta.
         self.feeding = False
     def distance_update(self, read_time, dis, target_dis):
@@ -167,7 +175,7 @@ class ControlBangBang:
         elif not self.feeding and dis <= target_dis-self.max_delta:
             self.feeding = True
         if self.feeding: #feed filament with max speed. time is the sensor report time.
-            self.feeder.set_feed(read_time, self.feed_max_len)
+            self.feeder.set_feed(read_time, self.feed_len)
         else:
             self.feeder.set_feed(read_time, 0.)
     def check_busy(self, eventtime, smoothed_dis, target_dis):
@@ -184,47 +192,47 @@ PID_SETTLE_SLOPE = .1
 class ControlPID:
     def __init__(self, feeder, config):
         self.feeder = feeder
-        self.feeder_max_power = feeder.get_max_power()
+        self.feed_max_len = feeder.get_max_speed() * feeder.get_feed_delay(),
         self.Kp = config.getfloat('pid_Kp') / PID_PARAM_BASE
         self.Ki = config.getfloat('pid_Ki') / PID_PARAM_BASE
         self.Kd = config.getfloat('pid_Kd') / PID_PARAM_BASE
         self.min_deriv_time = feeder.get_smooth_time()
-        self.temp_integ_max = 0.
+        self.dis_integ_max = 0.
         if self.Ki:
-            self.temp_integ_max = self.feeder_max_power / self.Ki
-        self.prev_temp = AMBIENT_TEMP
-        self.prev_temp_time = 0.
-        self.prev_temp_deriv = 0.
-        self.prev_temp_integ = 0.
-    def distance_update(self, read_time, temp, target_temp):
-        time_diff = read_time - self.prev_temp_time
+            self.dis_integ_max = self.feed_max_len / self.Ki
+        self.prev_dis = 0
+        self.prev_dis_time = 0.
+        self.prev_dis_deriv = 0.
+        self.prev_dis_integ = 0.
+    def distance_update(self, read_time, dis, target_dis):
+        time_diff = read_time - self.prev_dis_time
         # Calculate change of temperature
-        temp_diff = temp - self.prev_temp
+        dis_diff = dis - self.prev_dis
         if time_diff >= self.min_deriv_time:
-            temp_deriv = temp_diff / time_diff
+            dis_deriv = dis_diff / time_diff
         else:
-            temp_deriv = (self.prev_temp_deriv * (self.min_deriv_time-time_diff)
-                          + temp_diff) / self.min_deriv_time
+            dis_deriv = (self.prev_dis_deriv * (self.min_deriv_time-time_diff)
+                         + dis_diff) / self.min_deriv_time
         # Calculate accumulated temperature "error"
-        temp_err = target_temp - temp
-        temp_integ = self.prev_temp_integ + temp_err * time_diff
-        temp_integ = max(0., min(self.temp_integ_max, temp_integ))
+        dis_err = target_dis - dis
+        dis_integ = self.prev_dis_integ + dis_err * time_diff
+        dis_integ = max(0., min(self.dis_integ_max, dis_integ))
         # Calculate output
-        co = self.Kp*temp_err + self.Ki*temp_integ - self.Kd*temp_deriv
+        co = self.Kp*dis_err + self.Ki*dis_integ - self.Kd*dis_deriv
         #logging.debug("pid: %f@%.3f -> diff=%f deriv=%f err=%f integ=%f co=%d",
-        #    temp, read_time, temp_diff, temp_deriv, temp_err, temp_integ, co)
-        bounded_co = max(0., min(self.feeder_max_power, co))
+        #    dis, read_time, dis_diff, dis_deriv, dis_err, dis_integ, co)
+        bounded_co = max(0., min(self.feed_max_len, co))
         self.feeder.set_speed(read_time, bounded_co)
         # Store state for next measurement
-        self.prev_temp = temp
-        self.prev_temp_time = read_time
-        self.prev_temp_deriv = temp_deriv
+        self.prev_dis = dis
+        self.prev_dis_time = read_time
+        self.prev_dis_deriv = dis_deriv
         if co == bounded_co:
-            self.prev_temp_integ = temp_integ
-    def check_busy(self, eventtime, smoothed_temp, target_temp):
-        temp_diff = target_temp - smoothed_temp
-        return (abs(temp_diff) > PID_SETTLE_DELTA )
-                # or abs(self.prev_temp_deriv) > PID_SETTLE_SLOPE)
+            self.prev_dis_integ = dis_integ
+    def check_busy(self, eventtime, smoothed_dis, target_dis):
+        dis_diff = target_dis - smoothed_dis
+        return (abs(dis_diff) > PID_SETTLE_DELTA )
+                # or abs(self.prev_dis_deriv) > PID_SETTLE_SLOPE)
 
 
 ######################################################################
@@ -248,7 +256,7 @@ class FilaFeeders: #PrinterHeaters:
         gcode = self.printer.lookup_object('gcode')
         gcode.register_command("TURN_OFF_HEATERS", self.cmd_TURN_OFF_HEATERS,
                                desc=self.cmd_TURN_OFF_HEATERS_help)
-        gcode.register_command("M105", self.cmd_M105, when_not_ready=True)
+        gcode.register_command("M135", self.cmd_M135, when_not_ready=True)
         gcode.register_command("TEMPERATURE_WAIT", self.cmd_TEMPERATURE_WAIT,
                                desc=self.cmd_TEMPERATURE_WAIT_help)
     def load_config(self, config):
@@ -268,7 +276,7 @@ class FilaFeeders: #PrinterHeaters:
     def setup_feeder(self, config, gcode_id=None):
         feeder_name = config.get_name().split()[-1]
         if feeder_name in self.feeders:
-            raise config.error("Heater %s already registered" % (feeder_name,))
+            raise config.error("Feeder %s already registered" % (feeder_name,))
         # Setup sensor
         sensor = self.setup_sensor(config)
         # Create feeder
@@ -311,31 +319,31 @@ class FilaFeeders: #PrinterHeaters:
                 'available_monitors': self.available_monitors}
     def turn_off_all_feeders(self, print_time=0.):
         for feeder in self.feeders.values():
-            feeder.set_temp(0.)
+            feeder.set_dis(0.)
     cmd_TURN_OFF_HEATERS_help = "Turn off all feeders"
     def cmd_TURN_OFF_HEATERS(self, gcmd):
         self.turn_off_all_feeders()
     # G-Code M105 temperature reporting
     def _handle_ready(self):
         self.has_started = True
-    def _get_temp(self, eventtime):
+    def _get_dis(self, eventtime):
         # Tn:XXX /YYY B:XXX /YYY
         out = []
         if self.has_started:
             for gcode_id, sensor in sorted(self.gcode_id_to_sensor.items()):
                 cur, target = sensor.get_temp(eventtime)
-                out.append("%s:%.1f /%.1f" % (gcode_id, cur, target))
+                out.append("Feeder %s:%.1f /%.1f" % (gcode_id, cur, target))
         if not out:
             return "T:0"
         return " ".join(out)
-    def cmd_M105(self, gcmd):
-        # Get Extruder Temperature
+    def cmd_M135(self, gcmd):
+        # Get feeders's sensor distance
         reactor = self.printer.get_reactor()
-        msg = self._get_temp(reactor.monotonic())
+        msg = self._get_dis(reactor.monotonic())
         did_ack = gcmd.ack(msg)
         if not did_ack:
             gcmd.respond_raw(msg)
-    def _wait_for_temperature(self, feeder):
+    def _wait_for_distance(self, feeder):
         # Helper to wait on feeder.check_busy() and report M105 temperatures
         if self.printer.get_start_args().get('debugoutput') is not None:
             return
@@ -345,16 +353,16 @@ class FilaFeeders: #PrinterHeaters:
         eventtime = reactor.monotonic()
         while not self.printer.is_shutdown() and feeder.check_busy(eventtime):
             print_time = toolhead.get_last_move_time()
-            gcode.respond_raw(self._get_temp(eventtime))
+            gcode.respond_raw(self._get_dis(eventtime))
             eventtime = reactor.pause(eventtime + 1.)
-    def set_temperature(self, feeder, temp, wait=False):
+    def set_distance(self, feeder, dis, wait=False):
         toolhead = self.printer.lookup_object('toolhead')
         toolhead.register_lookahead_callback((lambda pt: None))
-        feeder.set_temp(temp)
-        if wait and temp:
-            self._wait_for_temperature(feeder)
-    cmd_TEMPERATURE_WAIT_help = "Wait for a temperature on a sensor"
-    def cmd_TEMPERATURE_WAIT(self, gcmd):
+        feeder.set_distance(dis)
+        if wait and dis:
+            self._wait_for_distance(feeder)
+    cmd_DISTANCE_WAIT_help = "Wait for a distance on a sensor"
+    def cmd_DISTANCE_WAIT(self, gcmd):  #sensor is equal to feeder
         sensor_name = gcmd.get('SENSOR')
         if sensor_name not in self.available_sensors:
             raise gcmd.error("Unknown sensor '%s'" % (sensor_name,))
@@ -362,7 +370,7 @@ class FilaFeeders: #PrinterHeaters:
         max_dis = gcmd.get_float('MAXIMUM', float('inf'), above=min_dis)
         if min_dis == float('-inf') and max_dis == float('inf'):
             raise gcmd.error(
-                "Error on 'TEMPERATURE_WAIT': missing MINIMUM or MAXIMUM.")
+                "Error on 'DISTANCE_WAIT': missing MINIMUM or MAXIMUM.")
         if self.printer.get_start_args().get('debugoutput') is not None:
             return
         if sensor_name in self.feeders:
@@ -373,8 +381,8 @@ class FilaFeeders: #PrinterHeaters:
         reactor = self.printer.get_reactor()
         eventtime = reactor.monotonic()
         while not self.printer.is_shutdown():
-            temp, target = sensor.get_temp(eventtime)
-            if temp >= min_dis and temp <= max_dis:
+            dis, target = sensor.get_distance(eventtime)
+            if dis >= min_dis and dis <= max_dis:
                 return
             print_time = toolhead.get_last_move_time()
             gcmd.respond_raw(self._get_temp(eventtime))
