@@ -13,7 +13,7 @@ import os, logging, threading
 # KELVIN_TO_CELSIUS = -273.15
 # MAX_HEAT_TIME = 5.0
 # AMBIENT_TEMP = 25.
-# PID_PARAM_BASE = 255.
+PID_PARAM_BASE = 255.
 
 class Feeder: #Heater:
     def __init__(self, config, sensor):
@@ -22,6 +22,8 @@ class Feeder: #Heater:
         self.name = config.get_name().split()[-1]
         # Setup distance sensor
         self.sensor = sensor
+        self.hold_dis = config.getfloat('hold_dis', minval=-1000)
+        self.feed_len = config.getfloat('feed_len', minval=0.1)
         self.min_dis = config.getfloat('min_dis', minval=-1000)
         self.max_dis = config.getfloat('max_dis', above=self.min_dis)
         self.sensor.setup_minmax(self.min_dis, self.max_dis)
@@ -42,13 +44,14 @@ class Feeder: #Heater:
         self.last_dis_time = 0.
         # feed caching
         self.next_feed_time = 0.
-        self.last_feed_speed = 0.
+        self.last_feed_len = 0.
+        self.last_feed_speed = 1.
         # Setup control algorithm sub-class
         algos = {'watermark': ControlBangBang, 'pid': ControlPID}
         algo = config.getchoice('control', algos)
         self.control = algo(self, config)
         # Setup output feeder motor
-        feeder_motor = config.get('feeder_motor')
+        self.feeder_motor = config.get('feeder_motor')
         # ppins = self.printer.lookup_object('pins')
         # self.mcu_pwm = ppins.setup_pin('pwm', feeder_pin)
         # pwm_cycle_time = config.getfloat('pwm_cycle_time', 0.100, above=0.,
@@ -62,118 +65,113 @@ class Feeder: #Heater:
         gcode.register_mux_command("SET_FEEDER_DISTANCE", "FEEDER",
                                    self.name, self.cmd_SET_FEEDER_DISTANCE,
                                    desc=self.cmd_SET_FEEDER_DISTANCE_help)
-    def set_pwm(self, read_time, value):
-        if self.target_temp <= 0.:
+    def set_feed(self, read_time, value): #set feed len with speed. value is the length to feed.
+        if self.target_dis <= 0.:
             value = 0.
-        if ((read_time < self.next_pwm_time or not self.last_pwm_value)
-            and abs(value - self.last_pwm_value) < 0.05):
-            # No significant change in value - can suppress update
+        if (read_time < self.next_feed_time or value < self.feed_len): 
+            # not reach the next feed time or the feed len is too short.
             return
-        pwm_time = read_time + self.feed_delay
-        self.next_pwm_time = pwm_time + 0.75 * MAX_HEAT_TIME
-        self.last_pwm_value = value
-        self.mcu_pwm.set_pwm(pwm_time, value)
-        #logging.debug("%s: pwm=%.3f@%.3f (from %.3f@%.3f [%.3f])",
-        #              self.name, value, pwm_time,
-        #              self.last_temp, self.last_temp_time, self.target_temp)
-    def distance_callback(self, read_time, temp):
+        self.next_feed_time = read_time + self.feed_delay #set the next feed time as now + feed_delay(sensor report time).
+        self.last_feed_len = value
+        speed = self.last_feed_len / self.feed_delay #calculate the speed.
+        if( speed > self.max_speed ):
+            speed = self.max_speed
+        self.last_feed_speed = speed
+        logging.debug("Feeder%.3f feed:%.3fmm @ %.3f mm/s, time:%.3f", self.name, self.last_feed_len, self.last_feed_speed, read_time)
+    def distance_callback(self, read_time, distance):
         with self.lock:
-            last_time = self.last_temp_time;
             curtime = self.reactor.monotonic()
-            time_diff = read_time - self.last_temp_time
-            self.last_temp = temp
-            self.last_temp_time = read_time
-            self.control.temperature_update(read_time, temp, self.target_temp)
-            temp_diff = temp - self.smoothed_temp
+            time_diff = read_time - self.last_feed_time
+            self.last_dis = distance
+            self.last_feed_time = read_time
+            self.control.distance_update(read_time, distance, self.target_dis)
+            dis_diff = distance - self.smoothed_dis
             adj_time = min(time_diff * self.inv_smooth_time, 1.)
-            self.smoothed_temp += temp_diff * adj_time
-            if self.smoothed_temp > 500 :
-                logging.info(" *** Temp callbacke Error @ %.3f, feeder: %s temp:%.3f/%.3f @ read time:%.3f - %.3f, timeDiff:%.2f, tempDiff:%.3f, too high", 
-                             curtime, self.name, self.smoothed_temp, temp, read_time, last_time, time_diff, temp_diff)
-                self.smoothed_temp = 500;
-            if self.smoothed_temp < -100 :
-                logging.info(" *** Temp callbacke Error @% .3f, feeder: %s temp:%.3f/%.3f @ read time:%.3f - %.3f, timeDiff:%.2f, tempDiff:%.3f, too low", 
-                             curtime, self.name, self.smoothed_temp, temp, read_time, last_time, time_diff, temp_diff)
-                self.smoothed_temp = -100
-            self.can_extrude = (self.smoothed_temp >= self.min_extrude_temp)
-        #logging.debug("temp: %.3f %f = %f", read_time, temp)
+            self.smoothed_dis += dis_diff * adj_time
+            if self.smoothed_dis > 20 :
+                logging.info(" *** distance callbacke Error @ %.3f, feeder: %s distance:%.3f/%.3f @ read time:%.3f - %.3f, timeDiff:%.2f, distance diff:%.3f, too high", 
+                             curtime, self.name, self.smoothed_dis, distance, read_time, self.last_feed_time, time_diff, dis_diff)
+                self.smoothed_dis = 20;
+        #logging.debug("feeder %s @ %.3f - distance: %f", self.name, read_time, distance)
     # External commands
     def get_feed_delay(self):
         return self.feed_delay
-    def get_max_power(self):
-        return self.max_power
+    def get_max_speed(self):
+        return self.max_speed
     def get_smooth_time(self):
         return self.smooth_time
-    def set_temp(self, degrees):
-        if degrees and (degrees < self.min_dis or degrees > self.max_dis):
+    def set_distance(self, distance):
+        if distance and (distance < self.min_dis or distance > self.max_dis):
             raise self.printer.command_error(
-                "Requested temperature (%.1f) out of range (%.1f:%.1f)"
-                % (degrees, self.min_dis, self.max_dis))
+                "Requested distance (%.1f) out of range (%.1f:%.1f)"
+                % (distance, self.min_dis, self.max_dis))
         with self.lock:
-            self.target_temp = degrees
-    def get_temp(self, eventtime):
+            self.target_dis = distance
+    def get_distance(self, eventtime):
         print_time = self.mcu_pwm.get_mcu().estimated_print_time(eventtime) - 5.
         with self.lock:
-            if self.last_temp_time < print_time:
-                return 0., self.target_temp
-            return self.smoothed_temp, self.target_temp
+            if self.last_feed_time < print_time:
+                return 0., self.target_dis
+            return self.smoothed_dis, self.target_dis
     def check_busy(self, eventtime):
         with self.lock:
             return self.control.check_busy(
-                eventtime, self.smoothed_temp, self.target_temp)
+                eventtime, self.smoothed_dis, self.target_dis)
     def set_control(self, control):
         with self.lock:
             old_control = self.control
             self.control = control
-            self.target_temp = 0.
+            self.target_dis = 0.
         return old_control
-    def alter_target(self, target_temp):
-        if target_temp:
-            target_temp = max(self.min_dis, min(self.max_dis, target_temp))
-        self.target_temp = target_temp
+    def alter_target(self, target_dis):
+        if target_dis:
+            target_dis = max(self.min_dis, min(self.max_dis, target_dis))
+        self.target_dis = target_dis
     def stats(self, eventtime):
         with self.lock:
-            target_temp = self.target_temp
-            last_temp = self.last_temp
-            last_pwm_value = self.last_pwm_value
-        is_active = target_temp or last_temp > 50.
+            target_dis = self.target_dis
+            last_dis= self.last_dis
+            last_feed_len = self.last_feed_len
+        is_active = target_dis or last_dis > 1.
         return is_active, '%s: target=%.0f temp=%.1f pwm=%.3f' % (
-            self.name, target_temp, last_temp, last_pwm_value)
+            self.name, target_dis, last_dis, last_feed_len)
     def get_status(self, eventtime):
         with self.lock:
-            target_temp = self.target_temp
+            target_dis = self.target_dis
             smoothed_temp = self.smoothed_temp
             last_pwm_value = self.last_pwm_value
-        return {'temperature': round(smoothed_temp, 2), 'target': target_temp,
+        return {'temperature': round(smoothed_temp, 2), 'target': target_dis,
                 'power': last_pwm_value}
-    cmd_SET_HEATER_TEMPERATURE_help = "Sets a feeder temperature"
-    def cmd_SET_HEATER_TEMPERATURE(self, gcmd):
-        temp = gcmd.get_float('TARGET', 0.)
+    cmd_SET_FEEDER_DISTANCE_help = "Sets a feeder hold distance"
+    def cmd_SET_FEEDER_DISTANCE(self, gcmd):
+        distance = gcmd.get_float('TARGET', 0.)
         pfeeders = self.printer.lookup_object('feeders')
-        pfeeders.set_temperature(self, temp)
-
+        pfeeders.set_distance(self, distance)
 
 ######################################################################
 # Bang-bang control algo
 ######################################################################
-
+# send filament with max speed when the distance is below target_dis-max_delta.
+# seed length is mini(max_speed * feed_delay, feeder.feed_len)
 class ControlBangBang:
     def __init__(self, feeder, config):
         self.feeder = feeder
-        self.feeder_max_power = feeder.get_max_power()
-        self.max_delta = config.getfloat('max_delta', 2.0, above=0.)
-        self.heating = False
-    def temperature_update(self, read_time, temp, target_temp):
-        if self.heating and temp >= target_temp+self.max_delta:
-            self.heating = False
-        elif not self.heating and temp <= target_temp-self.max_delta:
-            self.heating = True
-        if self.heating:
-            self.feeder.set_pwm(read_time, self.feeder_max_power)
+        self.feed_max_len = feeder.get_max_speed() * feeder.get_feed_delay()
+        if(  feed_max_len > feeder.feed_len ):
+            feed_max_len = feeder.feed_len
+        self.max_delta = config.getfloat('max_delta', 2.0, above=0.) #stop feeding when the distance over target + max_delta.
+        self.feeding = False
+    def distance_update(self, read_time, dis, target_dis):
+        if self.feeding and dis >= target_dis+self.max_delta:
+            self.feeding = False
+        elif not self.feeding and dis <= target_dis-self.max_delta:
+            self.feeding = True
+        if self.feeding: #feed filament with max speed. time is the sensor report time.
+            self.feeder.set_feed(read_time, self.feed_max_len)
         else:
-            self.feeder.set_pwm(read_time, 0.)
-    def check_busy(self, eventtime, smoothed_temp, target_temp):
-        return smoothed_temp < target_temp-self.max_delta
+            self.feeder.set_feed(read_time, 0.)
+    def check_busy(self, eventtime, smoothed_dis, target_dis):
+        return smoothed_dis < target_dis-self.max_delta
 
 
 ######################################################################
@@ -198,7 +196,7 @@ class ControlPID:
         self.prev_temp_time = 0.
         self.prev_temp_deriv = 0.
         self.prev_temp_integ = 0.
-    def temperature_update(self, read_time, temp, target_temp):
+    def distance_update(self, read_time, temp, target_temp):
         time_diff = read_time - self.prev_temp_time
         # Calculate change of temperature
         temp_diff = temp - self.prev_temp
@@ -216,7 +214,7 @@ class ControlPID:
         #logging.debug("pid: %f@%.3f -> diff=%f deriv=%f err=%f integ=%f co=%d",
         #    temp, read_time, temp_diff, temp_deriv, temp_err, temp_integ, co)
         bounded_co = max(0., min(self.feeder_max_power, co))
-        self.feeder.set_pwm(read_time, bounded_co)
+        self.feeder.set_speed(read_time, bounded_co)
         # Store state for next measurement
         self.prev_temp = temp
         self.prev_temp_time = read_time
