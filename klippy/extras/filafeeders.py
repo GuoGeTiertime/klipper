@@ -20,48 +20,48 @@ class Feeder: #Heater:
         self.printer = config.get_printer()
         self.reactor = self.printer.get_reactor() #add by guoge 20231130.
         self.name = config.get_name().split()[-1]
-        # Setup sensor
+        # Setup distance sensor
         self.sensor = sensor
-        self.min_temp = config.getfloat('min_temp', minval=KELVIN_TO_CELSIUS)
-        self.max_temp = config.getfloat('max_temp', above=self.min_temp)
-        self.sensor.setup_minmax(self.min_temp, self.max_temp)
-        self.sensor.setup_callback(self.temperature_callback)
-        self.pwm_delay = self.sensor.get_report_time_delta()
+        self.min_dis = config.getfloat('min_dis', minval=-1000)
+        self.max_dis = config.getfloat('max_dis', above=self.min_dis)
+        self.sensor.setup_minmax(self.min_dis, self.max_dis)
+        self.sensor.setup_callback(self.distance_callback)
+        self.feed_delay = self.sensor.get_report_time_delta()
         # Setup temperature checks
-        self.min_extrude_temp = config.getfloat(
-            'min_extrude_temp', 170.,
-            minval=self.min_temp, maxval=self.max_temp)
-        is_fileoutput = (self.printer.get_start_args().get('debugoutput')
-                         is not None)
-        self.can_extrude = self.min_extrude_temp <= 0. or is_fileoutput
-        self.max_power = config.getfloat('max_power', 1., above=0., maxval=1.)
+        # self.min_extrude_temp = config.getfloat(
+        #     'min_extrude_temp', 170.,
+        #     minval=self.min_dis, maxval=self.max_dis)
+        # is_fileoutput = (self.printer.get_start_args().get('debugoutput')
+        #                  is not None)
+        # self.can_extrude = self.min_extrude_temp <= 0. or is_fileoutput
+        self.max_speed = config.getfloat('max_speed', 1., above=0., maxval=1000.)
         self.smooth_time = config.getfloat('smooth_time', 1., above=0.)
         self.inv_smooth_time = 1. / self.smooth_time
         self.lock = threading.Lock()
-        self.last_temp = self.smoothed_temp = self.target_temp = 0.
-        self.last_temp_time = 0.
-        # pwm caching
-        self.next_pwm_time = 0.
-        self.last_pwm_value = 0.
+        self.last_dis = self.smoothed_dis = self.target_dis = 0.
+        self.last_dis_time = 0.
+        # feed caching
+        self.next_feed_time = 0.
+        self.last_feed_speed = 0.
         # Setup control algorithm sub-class
         algos = {'watermark': ControlBangBang, 'pid': ControlPID}
         algo = config.getchoice('control', algos)
         self.control = algo(self, config)
         # Setup output feeder motor
-        feeder_pin = config.get('feeder_pin')
-        ppins = self.printer.lookup_object('pins')
-        self.mcu_pwm = ppins.setup_pin('pwm', feeder_pin)
-        pwm_cycle_time = config.getfloat('pwm_cycle_time', 0.100, above=0.,
-                                         maxval=self.pwm_delay)
-        self.mcu_pwm.setup_cycle_time(pwm_cycle_time)
-        self.mcu_pwm.setup_max_duration(MAX_HEAT_TIME)
+        feeder_motor = config.get('feeder_motor')
+        # ppins = self.printer.lookup_object('pins')
+        # self.mcu_pwm = ppins.setup_pin('pwm', feeder_pin)
+        # pwm_cycle_time = config.getfloat('pwm_cycle_time', 0.100, above=0.,
+        #                                  maxval=self.feed_delay)
+        # self.mcu_pwm.setup_cycle_time(pwm_cycle_time)
+        # self.mcu_pwm.setup_max_duration(MAX_HEAT_TIME)
         # Load additional modules
-        self.printer.load_object(config, "verify_feeder %s" % (self.name,))
-        self.printer.load_object(config, "pid_calibrate")
+        # self.printer.load_object(config, "verify_feeder %s" % (self.name,))
+        # self.printer.load_object(config, "pid_calibrate")
         gcode = self.printer.lookup_object("gcode")
-        gcode.register_mux_command("SET_HEATER_TEMPERATURE", "HEATER",
-                                   self.name, self.cmd_SET_HEATER_TEMPERATURE,
-                                   desc=self.cmd_SET_HEATER_TEMPERATURE_help)
+        gcode.register_mux_command("SET_FEEDER_DISTANCE", "FEEDER",
+                                   self.name, self.cmd_SET_FEEDER_DISTANCE,
+                                   desc=self.cmd_SET_FEEDER_DISTANCE_help)
     def set_pwm(self, read_time, value):
         if self.target_temp <= 0.:
             value = 0.
@@ -69,14 +69,14 @@ class Feeder: #Heater:
             and abs(value - self.last_pwm_value) < 0.05):
             # No significant change in value - can suppress update
             return
-        pwm_time = read_time + self.pwm_delay
+        pwm_time = read_time + self.feed_delay
         self.next_pwm_time = pwm_time + 0.75 * MAX_HEAT_TIME
         self.last_pwm_value = value
         self.mcu_pwm.set_pwm(pwm_time, value)
         #logging.debug("%s: pwm=%.3f@%.3f (from %.3f@%.3f [%.3f])",
         #              self.name, value, pwm_time,
         #              self.last_temp, self.last_temp_time, self.target_temp)
-    def temperature_callback(self, read_time, temp):
+    def distance_callback(self, read_time, temp):
         with self.lock:
             last_time = self.last_temp_time;
             curtime = self.reactor.monotonic()
@@ -98,17 +98,17 @@ class Feeder: #Heater:
             self.can_extrude = (self.smoothed_temp >= self.min_extrude_temp)
         #logging.debug("temp: %.3f %f = %f", read_time, temp)
     # External commands
-    def get_pwm_delay(self):
-        return self.pwm_delay
+    def get_feed_delay(self):
+        return self.feed_delay
     def get_max_power(self):
         return self.max_power
     def get_smooth_time(self):
         return self.smooth_time
     def set_temp(self, degrees):
-        if degrees and (degrees < self.min_temp or degrees > self.max_temp):
+        if degrees and (degrees < self.min_dis or degrees > self.max_dis):
             raise self.printer.command_error(
                 "Requested temperature (%.1f) out of range (%.1f:%.1f)"
-                % (degrees, self.min_temp, self.max_temp))
+                % (degrees, self.min_dis, self.max_dis))
         with self.lock:
             self.target_temp = degrees
     def get_temp(self, eventtime):
@@ -129,7 +129,7 @@ class Feeder: #Heater:
         return old_control
     def alter_target(self, target_temp):
         if target_temp:
-            target_temp = max(self.min_temp, min(self.max_temp, target_temp))
+            target_temp = max(self.min_dis, min(self.max_dis, target_temp))
         self.target_temp = target_temp
     def stats(self, eventtime):
         with self.lock:
@@ -360,9 +360,9 @@ class FilaFeeders: #PrinterHeaters:
         sensor_name = gcmd.get('SENSOR')
         if sensor_name not in self.available_sensors:
             raise gcmd.error("Unknown sensor '%s'" % (sensor_name,))
-        min_temp = gcmd.get_float('MINIMUM', float('-inf'))
-        max_temp = gcmd.get_float('MAXIMUM', float('inf'), above=min_temp)
-        if min_temp == float('-inf') and max_temp == float('inf'):
+        min_dis = gcmd.get_float('MINIMUM', float('-inf'))
+        max_dis = gcmd.get_float('MAXIMUM', float('inf'), above=min_dis)
+        if min_dis == float('-inf') and max_dis == float('inf'):
             raise gcmd.error(
                 "Error on 'TEMPERATURE_WAIT': missing MINIMUM or MAXIMUM.")
         if self.printer.get_start_args().get('debugoutput') is not None:
@@ -376,7 +376,7 @@ class FilaFeeders: #PrinterHeaters:
         eventtime = reactor.monotonic()
         while not self.printer.is_shutdown():
             temp, target = sensor.get_temp(eventtime)
-            if temp >= min_temp and temp <= max_temp:
+            if temp >= min_dis and temp <= max_dis:
                 return
             print_time = toolhead.get_last_move_time()
             gcmd.respond_raw(self._get_temp(eventtime))
