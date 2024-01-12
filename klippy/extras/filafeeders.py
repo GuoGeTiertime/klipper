@@ -143,7 +143,7 @@ class Feeder: #Heater:
             last_dis= self.last_dis
             last_feed_len = self.last_feed_len
         is_active = target_dis or last_dis > 1.
-        return is_active, '%s: target=%.0f temp=%.1f pwm=%.3f' % (
+        return is_active, '%s: target=%.0f distance=%.1f feed len=%.3f' % (
             self.name, target_dis, last_dis, last_feed_len)
     def get_status(self, eventtime):
         with self.lock:
@@ -206,14 +206,14 @@ class ControlPID:
         self.prev_dis_integ = 0.
     def distance_update(self, read_time, dis, target_dis):
         time_diff = read_time - self.prev_dis_time
-        # Calculate change of temperature
+        # Calculate change of distance
         dis_diff = dis - self.prev_dis
         if time_diff >= self.min_deriv_time:
             dis_deriv = dis_diff / time_diff
         else:
             dis_deriv = (self.prev_dis_deriv * (self.min_deriv_time-time_diff)
                          + dis_diff) / self.min_deriv_time
-        # Calculate accumulated temperature "error"
+        # Calculate accumulated distance "error"
         dis_err = target_dis - dis
         dis_integ = self.prev_dis_integ + dis_err * time_diff
         dis_integ = max(0., min(self.dis_integ_max, dis_integ))
@@ -254,14 +254,14 @@ class FilaFeeders: #PrinterHeaters:
                                             self.turn_off_all_feeders)
         # Register commands
         gcode = self.printer.lookup_object('gcode')
-        gcode.register_command("TURN_OFF_HEATERS", self.cmd_TURN_OFF_HEATERS,
-                               desc=self.cmd_TURN_OFF_HEATERS_help)
+        gcode.register_command("TURN_OFF_FEEDERS", self.cmd_TURN_OFF_FEEDERS,
+                               desc=self.cmd_TURN_OFF_FEEDERS_help)
         gcode.register_command("M135", self.cmd_M135, when_not_ready=True)
-        gcode.register_command("TEMPERATURE_WAIT", self.cmd_TEMPERATURE_WAIT,
-                               desc=self.cmd_TEMPERATURE_WAIT_help)
+        gcode.register_command("DISTANCE_WAIT", self.cmd_DISTANCE_WAIT,
+                               desc=self.cmd_DISTANCE_WAIT_help)
     def load_config(self, config):
         self.have_load_sensors = True
-        # Load default temperature sensors
+        # Load default feeder sensors(distance sensor or switch)
         pconfig = self.printer.lookup_object('configfile')
         dir_name = os.path.dirname(__file__)
         filename = os.path.join(dir_name, 'temperature_sensors.cfg')
@@ -297,7 +297,7 @@ class FilaFeeders: #PrinterHeaters:
         sensor_type = config.get('sensor_type')
         if sensor_type not in self.sensor_factories:
             raise self.printer.config_error(
-                "Unknown temperature sensor '%s'" % (sensor_type,))
+                "Unknown feeder distance sensor '%s'" % (sensor_type,))
         if sensor_type == 'NTC 100K beta 3950':
             config.deprecate('sensor_type', 'NTC 100K beta 3950')
         return self.sensor_factories[sensor_type](config)
@@ -320,10 +320,9 @@ class FilaFeeders: #PrinterHeaters:
     def turn_off_all_feeders(self, print_time=0.):
         for feeder in self.feeders.values():
             feeder.set_dis(0.)
-    cmd_TURN_OFF_HEATERS_help = "Turn off all feeders"
-    def cmd_TURN_OFF_HEATERS(self, gcmd):
+    cmd_TURN_OFF_FEEDERS_help = "Turn off all feeders"
+    def cmd_TURN_OFF_FEEDERS(self, gcmd):
         self.turn_off_all_feeders()
-    # G-Code M105 temperature reporting
     def _handle_ready(self):
         self.has_started = True
     def _get_dis(self, eventtime):
@@ -331,11 +330,12 @@ class FilaFeeders: #PrinterHeaters:
         out = []
         if self.has_started:
             for gcode_id, sensor in sorted(self.gcode_id_to_sensor.items()):
-                cur, target = sensor.get_temp(eventtime)
+                cur, target = sensor.get_temp(eventtime) #用温度来表示距离
                 out.append("Feeder %s:%.1f /%.1f" % (gcode_id, cur, target))
         if not out:
             return "T:0"
         return " ".join(out)
+    # G-Code M135 feeder distance reporting
     def cmd_M135(self, gcmd):
         # Get feeders's sensor distance
         reactor = self.printer.get_reactor()
@@ -344,7 +344,7 @@ class FilaFeeders: #PrinterHeaters:
         if not did_ack:
             gcmd.respond_raw(msg)
     def _wait_for_distance(self, feeder):
-        # Helper to wait on feeder.check_busy() and report M105 temperatures
+        # Helper to wait on feeder.check_busy() and report M135 Feeder distance
         if self.printer.get_start_args().get('debugoutput') is not None:
             return
         toolhead = self.printer.lookup_object("toolhead")
@@ -385,7 +385,7 @@ class FilaFeeders: #PrinterHeaters:
             if dis >= min_dis and dis <= max_dis:
                 return
             print_time = toolhead.get_last_move_time()
-            gcmd.respond_raw(self._get_temp(eventtime))
+            gcmd.respond_raw(self._get_dis(eventtime))
             eventtime = reactor.pause(eventtime + 1.)
 
 def load_config(config):
