@@ -36,7 +36,7 @@ class Feeder:  # Heater:
         # is_fileoutput = (self.printer.get_start_args().get('debugoutput')
         #                  is not None)
         # self.can_extrude = self.min_extrude_temp <= 0. or is_fileoutput
-        self.min_feed_len = config.getfloat('min_feed_len', minval=0.1) #min feed length. not feed if len < min_feed_len.
+        self.min_feed_len = config.getfloat('min_feed_len', minval=0.1)  # min feed length. not feed if len < min_feed_len.
         self.max_speed = config.getfloat('max_speed', 1., above=0., maxval=1000.)
         self.smooth_time = config.getfloat('smooth_time', 1., above=0.)
         self.inv_smooth_time = 1. / self.smooth_time
@@ -237,7 +237,7 @@ class ControlPID:
         dis_integ = max(0., min(self.dis_integ_max, dis_integ))
         # Calculate output
         co = self.Kp*dis_err + self.Ki*dis_integ - self.Kd*dis_deriv
-        #logging.debug("pid: %f@%.3f -> diff=%f deriv=%f err=%f integ=%f co=%d",
+        # logging.debug("pid: %f@%.3f -> diff=%f deriv=%f err=%f integ=%f co=%d",
         #    dis, read_time, dis_diff, dis_deriv, dis_err, dis_integ, co)
         bounded_co = max(0., min(self.feed_max_len, co))
         self.feeder.set_speed(read_time, bounded_co)
@@ -250,7 +250,7 @@ class ControlPID:
 
     def check_busy(self, eventtime, smoothed_dis, target_dis):
         dis_diff = target_dis - smoothed_dis
-        return (abs(dis_diff) > PID_SETTLE_DELTA )
+        return abs(dis_diff) > PID_SETTLE_DELTA
                 # or abs(self.prev_dis_deriv) > PID_SETTLE_SLOPE)
 
 
@@ -259,7 +259,7 @@ class ControlPID:
 ######################################################################
 
 
-class FilaFeeders: #PrinterHeaters:
+class FilaFeeders:  # PrinterHeaters:
     def __init__(self, config):
         self.printer = config.get_printer()
         self.sensor_factories = {}
@@ -363,7 +363,7 @@ class FilaFeeders: #PrinterHeaters:
         out = []
         if self.has_started:
             for gcode_id, sensor in sorted(self.gcode_id_to_sensor.items()):
-                cur, target = sensor.get_temp(eventtime) #用温度来表示距离
+                cur, target = sensor.get_temp(eventtime)  # 用温度来表示距离
                 out.append("Feeder %s:%.1f /%.1f" % (gcode_id, cur, target))
         if not out:
             return "T:0"
@@ -399,7 +399,7 @@ class FilaFeeders: #PrinterHeaters:
             self._wait_for_distance(feeder)
 
     cmd_DISTANCE_WAIT_help = "Wait for a distance on a sensor"
-    def cmd_DISTANCE_WAIT(self, gcmd):  #sensor is equal to feeder
+    def cmd_DISTANCE_WAIT(self, gcmd):  # sensor is equal to feeder
         sensor_name = gcmd.get('SENSOR')
         if sensor_name not in self.available_sensors:
             raise gcmd.error("Unknown sensor '%s'" % (sensor_name,))
@@ -425,5 +425,6 @@ class FilaFeeders: #PrinterHeaters:
             gcmd.respond_raw(self._get_dis(eventtime))
             eventtime = reactor.pause(eventtime + 1.)
 
+
 def load_config(config):
-    return FilaFeeders(config) #PrinterHeaters(config)
+    return FilaFeeders(config)  # PrinterHeaters(config)
