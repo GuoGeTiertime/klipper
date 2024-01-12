@@ -47,13 +47,16 @@ class Feeder:  # Heater:
         self.next_feed_time = 0.
         self.last_feed_len = 0.
         self.last_feed_speed = 1.
+        self.total_feed_len = 0.0
+        
+        self.last_feed_time = 0.0
         # Setup control algorithm sub-class
         algos = {'watermark': ControlBangBang, 'pid': ControlPID}
         algo = config.getchoice('control', algos)
         self.control = algo(self, config)
         # Setup output feeder motor
         self.feeder_motor = config.get('feeder_motor')
-        self.stepper = self.printer.lookup_object(self.feeder_motor)
+        # self.stepper = self.printer.lookup_object(self.feeder_motor)
         # ppins = self.printer.lookup_object('pins')
         # self.mcu_pwm = ppins.setup_pin('pwm', feeder_pin)
         # pwm_cycle_time = config.getfloat('pwm_cycle_time', 0.100, above=0.,
@@ -67,6 +70,8 @@ class Feeder:  # Heater:
         gcode.register_mux_command("SET_FEEDER_DISTANCE", "FEEDER",
                                    self.name, self.cmd_SET_FEEDER_DISTANCE,
                                    desc=self.cmd_SET_FEEDER_DISTANCE_help)
+        
+        # test command: SET_FEEDER_DISTANCE FEEDER=feeder0 TARGET=1.23
 
     def set_feed(self, read_time, value): # set feed len with speed. value is the length to feed.
         if self.target_dis <= 0.:
@@ -85,8 +90,11 @@ class Feeder:  # Heater:
         # execute gcode command to feed filament.
         gcode = self.printer.lookup_object("gcode")
         speed = speed * 60.0  # convert to mm/min.
-        pos = self.stepper.get_position() + self.last_feed_len
-        cmd = "MANUAL_STEPPER STEPPER=%s ENABLE=1 SPEED=%d ACCEL=1000 MOVE=%.3f " % (self.feeder_motor, speed, pos)
+        # pos = self.stepper.get_position() + self.last_feed_len
+        # cmd = "MANUAL_STEPPER STEPPER=%s ENABLE=1 SPEED=%d ACCEL=1000 MOVE=%.3f " % (self.feeder_motor, speed, pos)
+        pos = self.last_feed_len
+        self.total_feed_len = pos
+        cmd = "MANUAL_STEPPER STEPPER=%s ENABLE=1 SET_POSITION=0 SPEED=%d ACCEL=1000 MOVE=%.3f " % (self.feeder_motor, speed, pos)
         gcode.do_command(cmd)
         logging.info("run filament feed gcode: %s", cmd)
 
@@ -125,10 +133,10 @@ class Feeder:  # Heater:
             self.target_dis = distance
 
     def get_distance(self, eventtime):
-        print_time = self.mcu_pwm.get_mcu().estimated_print_time(eventtime) - 5.
+        # print_time = self.mcu_pwm.get_mcu().estimated_print_time(eventtime) - 5.
         with self.lock:
-            if self.last_feed_time < print_time:
-                return 0., self.target_dis
+            # if self.last_feed_time < print_time:
+            #     return 0., self.target_dis
             return self.smoothed_dis, self.target_dis
 
     def check_busy(self, eventtime):
@@ -164,12 +172,16 @@ class Feeder:  # Heater:
             last_pwm_value = self.last_pwm_value
         return {'distance': round(smoothed_dis, 2), 'target': target_dis,
                 'power': last_pwm_value}
+
     cmd_SET_FEEDER_DISTANCE_help = "Sets a feeder hold distance"
 
     def cmd_SET_FEEDER_DISTANCE(self, gcmd):
-        distance = gcmd.get_float('TARGET', 0.)
-        pfeeders = self.printer.lookup_object('feeders')
-        pfeeders.set_distance(self, distance)
+        # distance = gcmd.get_float('TARGET', 0.)
+        gcode = self.printer.lookup_object("gcode")
+        ok_msg = "ok %s" % (gcmd)
+        gcode.respond_raw(ok_msg)
+        # pfeeders = self.printer.lookup_object('filafeeders')
+        # pfeeders.set_distance(self, distance)
 
 
 ######################################################################
@@ -190,7 +202,8 @@ class ControlBangBang:
         elif not self.feeding and dis <= target_dis-self.max_delta:
             self.feeding = True
         if self.feeding:  # feed filament with max speed. time is the sensor report time.
-            self.feeder.set_feed(read_time, self.feed_len)
+            len = max(self.feed_len, target_dis - dis)
+            self.feeder.set_feed(read_time, len)
         else:
             self.feeder.set_feed(read_time, 0.)
 
@@ -321,6 +334,9 @@ class FilaFeeders:  # PrinterHeaters:
         if not self.have_load_sensors:
             self.load_config(config)
         sensor_type = config.get('sensor_type')
+        pheaters = self.printer.lookup_object("heaters")
+        if sensor_type in pheaters.sensor_factories:  # use the sensor registered in heaters.
+            return pheaters.sensor_factories[sensor_type](config)
         if sensor_type not in self.sensor_factories:
             raise self.printer.config_error(
                 "Unknown feeder distance sensor '%s'" % (sensor_type,))
@@ -363,7 +379,7 @@ class FilaFeeders:  # PrinterHeaters:
         out = []
         if self.has_started:
             for gcode_id, sensor in sorted(self.gcode_id_to_sensor.items()):
-                cur, target = sensor.get_temp(eventtime)  # 用温度来表示距离
+                cur, target = sensor.get_distance(eventtime)  # 用温度来表示距离
                 out.append("Feeder %s:%.1f /%.1f" % (gcode_id, cur, target))
         if not out:
             return "T:0"
@@ -392,8 +408,8 @@ class FilaFeeders:  # PrinterHeaters:
             eventtime = reactor.pause(eventtime + 1.)
 
     def set_distance(self, feeder, dis, wait=False):
-        toolhead = self.printer.lookup_object('toolhead')
-        toolhead.register_lookahead_callback((lambda pt: None))
+        # toolhead = self.printer.lookup_object('toolhead')
+        # toolhead.register_lookahead_callback((lambda pt: None))
         feeder.set_distance(dis)
         if wait and dis:
             self._wait_for_distance(feeder)
