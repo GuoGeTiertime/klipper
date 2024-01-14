@@ -86,7 +86,7 @@ class Feeder:  # Heater:
             speed = self.max_speed
             self.last_feed_len = speed * self.feed_delay
         self.last_feed_speed = speed
-        logging.info("Feeder%s feed:%.3fmm / %.3fmm/s, @time:%.3f", self.name, self.last_feed_len, self.last_feed_speed, read_time)
+        logging.info("Feeder:%s feed:%.3fmm spped:%.3fmm/s, @time:%.3f", self.name, self.last_feed_len, self.last_feed_speed, read_time)
         # execute gcode command to feed filament.
         gcode = self.printer.lookup_object("gcode")
         speed = speed * 60.0  # convert to mm/min.
@@ -94,9 +94,9 @@ class Feeder:  # Heater:
         # cmd = "MANUAL_STEPPER STEPPER=%s ENABLE=1 SPEED=%d ACCEL=1000 MOVE=%.3f " % (self.feeder_motor, speed, pos)
         pos = self.last_feed_len
         self.total_feed_len = pos
-        cmd = "MANUAL_STEPPER STEPPER=%s ENABLE=1 SET_POSITION=0 SPEED=%d ACCEL=1000 MOVE=%.3f " % (self.feeder_motor, speed, pos)
-        gcode.do_command(cmd)
-        logging.info("run filament feed gcode: %s", cmd)
+        cmd = "MANUAL_STEPPER STEPPER=%s ENABLE=1 SET_POSITION=0 SPEED=%d ACCEL=1000 MOVE=%.3f" % (self.feeder_motor, speed, pos)
+        logging.info("run filament feed gcode: %s, total feed len:%.2f", cmd, self.total_feed_len)
+        gcode.run_script(cmd)
 
     def distance_callback(self, read_time, distance):
         with self.lock:
@@ -169,19 +169,19 @@ class Feeder:  # Heater:
         with self.lock:
             target_dis = self.target_dis
             smoothed_dis = self.smoothed_dis
-            last_pwm_value = self.last_pwm_value
+            last_feed_len = self.last_feed_len
         return {'distance': round(smoothed_dis, 2), 'target': target_dis,
-                'power': last_pwm_value}
+                'feedlen': last_feed_len}
 
     cmd_SET_FEEDER_DISTANCE_help = "Sets a feeder hold distance"
 
     def cmd_SET_FEEDER_DISTANCE(self, gcmd):
-        # distance = gcmd.get_float('TARGET', 0.)
+        distance = gcmd.get_float('TARGET', 0.)
         gcode = self.printer.lookup_object("gcode")
-        ok_msg = "ok %s" % (gcmd)
+        ok_msg = "cmd: %s, current distance:%.2f/%.2f(smoothed)" % (gcmd.get_commandline(), self.last_dis, self.smoothed_dis)
         gcode.respond_raw(ok_msg)
-        # pfeeders = self.printer.lookup_object('filafeeders')
-        # pfeeders.set_distance(self, distance)
+        pfeeders = self.printer.lookup_object('filafeeders')
+        pfeeders.set_distance(self, distance)
 
 
 ######################################################################
@@ -380,7 +380,7 @@ class FilaFeeders:  # PrinterHeaters:
         if self.has_started:
             for gcode_id, sensor in sorted(self.gcode_id_to_sensor.items()):
                 cur, target = sensor.get_distance(eventtime)  # 用温度来表示距离
-                out.append("Feeder %s:%.1f /%.1f" % (gcode_id, cur, target))
+                out.append("Feeder %s cur dis:%.3fmm target:%.3fmm" % (gcode_id, cur, target))
         if not out:
             return "T:0"
         return " ".join(out)
