@@ -56,7 +56,9 @@ class Feeder:  # Heater:
         self.control = algo(self, config)
         # Setup output feeder motor
         self.feeder_motor = config.get('feeder_motor')
-        # self.stepper = self.printer.lookup_object(self.feeder_motor)
+        self.stepper = self.printer.lookup_object("manual_stepper " + self.feeder_motor)
+        stepinfo = str(self.stepper)
+        logging.info("stepper:%s, name:%s",  stepinfo, self.feeder_motor)
         # ppins = self.printer.lookup_object('pins')
         # self.mcu_pwm = ppins.setup_pin('pwm', feeder_pin)
         # pwm_cycle_time = config.getfloat('pwm_cycle_time', 0.100, above=0.,
@@ -90,11 +92,11 @@ class Feeder:  # Heater:
         # execute gcode command to feed filament.
         gcode = self.printer.lookup_object("gcode")
         speed = speed * 60.0  # convert to mm/min.
-        # pos = self.stepper.get_position() + self.last_feed_len
-        # cmd = "MANUAL_STEPPER STEPPER=%s ENABLE=1 SPEED=%d ACCEL=1000 MOVE=%.3f " % (self.feeder_motor, speed, pos)
-        pos = self.last_feed_len
-        self.total_feed_len = pos
-        cmd = "MANUAL_STEPPER STEPPER=%s ENABLE=1 SET_POSITION=0 SPEED=%d ACCEL=1000 MOVE=%.3f" % (self.feeder_motor, speed, pos)
+        pos = self.stepper.get_position()[0] + self.last_feed_len
+        cmd = "MANUAL_STEPPER STEPPER=%s ENABLE=1 SPEED=%d ACCEL=1000 MOVE=%.3f " % (self.feeder_motor, speed, pos)
+        # pos = self.last_feed_len
+        # self.total_feed_len = pos
+        # cmd = "MANUAL_STEPPER STEPPER=%s ENABLE=1 SET_POSITION=0 SPEED=%d ACCEL=1000 MOVE=%.3f" % (self.feeder_motor, speed, pos)
         logging.info("run filament feed gcode: %s, total feed len:%.2f", cmd, self.total_feed_len)
         gcode.run_script(cmd)
 
@@ -102,6 +104,8 @@ class Feeder:  # Heater:
         with self.lock:
             curtime = self.reactor.monotonic()
             time_diff = read_time - self.last_feed_time
+            if abs(self.last_dis - distance) > 1:
+                logging.info(" feeder distance changed: %.3f -> %.3f", self.last_dis, distance)
             self.last_dis = distance
             self.last_feed_time = read_time
             self.control.distance_update(read_time, distance, self.target_dis)
