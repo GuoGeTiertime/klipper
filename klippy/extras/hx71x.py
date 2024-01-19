@@ -86,7 +86,7 @@ class HX71X_endstop:
         self.bHoming = True
         self.bTouched = False
         self.trigger_time = -1.0
-        self._hx71x.updateNow() #update sensor weight NOW!
+        self._hx71x.updateNow()  # update sensor weight NOW!
 
         # # 采样定时器,更新位置/限位状态        
         # self._sample_timer = self._reactor.register_timer(self._sample_weight)
@@ -94,13 +94,14 @@ class HX71X_endstop:
         # self._reactor.update_timer(self._sample_timer, self._reactor.NOW)
 
         return self._trigger_completion
+
     def home_wait(self, home_end_time):
         logging.info("wait home in hx71x virtual stopend object")
 
         # # 注销定时器,停止更新限位状态
         # self._reactor.unregister_timer(self._sample_timer)
         self.bHoming = False
-        self._hx71x.updateNow() #update sensor weight NOW! stop endstop mode.
+        self._hx71x.updateNow()  # update sensor weight NOW! stop endstop mode.
 
         etrsync = self._trsyncs[0]
         etrsync.set_home_end_time(home_end_time)
@@ -116,7 +117,7 @@ class HX71X_endstop:
         #     return -1.
         # if res[0] != etrsync.REASON_ENDSTOP_HIT:
         #     return 0.
-        if not self.bTouched : 
+        if not self.bTouched:
             return 0
         
         if self._mcu.is_fileoutput():
@@ -131,9 +132,10 @@ class HX71X_endstop:
         if self._trigger_completion is not None :
             logging.info("hx71x virtual endstop is triggered @ %.4f", eventime)
             self._trigger_completion.complete(1)
-            if not self.bTouched :
+            if not self.bTouched:
                 self.bTouched = True
                 self.trigger_time = eventime
+
 
 class HX71X:
     def __init__(self, config):
@@ -144,31 +146,38 @@ class HX71X:
         self.oids = []
         self._endstop = None
 
-        # add sampel record variable for hx71x sensor
-        self._sample_cnt = None  # 0
-        self._sample_cnt_total = None # 0
-        self._sample_times = None  # 1000000000
-        self._sample_tare = None  # 0.0
-        self._error_cnt = None  # 0
+        # add sampel record variable for hx71x sensor, 
+        # use dictionary store multi hx711 unit.
+        self._sample_cnt = {}  # 0
+        self._sample_cnt_total = {}  # 0
+        self._sample_times = 1000000000
+        self._sample_tare = {}  # 0.0
+        self._error_cnt = {}  # 0
 
-        # add variable for temperature sensor.
-        self.last_temp = None  # 0.
-        self.measured_min = None  # 99999999.
-        self.measured_max = None  # 0.
+        # add simulate variable for temperature sensor.
+        self.last_temp = 0.
+        self.measured_min = 99999999.
+        self.measured_max = 0.
 
-        self.weight = None  # 0.0
+        self.weight = {}  # 0.0
+        self.read_time = {}  # 0.0
+        self.total_weight = 0.0
 
         # Determine pin from config
         ppins = config.get_printer().lookup_object("pins")
-        
+
         # register chip for add endstop by setup_pin
         ppins.register_chip(self.name, self)
 
-        N = 10
+        N = 10  # max hx71x unit number.
         for i in range(N):
             # Add pin for one hx711 unit.
             sck = config.get('hx71x_sck_pin_'+str(i), None)
             out = config.get('hx71x_dout_pin_'+str(i), None)
+            if sck is None and i == 0:  # only one hx711 unit.
+                sck = config.get('hx71x_sck_pin', None)
+                out = config.get('hx71x_dout_pin', None)
+                
             if sck is None or out is None:
                 break
 
@@ -181,29 +190,23 @@ class HX71X:
             self.mcu.add_config_cmd(
                 "config_hx71x oid=%d  sck_pin=%s dout_pin=%s"
                 % (oid, sck_params['pin'], dout_params['pin']))
-            
-            self.last_temp[oid] = 0.0
-            self.last_temp[oid] = 0.0
-            self.measured_min[oid] = 99999999.0
-            self.measured_max[oid] = 0.0
 
             self._sample_cnt[oid] = 0
             self._sample_cnt_total[oid] = 0
-            self._sample_times[oid] = 1000000000
             self._sample_tare[oid] = 0.0
             self._error_cnt[oid] = 0
 
             self.weight[oid] = 0.0
+            self.read_time[oid] = 0.0
 
-
-        #update period
+        # update period
         self.report_time = config.getfloat('hx71x_report_time', 1, minval=0.02)
         self.pulse_cnt = 25
 
-        #unit scale
+        # unit scale
         self.scale = config.getfloat('hx71x_scale', 0.001)
 
-        #set base value and triger threshold for endstop
+        # set base value and triger threshold for endstop
         self.endstop_base = config.getfloat('endstop_base', 0.0)
         self.endstop_threshold = config.getfloat('endstop_threshold', 100.0)
         self.endstop_report_time = config.getfloat('endstop_report_time', 0.05, minval=0.02)
@@ -228,9 +231,22 @@ class HX71X:
         # self._callback = self.temperature_callback
         # pheaters.register_sensor(config, self)
 
-
         # callback function, call the function to update heater's temperature data.
         self._callback = None
+        
+        self.gcode = self.printer.lookup_object('gcode')
+        self.gcode.register_mux_command("QUERY_WEIGHT", "SENSOR", self.name,
+                                        self.cmd_QUERY_WEIGHT,
+                                        desc=self.cmd_QUERY_WEIGHT_help)
+
+    cmd_QUERY_WEIGHT_help = "Report on the status of a group of hx71x sensors"
+    def cmd_QUERY_WEIGHT(self, gcmd):
+        out = []
+        out.append(" Total: %.3fg " % self.total_weight)
+        for oid in self.oids:
+            out.append(" oid%d: %.3fg / %.3fs / %dcnt " % (oid, self.weight[oid], self.read_time[oid], self._sample_cnt[oid]))
+        out = " ".join(out)
+        gcmd.respond_info(self.name + ": " + out)
 
     def handle_connect(self):
         # self.reactor.update_timer(self.sample_timer, self.reactor.NOW)
@@ -257,46 +273,48 @@ class HX71X:
         next_clock = self.mcu.clock32_to_clock64(params['next_clock'])
         last_read_time = self.mcu.clock_to_print_time(next_clock)
 
-        if value == 0 :
+        if value == 0:
             self._error_cnt[oid] += 1
-            if  self._error_cnt[oid]>100 and (self._error_cnt[oid] % 16) :
+            if self._error_cnt[oid] > 100 and (self._error_cnt[oid] % 16):
                 return
             logging.info("  *** Error Senser:%s(oid:%d) can't read hx711 @ %.3f, cnt:%d, value:%d, errcnt:%d", self.name, oid, last_read_time, self._sample_cnt[oid], value, self._error_cnt[oid])
             return
                 
-        self.weight[oid] = value * self.scale # weight scale
+        self.weight[oid] = value * self.scale  # weight scale
+        self.read_time[oid] = last_read_time  # read time
         
         self._sample_cnt_total[oid] += 1
 
         # 头五次作去皮处理
         # if self._sample_cnt < 5 :
         #     self._sample_tare = self.weight
-        if self._sample_cnt_total[oid] < 5 :
+        if self._sample_cnt_total[oid] < 5:
             self._sample_tare[oid] = self.weight[oid]
             
         self.weight[oid] -= self._sample_tare[oid]
 
-        # use weight as temperature.
-        self.last_temp[oid] = self.weight[oid]
-        self.measured_min[oid] = min(self.measured_min[oid], self.last_temp[oid])
-        self.measured_max[oid] = max(self.measured_max[oid], self.last_temp[oid])
-
-
-        if  self._sample_cnt[oid]<1000 or (self._sample_cnt[oid] % 32)==0 :
+        if self._sample_cnt[oid] < 1000 or (self._sample_cnt[oid] % 32) == 0:
             logging.info("Senser:%s(oid:%d) read hx711 @ %.3f , weight:%.2f, cnt:%d, tare:%.2f, value:%d", 
                          self.name, oid, last_read_time, self.weight[oid], self._sample_cnt[oid], self._sample_tare[oid], value)
 
+        # update total weight
+        self.total_weight = 0.0
+        for oid in self.oids:
+            self.total_weight += self.weight[oid]
+
+        # use total weight as temperature.
+        self.last_temp = self.total_weight
+        self.measured_min = min(self.measured_min, self.last_temp)
+        self.measured_max = max(self.measured_max, self.last_temp)
+
+        # call callback function to update the temperature of heaters.
         if self._callback is not None:
-            self._callback(last_read_time, self.last_temp[oid]) #callback to update the temperature of heaters.
+            self._callback(last_read_time, self.last_temp)  # callback to update the temperature of heaters.
 
         # timer interval is short when homing
-        if (self._endstop is not None) and self._endstop.bHoming :
+        if (self._endstop is not None) and self._endstop.bHoming:
             # call endstop trigger function. add all sensor's weight endstop.
-            allweight = 0.0
-            for oid in self.oids:
-                allweight += self.weight[oid]
-
-            if allweight > (self.endstop_base + self.endstop_threshold) :
+            if self.total_weight > (self.endstop_base + self.endstop_threshold):
                 self._endstop.trigger(last_read_time)
 
     # def read_hx71x(self, read_len):
@@ -306,22 +324,21 @@ class HX71X:
         self._callback = cb
 
     def get_report_time_delta(self):
-        if (self._endstop is not None) and self._endstop.bHoming :
+        if (self._endstop is not None) and self._endstop.bHoming:
             return self.endstop_report_time
-        else :
+        else:
             return self.report_time
 
     def updateNow(self):
         # self.reactor.update_timer(self.sample_timer, self.reactor.NOW)
         ticks = self.mcu.seconds_to_clock(self.report_time)
-        if (self._endstop is not None) and self._endstop.bHoming : #在回零期间.
+        if (self._endstop is not None) and self._endstop.bHoming:  # 在回零期间.
             ticks = self.mcu.seconds_to_clock(self.endstop_report_time)
             logging.info("Start update hx71x at endstop mode, ticks:%d, time:%.3f", ticks, self.endstop_report_time)
 
         # 发送配置命令. 不能用add_config_cmd
         for oid in self.oids:
-            self.mcu._serial.send("query_hx71x oid=%d ticks=%d times=%d pulse_cnt=%d" % 
-                (oid, ticks, self._sample_times, self.pulse_cnt))
+            self.mcu._serial.send("query_hx71x oid=%d ticks=%d times=%d pulse_cnt=%d" % (oid, ticks, self._sample_times, self.pulse_cnt))
         return
 
     # def _sample_hx71x(self, eventtime):
@@ -355,7 +372,7 @@ class HX71X:
 
     def get_status(self, eventtime):
         return {
-            'weight': round(self.weight, 2),
+            'weight': round(self.total_weight, 2),
             'temperature': round(self.last_temp, 2),
             'measured_min_temp': round(self.measured_min, 2),
             'measured_max_temp': round(self.measured_max, 2)
@@ -387,6 +404,7 @@ class HX71X:
 
 def load_config(config):
     return HX71X(config)
+
 
 def load_config_prefix(config):
     return HX71X(config)
