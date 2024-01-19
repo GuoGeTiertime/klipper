@@ -135,6 +135,9 @@ class HX71X_endstop:
             if not self.bTouched:
                 self.bTouched = True
                 self.trigger_time = eventime
+                
+    def query_endstop(self, eventime):
+        return self._hx71x.is_endstop_on(eventime)
 
 
 class HX71X:
@@ -322,9 +325,16 @@ class HX71X:
 
         # timer interval is short when homing
         if (self._endstop is not None) and self._endstop.bHoming:
-            # call endstop trigger function. add all sensor's weight endstop.
-            if self.total_weight > (self.endstop_base + self.endstop_threshold):
+            # call endstop trigger function.
+            if self.is_endstop_on():
                 self._endstop.trigger(last_read_time)
+
+    # compare the total weight with endstop_base+threshold, if total weight is bigger than it, return True.
+    def is_endstop_on(self, eventtime):
+        if self.total_weight > (self.endstop_base + self.endstop_threshold):
+            return True
+        else:
+            return False
 
     # def read_hx71x(self, read_len):
     #     return self.read_hx71x_cmd.send([self.oid, read_len])
