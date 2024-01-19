@@ -238,6 +238,9 @@ class HX71X:
         self.gcode.register_mux_command("QUERY_WEIGHT", "SENSOR", self.name,
                                         self.cmd_QUERY_WEIGHT,
                                         desc=self.cmd_QUERY_WEIGHT_help)
+        self.gcode.register_mux_command("TARE_WEIGHT", "SENSOR", self.name,
+                                        self.cmd_TARE_WEIGHT,
+                                        desc=self.cmd_TARE_WEIGHT_help)
 
     cmd_QUERY_WEIGHT_help = "Report on the status of a group of hx71x sensors"
     def cmd_QUERY_WEIGHT(self, gcmd):
@@ -247,6 +250,12 @@ class HX71X:
             out.append(" oid%d: %.3fg / %.3fs / %dcnt " % (oid, self.weight[oid], self.read_time[oid], self._sample_cnt[oid]))
         out = " ".join(out)
         gcmd.respond_info(self.name + ": " + out)
+
+    cmd_TARE_WEIGHT_help = "Tare the weight sensor"
+    def cmd_TARE_WEIGHT(self, gcmd):
+        for oid in self.oids:
+            self._sample_tare[oid] += self.weight[oid]
+        self.total_weight = 0.0
 
     def handle_connect(self):
         # self.reactor.update_timer(self.sample_timer, self.reactor.NOW)
