@@ -369,7 +369,7 @@ class FilaFeeders:  # PrinterHeaters:
 
     def turn_off_all_feeders(self, print_time=0.):
         for feeder in self.feeders.values():
-            feeder.set_dis(0.)
+            feeder.set_distance(0.)
 
     cmd_TURN_OFF_FEEDERS_help = "Turn off all feeders"
     def cmd_TURN_OFF_FEEDERS(self, gcmd):
