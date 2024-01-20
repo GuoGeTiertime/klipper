@@ -137,7 +137,7 @@ class HX71X_endstop:
                 self.trigger_time = eventime
                 
     def query_endstop(self, eventime):
-        return self._hx71x.is_endstop_on(eventime)
+        return self._hx71x.is_endstop_on()
 
 
 class HX71X:
@@ -330,7 +330,7 @@ class HX71X:
                 self._endstop.trigger(last_read_time)
 
     # compare the total weight with endstop_base+threshold, if total weight is bigger than it, return True.
-    def is_endstop_on(self, eventtime):
+    def is_endstop_on(self):
         if self.total_weight > (self.endstop_base + self.endstop_threshold):
             return True
         else:
