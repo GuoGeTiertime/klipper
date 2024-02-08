@@ -13,7 +13,7 @@ class GCodeButton:
         self.last_state = 0
         buttons = self.printer.load_object(config, "buttons")
         if config.get('analog_range', None) is None:
-            buttons.register_buttons([self.pin], self.button_callback)
+            buttons.register_buttons([self.pin], self.button_callback_feed)
         else:
             amin, amax = config.getfloatlist('analog_range', count=2)
             pullup = config.getfloat('analog_pullup_resistor', 4700., above=0.)
@@ -41,6 +41,14 @@ class GCodeButton:
             self.gcode.run_script(template.render())
         except:
             logging.exception("Script running error")
+
+    def button_callback_feed(self, eventtime, state):
+        self.last_state = state
+        stepper = self.printer.lookup_object('feeder_step_0')
+        if not state:
+            stepper.do_move(100, 10, 1000)
+        else:
+            stepper.do_move(10, 10, 1000)
 
     def get_status(self, eventtime=None):
         if self.last_state:
