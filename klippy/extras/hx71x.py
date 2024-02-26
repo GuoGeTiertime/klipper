@@ -214,6 +214,9 @@ class HX71X:
         self.endstop_threshold = config.getfloat('endstop_threshold', 100.0)
         self.endstop_report_time = config.getfloat('endstop_report_time', 0.05, minval=0.02)
 
+        # set collision warning value for endstop or z motor collision
+        self.collision_err = config.getfloat('collision_err', 0.0)
+
         # self.sample_timer = self.reactor.register_timer(self._sample_hx71x)
         self.printer.add_object("hx71x " + self.name, self)
         self.printer.register_event_handler("klippy:connect", self.handle_connect)
@@ -308,6 +311,10 @@ class HX71X:
         if self._sample_cnt[oid] < 1000 or (self._sample_cnt[oid] % 32) == 0:
             logging.info("Senser:%s(oid:%d) read hx711 @ %.3f , weight:%.2f, cnt:%d, tare:%.2f, value:%d", 
                          self.name, oid, last_read_time, self.weight[oid], self._sample_cnt[oid], self._sample_tare[oid], value)
+            
+        # collision warning test
+        if self.collision_err > 0 and abs(self.weight[oid]) > self.collision_err:
+            logging.info("Senser:%s(oid:%d) collision warning, weight:%.2f", self.name, oid, self.weight[oid])
 
         # update total weight
         self.total_weight = 0.0
@@ -332,6 +339,11 @@ class HX71X:
     # compare the total weight with endstop_base+threshold, if total weight is bigger than it, return True.
     def is_endstop_on(self):
         if self.total_weight > (self.endstop_base + self.endstop_threshold):
+            if self.collision_err > 0:
+                for oid in self.oids:
+                    if abs(self.weight[oid]) > self.collision_err:
+                        logging.info("Senser:%s(oid:%d) collision warning, weight:%.2f", self.name, oid, self.weight[oid])
+                        return False
             return True
         else:
             return False
