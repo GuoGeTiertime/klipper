@@ -217,6 +217,10 @@ class HX71X:
         # set collision warning value for endstop or z motor collision
         self.collision_err = config.getfloat('collision_err', 0.0)
 
+        # set gcode response time, default is 0. display the weight in gcode response.
+        self.gcode_response_time = config.getfloat('gcode_response_time', 0.0)
+        self.last_response_time = 0.0  # self.reactor.monotonic()
+
         # self.sample_timer = self.reactor.register_timer(self._sample_hx71x)
         self.printer.add_object("hx71x " + self.name, self)
         self.printer.register_event_handler("klippy:connect", self.handle_connect)
@@ -247,6 +251,9 @@ class HX71X:
         self.gcode.register_mux_command("TARE_WEIGHT", "SENSOR", self.name,
                                         self.cmd_TARE_WEIGHT,
                                         desc=self.cmd_TARE_WEIGHT_help)
+        self.gcode.register_mux_command("RESPONSE_WEIGHT", "SENSOR", self.name,
+                                        self.cmd_RESPONSE_WEIGHT,
+                                        desc=self.cmd_RESPONSE_WEIGHT_help)
 
     cmd_QUERY_WEIGHT_help = "Report on the status of a group of hx71x sensors"
     def cmd_QUERY_WEIGHT(self, gcmd):
@@ -262,6 +269,11 @@ class HX71X:
         for oid in self.oids:
             self._sample_tare[oid] += self.weight[oid]
         self.total_weight = 0.0
+
+    cmd_RESPONSE_WEIGHT_help = "Set the GCode respose time of the weight sensor"
+    def cmd_RESPONSE_WEIGHT(self, gcmd):
+        self.gcode_response_time = gcmd.get_float('TIME', self.gcode_response_time, minval=0.0)
+        self.gcode.respond_info("Set HX71X sensor response time: %.2f" % self.gcode_response_time )
 
     def handle_connect(self):
         # self.reactor.update_timer(self.sample_timer, self.reactor.NOW)
@@ -325,6 +337,12 @@ class HX71X:
         self.last_temp = self.total_weight
         self.measured_min = min(self.measured_min, self.last_temp)
         self.measured_max = max(self.measured_max, self.last_temp)
+
+        if( self.gcode_response_time > 0 and (last_read_time - self.last_response_time) > self.gcode_response_time):
+            self.last_response_time = last_read_time
+            msg = "Read HX71X multi sensors: %s  total Weight: %.2f @ %.3f" % (self.name, self.total_weight, last_read_time)
+            self.gcode.respond_info( msg )
+            logging.info(msg)
 
         # call callback function to update the temperature of heaters.
         if self._callback is not None:
