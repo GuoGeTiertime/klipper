@@ -130,7 +130,8 @@ class HX71X_endstop:
     
     def trigger(self, eventime):
         if self._trigger_completion is not None :
-            logging.info("hx71x virtual endstop is triggered @ %.4f", eventime)
+            msg = "hx71x virtual endstop is triggered @ %.4f" % eventime
+            self._hx71x._loginfo(msg)
             self._trigger_completion.complete(1)
             if not self.bTouched:
                 self.bTouched = True
@@ -273,11 +274,16 @@ class HX71X:
     cmd_RESPONSE_WEIGHT_help = "Set the GCode respose time of the weight sensor"
     def cmd_RESPONSE_WEIGHT(self, gcmd):
         self.gcode_response_time = gcmd.get_float('TIME', self.gcode_response_time, minval=0.0)
-        self.gcode.respond_info("Set HX71X sensor response time: %.2f" % self.gcode_response_time )
+        msg = "Set HX71X sensor response time: %.2f" % self.gcode_response_time
+        self._loginfo(msg)
 
     def handle_connect(self):
         # self.reactor.update_timer(self.sample_timer, self.reactor.NOW)
         return
+    
+    def _loginfo(self, msg):
+        logging.info(msg)
+        self.gcode.respond_info(msg)
 
     def build_config(self):
         # self.read_hx71x_cmd = self.mcu.lookup_query_command(
@@ -326,7 +332,11 @@ class HX71X:
             
         # collision warning test
         if self.collision_err > 0 and abs(self.weight[oid]) > self.collision_err:
-            logging.info("Senser:%s(oid:%d) collision warning, weight:%.2f", self.name, oid, self.weight[oid])
+            msg = "Senser:%s(oid:%d) collision warning, weight:%.2f" % (self.name, oid, self.weight[oid])
+            self._loginfo(msg)
+            msg = "Shutdown printer for collision warning, weight:%.2f" % self.weight[oid]
+            self._loginfo(msg)
+            self.gcode.run_script("M112")  # emergency stop
 
         # update total weight
         self.total_weight = 0.0
@@ -341,8 +351,7 @@ class HX71X:
         if( self.gcode_response_time > 0 and (last_read_time - self.last_response_time) > self.gcode_response_time):
             self.last_response_time = last_read_time
             msg = "Read HX71X multi sensors: %s  total Weight: %.2f @ %.3f" % (self.name, self.total_weight, last_read_time)
-            self.gcode.respond_info( msg )
-            logging.info(msg)
+            self._loginfo(msg)
 
         # call callback function to update the temperature of heaters.
         if self._callback is not None:
@@ -360,7 +369,8 @@ class HX71X:
             if self.collision_err > 0:
                 for oid in self.oids:
                     if abs(self.weight[oid]) > self.collision_err:
-                        logging.info("Senser:%s(oid:%d) collision warning, weight:%.2f", self.name, oid, self.weight[oid])
+                        msg = "Senser:%s(oid:%d) collision warning, weight:%.2f" % (self.name, oid, self.weight[oid])
+                        self._loginfo(msg)
                         return False
             return True
         else:
@@ -383,7 +393,11 @@ class HX71X:
         ticks = self.mcu.seconds_to_clock(self.report_time)
         if (self._endstop is not None) and self._endstop.bHoming:  # 在回零期间.
             ticks = self.mcu.seconds_to_clock(self.endstop_report_time)
-            logging.info("Start update hx71x at endstop mode, ticks:%d, time:%.3f", ticks, self.endstop_report_time)
+            msg = "Start update hx71x at endstop mode, ticks:%d, time:%.3f" % (ticks, self.endstop_report_time)
+            self._loginfo(msg)
+
+        msg = "Reset hx71x update ticks to %d" % ticks
+        self._loginfo(msg)
 
         # 发送配置命令. 不能用add_config_cmd
         for oid in self.oids:
