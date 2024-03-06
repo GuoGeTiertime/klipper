@@ -326,6 +326,7 @@ class HX71X:
             
         self.weight[oid] -= self._sample_tare[oid]
 
+        # debug log, print hx711 read value every 32 times.
         if self._sample_cnt[oid] < 1000 or (self._sample_cnt[oid] % 32) == 0:
             logging.info("Senser:%s(oid:%d) read hx711 @ %.3f , weight:%.2f, cnt:%d, tare:%.2f, value:%d", 
                          self.name, oid, last_read_time, self.weight[oid], self._sample_cnt[oid], self._sample_tare[oid], value)
@@ -352,10 +353,18 @@ class HX71X:
             self.last_response_time = last_read_time
             msg = "Read HX71X multi sensors: %s  total Weight: %.2f @ %.3f" % (self.name, self.total_weight, last_read_time)
             self._loginfo(msg)
+            if( self._endstop is None):
+                self._loginfo("Error, no endstop for HX71X sensor!")
 
         # call callback function to update the temperature of heaters.
         if self._callback is not None:
             self._callback(last_read_time, self.last_temp)  # callback to update the temperature of heaters.
+
+        # debug log, print weight when over endstop threshold every 16 times.
+        if (self._endstop is not None) and (self._sample_cnt_total[oid] % 16) == 0:
+            if self.is_endstop_on():
+                msg = "Weight:%.2f, over endstop threshold: %.2f @ %.3f" % (self.total_weight, self.endstop_base + self.endstop_threshold, last_read_time)
+                self._loginfo(msg)
 
         # timer interval is short when homing
         if (self._endstop is not None) and self._endstop.bHoming:
@@ -442,7 +451,10 @@ class HX71X:
         }
 
     def setup_pin(self, pin_type, pin_params):
-        logging.info("add a hx71x endstop, type:%s, pin: %s", pin_type, pin_params['pin'])
+        msg = "add a hx71x endstop, type:%s, pin: %s", pin_type, pin_params['pin']
+        logging.info(msg)
+        # self._loginfo(msg)
+
         if pin_type != 'endstop' or pin_params['pin'] != 'virtual_endstop':
             raise self.error("HX71X virtual endstop only useful as endstop pin")
         if pin_params['invert'] or pin_params['pullup']:
