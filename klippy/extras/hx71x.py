@@ -225,6 +225,10 @@ class HX71X:
         self.gcode_response_time = config.getfloat('gcode_response_time', 0.0)
         self.last_response_time = 0.0  # self.reactor.monotonic()
 
+        # set response threshold for response, response when the weight change is bigger than it.
+        self.gcode_response_threshold = config.getfloat('gcode_response_threshold', 1.0)
+        self.last_response_weight = 0.0
+
         # self.sample_timer = self.reactor.register_timer(self._sample_hx71x)
         self.printer.add_object("hx71x " + self.name, self)
         self.printer.register_event_handler("klippy:connect", self.handle_connect)
@@ -277,7 +281,10 @@ class HX71X:
     cmd_RESPONSE_WEIGHT_help = "Set the GCode respose time of the weight sensor"
     def cmd_RESPONSE_WEIGHT(self, gcmd):
         self.gcode_response_time = gcmd.get_float('TIME', self.gcode_response_time, minval=0.0)
-        msg = "Set HX71X sensor response time: %.2f" % self.gcode_response_time
+        self.gcode_response_threshold = gcmd.get_float('THRESHOLD', self.gcode_response_threshold, minval=0.0)
+        self.report_time = gcmd.get_float('REPORT', self.report_time, minval=0.02)
+        self.updateNow()
+        msg = "Set HX71X sensor response time: %.2f, report time:%.2f, threshold: %.2f" % (self.gcode_response_time, self.report_time, self.gcode_response_threshold)
         self._loginfo(msg)
 
     def handle_connect(self):
@@ -359,7 +366,15 @@ class HX71X:
         self.measured_min = min(self.measured_min, self.last_temp)
         self.measured_max = max(self.measured_max, self.last_temp)
 
+        bResponse = False
         if( self.gcode_response_time > 0 and (last_read_time - self.last_response_time) > self.gcode_response_time):
+            if( abs(self.total_weight - self.last_response_weight) > self.gcode_response_threshold):
+                bResponse = True
+            elif( last_read_time - self.last_response_time > (100.0*self.gcode_response_time)): # force response every 100 times of response time.
+                bResponse = True
+
+        if bResponse:
+            self.last_response_weight = self.total_weight
             self.last_response_time = last_read_time
             msg = "Read HX71X multi sensors: %s  total Weight: %.2f @ %.3f" % (self.name, self.total_weight, last_read_time)
             self._loginfo(msg)
