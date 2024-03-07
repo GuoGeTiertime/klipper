@@ -205,7 +205,7 @@ class HX71X:
 
         # update period
         self.report_time = config.getfloat('hx71x_report_time', 1, minval=0.02)
-        self.pulse_cnt = 25
+        self.pulse_cnt = config.getint('hx71x_pluse_cnt', 25)
 
         # unit scale
         self.scale = config.getfloat('hx71x_scale', 0.001)
