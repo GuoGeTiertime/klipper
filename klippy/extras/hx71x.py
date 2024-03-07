@@ -158,6 +158,8 @@ class HX71X:
         self._sample_tare = {}  # 0.0
         self._error_cnt = {}  # 0
 
+        self._cnt_in_cycle = 0
+
         # add simulate variable for temperature sensor.
         self.last_temp = 0.
         self.measured_min = 99999999.
@@ -166,6 +168,7 @@ class HX71X:
         self.weight = {}  # 0.0
         self.read_time = {}  # 0.0
         self.total_weight = 0.0
+        self.prev_weight = 0.0
 
         # Determine pin from config
         ppins = config.get_printer().lookup_object("pins")
@@ -339,7 +342,14 @@ class HX71X:
             self._loginfo(msg)
             self.gcode.run_script("M112")  # emergency stop
 
+        # update total weight when all seners are read.
+        self._cnt_in_cycle += 1
+        if self._cnt_in_cycle < len(self.oids):
+            return
+        self._cnt_in_cycle = 0
+
         # update total weight
+        self.prev_weight = self.total_weight
         self.total_weight = 0.0
         for oid in self.oids:
             self.total_weight += self.weight[oid]
