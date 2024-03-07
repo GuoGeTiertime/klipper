@@ -396,7 +396,7 @@ class HX71X:
         if (self._endstop is not None) and self._endstop.bHoming:
             # call endstop trigger function.
             if self.is_endstop_on():
-                    self._endstop.trigger(last_read_time)
+                self._endstop.trigger(last_read_time)
 
     # compare the total weight with threshold, if total weight is bigger than it, return True.
     def is_endstop_on(self):
