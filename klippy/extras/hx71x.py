@@ -216,6 +216,7 @@ class HX71X:
         # set base value and triger threshold for endstop
         self.endstop_base = config.getfloat('endstop_base', 0.0)
         self.endstop_threshold = config.getfloat('endstop_threshold', 100.0)
+        self.endstop_max = config.getfloat('endstop_max', self.endstop_threshold * 20)
         self.endstop_report_time = config.getfloat('endstop_report_time', 0.05, minval=0.02)
 
         # set collision warning value for endstop or z motor collision
@@ -388,27 +389,22 @@ class HX71X:
         # debug log, print weight when over endstop threshold every 16 times.
         if (self._endstop is not None) and (self._sample_cnt_total[oid] % 16) == 0:
             if self.is_endstop_on():
-                msg = "Weight:%.2f, over endstop threshold: %.2f @ %.3f" % (self.total_weight, self.endstop_base + self.endstop_threshold, last_read_time)
+                msg = "Weight:%.2f, over endstop threshold: %.2f @ %.3f" % (self.total_weight, self.endstop_threshold, last_read_time)
                 self._loginfo(msg)
 
         # timer interval is short when homing
         if (self._endstop is not None) and self._endstop.bHoming:
             # call endstop trigger function.
             if self.is_endstop_on():
-                self._endstop.trigger(last_read_time)
+                    self._endstop.trigger(last_read_time)
 
-    # compare the total weight with endstop_base+threshold, if total weight is bigger than it, return True.
+    # compare the total weight with threshold, if total weight is bigger than it, return True.
     def is_endstop_on(self):
-        if self.total_weight > (self.endstop_base + self.endstop_threshold):
-            if self.collision_err > 0:
-                for oid in self.oids:
-                    if abs(self.weight[oid]) > self.collision_err:
-                        msg = "Senser:%s(oid:%d) collision warning, weight:%.2f" % (self.name, oid, self.weight[oid])
-                        self._loginfo(msg)
-                        return False
-            return True
-        else:
-            return False
+        if self.total_weight > self.endstop_threshold:
+            # prev weight should less than threshold, or the weight is bigger than threshold2.
+            if self.prev_weight<self.endstop_threshold or self.total_weight > self.endstop_max:
+                return True
+        return False
 
     # def read_hx71x(self, read_len):
     #     return self.read_hx71x_cmd.send([self.oid, read_len])
