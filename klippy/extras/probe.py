@@ -169,10 +169,15 @@ class PrinterProbe:
             self.multi_probe_begin()
         probexy = self.printer.lookup_object('toolhead').get_position()[:2]
         retries = 0
+        bFirst = True
         positions = []
         while len(positions) < sample_count:
+            # speed/retract for first probe is greater then for the rest
+            probe_speed = speed if bFirst else speed / 2
+            probe_retract = sample_retract_dist if bFirst else sample_retract_dist / 2
+            bFirst = False
             # Probe position
-            pos = self._probe(speed)
+            pos = self._probe(probe_speed)
             positions.append(pos)
             # Check samples tolerance
             z_positions = [p[2] for p in positions]
@@ -181,10 +186,11 @@ class PrinterProbe:
                     raise gcmd.error("Probe samples exceed samples_tolerance")
                 gcmd.respond_info("Probe samples exceed tolerance. Retrying...")
                 retries += 1
-                positions = []
+                positions = positions[-1:] # only keep the last sample
             # Retract
             if len(positions) < sample_count:
-                self._move(probexy + [pos[2] + sample_retract_dist], lift_speed)
+                gcmd.respond_info("Retracting probe... cur: %.3f dis: %.3f, speed:%.3f" % (pos[2], probe_retract, lift_speed))
+                self._move(probexy + [pos[2] + probe_retract], lift_speed)
         if must_notify_multi_probe:
             self.multi_probe_end()
         # Calculate and return result
@@ -398,7 +404,7 @@ class ProbePointsHelper:
         if not self.results:
             # Use full speed to first probe position
             speed = self.speed
-        toolhead.manual_move([None, None, self.horizontal_move_z], speed)
+        toolhead.manual_move([None, None, self.horizontal_move_z], speed * 2)
         # Check if done probing
         if len(self.results) >= len(self.probe_points):
             toolhead.get_last_move_time()
