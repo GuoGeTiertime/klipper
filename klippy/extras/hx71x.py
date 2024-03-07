@@ -130,7 +130,7 @@ class HX71X_endstop:
     
     def trigger(self, eventime):
         if self._trigger_completion is not None :
-            msg = "hx71x virtual endstop is triggered @ %.4f" % eventime
+            msg = "hx71x virtual endstop is triggered @ %.4f with weight:%.2f" % (eventime, self._hx71x.total_weight)
             self._hx71x._loginfo(msg)
             self._trigger_completion.complete(1)
             if not self.bTouched:
@@ -337,7 +337,7 @@ class HX71X:
         self.weight[oid] -= self._sample_tare[oid]
 
         # debug log, print hx711 read value every 32 times.
-        if self._sample_cnt[oid] < 1000 or (self._sample_cnt[oid] % 32) == 0:
+        if self._sample_cnt[oid] < 10 or (self._sample_cnt[oid] % 32) == 0:
             logging.info("Senser:%s(oid:%d) read hx711 @ %.3f , weight:%.2f, cnt:%d, tare:%.2f, value:%d", 
                          self.name, oid, last_read_time, self.weight[oid], self._sample_cnt[oid], self._sample_tare[oid], value)
             
@@ -430,7 +430,9 @@ class HX71X:
             msg = "Start update hx71x at endstop mode, ticks:%d, time:%.3f" % (ticks, self.endstop_report_time)
             self._loginfo(msg)
 
-        msg = "Reset hx71x update ticks to %d" % ticks
+        # debug log, update ticks and time.
+        curTime = self.mcu.estimated_print_time(self.reactor.monotonic())
+        msg = "Reset hx71x update ticks to %d @ %.3f" % (ticks, curTime)
         self._loginfo(msg)
 
         # 发送配置命令. 不能用add_config_cmd
