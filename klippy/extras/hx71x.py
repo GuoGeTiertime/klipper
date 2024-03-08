@@ -167,7 +167,11 @@ class HX71X:
 
         self.weight = {}  # 0.0
         self.read_time = {}  # 0.0
+        self.weight_min = {}  # 0.0
+        self.weight_max = {}  # 0.0
         self.total_weight = 0.0
+        self.total_weight_min = 0.0
+        self.total_weight_max = 0.0
         self.prev_weight = 0.0
 
         # Determine pin from config
@@ -204,6 +208,8 @@ class HX71X:
             self._error_cnt[oid] = 0
 
             self.weight[oid] = 0.0
+            self.weight_min[oid] = 0.0
+            self.weight_max[oid] = 0.0
             self.read_time[oid] = 0.0
 
         # update period
@@ -267,17 +273,19 @@ class HX71X:
     cmd_QUERY_WEIGHT_help = "Report on the status of a group of hx71x sensors"
     def cmd_QUERY_WEIGHT(self, gcmd):
         out = []
-        out.append(" Total: %.3fg " % self.total_weight)
+        out.append(" Total: %.3fg (%.3f~%.3f)" % (self.total_weight, self.total_weight_min, self.total_weight_max))
         for oid in self.oids:
-            out.append(" oid%d: %.3fg / %.3fs / %dcnt " % (oid, self.weight[oid], self.read_time[oid], self._sample_cnt[oid]))
+            out.append("\n oid%d: %.3fg(%.3f~%.3f) @%.3fs  CNT:%d" % 
+                       (oid, self.weight[oid], self.weight_min[oid], self.weight_max[oid], self.read_time[oid], self._sample_cnt[oid]))
         out = " ".join(out)
-        gcmd.respond_info(self.name + ": " + out)
+        gcmd.respond_info("Sensor: " + self.name + out)
 
     cmd_TARE_WEIGHT_help = "Tare the weight sensor"
     def cmd_TARE_WEIGHT(self, gcmd):
         for oid in self.oids:
             self._sample_tare[oid] += self.weight[oid]
-        self.total_weight = 0.0
+            self.weight_min[oid] = self.weight_max[oid] = 0.0
+        self.total_weight = self.total_weight_min = self.total_weight_max = 0.0
 
     cmd_RESPONSE_WEIGHT_help = "Set the GCode respose time of the weight sensor"
     def cmd_RESPONSE_WEIGHT(self, gcmd):
@@ -336,9 +344,11 @@ class HX71X:
             self._sample_tare[oid] = self.weight[oid]
             
         self.weight[oid] -= self._sample_tare[oid]
+        self.weight_min[oid] = min(self.weight_min[oid], self.weight[oid])
+        self.weight_max[oid] = max(self.weight_max[oid], self.weight[oid])
 
-        # debug log, print hx711 read value every 32 times.
-        if self._sample_cnt[oid] < 10 or (self._sample_cnt[oid] % 32) == 0:
+        # debug log, print hx711 read value every 256 times.
+        if self._sample_cnt[oid] < 10 or (self._sample_cnt[oid] % 256) == 0:
             logging.info("Senser:%s(oid:%d) read hx711 @ %.3f , weight:%.2f, cnt:%d, tare:%.2f, value:%d", 
                          self.name, oid, last_read_time, self.weight[oid], self._sample_cnt[oid], self._sample_tare[oid], value)
             
@@ -361,6 +371,8 @@ class HX71X:
         self.total_weight = 0.0
         for oid in self.oids:
             self.total_weight += self.weight[oid]
+        self.total_weight_min = min(self.total_weight_min, self.total_weight)
+        self.total_weight_max = max(self.total_weight_max, self.total_weight)
 
         # use total weight as temperature.
         self.last_temp = self.total_weight
