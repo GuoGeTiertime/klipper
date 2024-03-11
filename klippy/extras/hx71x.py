@@ -281,7 +281,7 @@ class HX71X:
                                         self.cmd_TEST_WEIGHT,
                                         desc=self.cmd_TEST_WEIGHT_help)
 
-    cmd_QUERY_WEIGHT_help = "Report on the status of a group of hx71x sensors"
+    cmd_QUERY_WEIGHT_help = "Report on the status of a group of hx71x sensors, QUERY_WEIGHT SENSOR=xxxxx"
     def cmd_QUERY_WEIGHT(self, gcmd):
         out = []
         out.append(" Total: %.3fg (%.3f~%.3f)" % (self.total_weight, self.total_weight_min, self.total_weight_max))
@@ -291,14 +291,14 @@ class HX71X:
         out = " ".join(out)
         gcmd.respond_info("Sensor: " + self.name + out)
 
-    cmd_TARE_WEIGHT_help = "Tare the weight sensor"
+    cmd_TARE_WEIGHT_help = "Tare the weight sensor, TARE_WEIGHT SENSOR=xxxxx"
     def cmd_TARE_WEIGHT(self, gcmd):
         for oid in self.oids:
             self._sample_tare[oid] += self.weight[oid]
             self.weight_min[oid] = self.weight_max[oid] = 0.0
         self.total_weight = self.total_weight_min = self.total_weight_max = 0.0
 
-    cmd_RESPONSE_WEIGHT_help = "Set the GCode respose time of the weight sensor"
+    cmd_RESPONSE_WEIGHT_help = "Set the GCode respose time of the weight sensor, paramters: TIME, THRESHOLD, REPORT"
     def cmd_RESPONSE_WEIGHT(self, gcmd):
         self.gcode_response_time = gcmd.get_float('TIME', self.gcode_response_time, minval=0.0)
         self.gcode_response_threshold = gcmd.get_float('THRESHOLD', self.gcode_response_threshold, minval=0.0)
@@ -307,47 +307,41 @@ class HX71X:
         msg = "Set HX71X sensor response time: %.2f, report time:%.2f, threshold: %.2f" % (self.gcode_response_time, self.report_time, self.gcode_response_threshold)
         self._loginfo(msg)
 
-    cmd_TEST_WEIGHT_help = "test the weight sensor with a threshold by run a gcode cmd."
+    cmd_TEST_WEIGHT_help = "test the weight sensor with a threshold by run a gcode cmd, parameter: ID, MIN, MAX, COLLISION"
     def cmd_TEST_WEIGHT(self, gcmd):
+        id = gcmd.get_int('ID', -1, minval=-1, maxval=3)
         thMin = gcmd.get_float('MIN', self.test_min, minval=0.0)
         thMax = gcmd.get_float('MAX', self.test_max, minval=thMin)
-        id = gcmd.get_int('ID', 0, minval=0, maxval=3)
-        template = self.test_gcode[id]
-        curTime = self.mcu.estimated_print_time(self.reactor.monotonic())
-        self._loginfo("Test HX71X sensor with a threshold: %.2f~%.2f @ %.3fs" % (thMin, thMax, curTime))
-        # tare the weight sensor first
-        self.cmd_TARE_WEIGHT(" ")
+        self.collision_err = gcmd.get_float('COLLISION', self.collision_err, minval=0.0)
 
-        # run a gcode cmd to test the weight sensor.
-        cmdstr = template.render()
-        self._loginfo("Run test gcode cmd: %s" % cmdstr)
-        # self.gcode.run_script(cmdstr)
-        self.gcode.run_script_from_command(cmdstr)
-        # moveCmd = "FORCE_MOVE STEPPER=stepper_z1 DISTANCE=5 VELOCITY=1 ACCEL=50"
-        # self.gcode.run_script_from_command(moveCmd)
+        curTime = self.mcu.estimated_print_time(self.reactor.monotonic())
+        self._loginfo("Test HX71X sensor with a program(ID:%d, threshold:%.2f~%.2f, collision:%.2f) @ %.3fs" % (id, thMin, thMax,self.collision_err, curTime))
+
+
+        if id>= 0: # run a gcode cmd to test the weight sensor.
+            self.cmd_TARE_WEIGHT(" ") # tare the weight sensor before run the test.
+
+            # run a gcode cmd to test the weight sensor. # etc: "FORCE_MOVE STEPPER=stepper_z1 DISTANCE=5 VELOCITY=1 ACCEL=50"
+            template = self.test_gcode[id]
+            cmdstr = template.render()
+            self._loginfo("Run test gcode cmd: %s" % cmdstr)
+            self.gcode.run_script_from_command(cmdstr)
+            # self.gcode.run_script(cmdstr)
+            # self.gcode.run_script_from_command(cmdstr)
 
         # analyze the weight sensor data, get max diff and min diff.
         curTime = self.mcu.estimated_print_time(self.reactor.monotonic())
-        minDiff = 0.0
-        maxDiff = 0.0
-        for oid in self.oids:
-            minDiff = min(self.weight_min[oid], minDiff)
-            maxDiff = max(self.weight_max[oid], maxDiff)
-
-        self._loginfo("Finish Test HX71X sensor, min: %.3f, max: %.3f  @ %.3fs" % (minDiff, maxDiff, curTime) )
-
+        minDiff = min(self.weight_min.values())
+        maxDiff = max(self.weight_max.values())            
         maxErr = max(abs(minDiff), abs(maxDiff))
+
         if( maxErr < thMin or maxErr > thMax ):
-            self._loginfo("Error, HX71X sensor test failed, min: %.3f, max: %.3f, (threshold: %.2f~%.2f)" % (minDiff, maxDiff, thMin, thMax) )
+            msg = "Error, Weight sensor(HX71x) test failed, min: %.3f, max: %.3f, (threshold: %.2f~%.2f)" % (minDiff, maxDiff, thMin, thMax)
+            # self._loginfo(msg)
+            raise gcmd.error(msg)
             # self.gcode.run_script("M112")  # emergency stop
         else:
-            self._loginfo("HX71X sensor test passed, min: %.3f, max: %.3f, (threshold: %.2f~%.2f)" % (minDiff, maxDiff, thMin, thMax) )
-
-        # moveCmd = "FORCE_MOVE STEPPER=stepper_z1 DISTANCE=-5 VELOCITY=1 ACCEL=50"
-        # self.gcode.run_script_from_command(moveCmd)
-
-        # curTime = self.mcu.estimated_print_time(self.reactor.monotonic())
-        # self._loginfo("Run restore move, finished @%.3f" % curTime)
+            self._loginfo("Weight sensor(HX71x) test passed, min: %.3f, max: %.3f, (threshold: %.2f~%.2f)" % (minDiff, maxDiff, thMin, thMax) )
 
     def handle_connect(self):
         # self.reactor.update_timer(self.sample_timer, self.reactor.NOW)
@@ -407,9 +401,7 @@ class HX71X:
             
         # collision warning test
         if self.collision_err > 0 and abs(self.weight[oid]) > self.collision_err:
-            msg = "Senser:%s(oid:%d) collision warning, weight:%.2f" % (self.name, oid, self.weight[oid])
-            self._loginfo(msg)
-            msg = "Shutdown printer for collision warning, weight:%.2f" % self.weight[oid]
+            msg = "Weight senser:%s(oid:%d) collision warning, weight:%.2f. Shutdow the printer!" % (self.name, oid, self.weight[oid])
             self._loginfo(msg)
             self.gcode.run_script("M112")  # emergency stop
 
@@ -432,6 +424,7 @@ class HX71X:
         self.measured_min = min(self.measured_min, self.last_temp)
         self.measured_max = max(self.measured_max, self.last_temp)
 
+        # report weight periodically or the change of weight is bigger than threshold.
         bResponse = False
         if( self.gcode_response_time > 0 and (last_read_time - self.last_response_time) > self.gcode_response_time):
             if( abs(self.total_weight - self.last_response_weight) > self.gcode_response_threshold):
