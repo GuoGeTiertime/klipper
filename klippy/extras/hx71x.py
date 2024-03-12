@@ -327,7 +327,6 @@ class HX71X:
             self._loginfo("Run test gcode cmd: %s" % cmdstr)
             self.gcode.run_script_from_command(cmdstr)
             # self.gcode.run_script(cmdstr)
-            # self.gcode.run_script_from_command(cmdstr)
 
         # analyze the weight sensor data, get max diff and min diff.
         curTime = self.mcu.estimated_print_time(self.reactor.monotonic())
@@ -339,7 +338,7 @@ class HX71X:
             msg = "Error, Weight sensor(HX71x) test failed, min: %.3f, max: %.3f, (threshold: %.2f~%.2f)" % (minDiff, maxDiff, thMin, thMax)
             # self._loginfo(msg)
             raise gcmd.error(msg)
-            # self.gcode.run_script("M112")  # emergency stop
+            # self.gcode.run_script_from_command("M112")  # emergency stop
         else:
             self._loginfo("Weight sensor(HX71x) test passed, min: %.3f, max: %.3f, (threshold: %.2f~%.2f)" % (minDiff, maxDiff, thMin, thMax) )
 
@@ -401,9 +400,9 @@ class HX71X:
             
         # collision warning test
         if self.collision_err > 0 and abs(self.weight[oid]) > self.collision_err:
-            msg = "Weight senser:%s(oid:%d) collision warning, weight:%.2f. Shutdow the printer!" % (self.name, oid, self.weight[oid])
+            msg = "Weight senser:%s(oid:%d) collision warning, weight:%.2f. Shutdown the printer!" % (self.name, oid, self.weight[oid])
             self._loginfo(msg)
-            self.gcode.run_script("M112")  # emergency stop
+            self.gcode.run_script_from_command("M112")  # emergency stop
 
         # update total weight when all seners are read.
         self._cnt_in_cycle += 1
