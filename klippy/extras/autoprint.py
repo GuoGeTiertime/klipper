@@ -18,14 +18,14 @@ class AutoPrint:
             self.loadJobs()
         except self.printer.command_error as e:
             raise config.error(str(e))
-        gcode = self.printer.lookup_object('gcode')
-        gcode.register_command('AUTO_ADDJOB', self.cmd_AUTO_ADDJOB,
+        self.gcode = self.printer.lookup_object('gcode')
+        self.gcode.register_command('AUTO_ADDJOB', self.cmd_AUTO_ADDJOB,
                                desc=self.cmd_AUTO_ADDJOB_help)
-        gcode.register_command('AUTO_ADDJOB', self.cmd_AUTO_DELJOB,
+        self.gcode.register_command('AUTO_DELJOB', self.cmd_AUTO_DELJOB,
                                desc=self.cmd_AUTO_DELJOB_help)
-        gcode.register_command('AUTO_FINISHJOB', self.cmd_AUTO_FINISHJOB,
+        self.gcode.register_command('AUTO_FINISHJOB', self.cmd_AUTO_FINISHJOB,
                                desc=self.cmd_AUTO_FINISHJOB_help)
-        gcode.register_command('AUTO_STARTNEXT', self.cmd_AUTO_STARTNEXT,
+        self.gcode.register_command('AUTO_STARTNEXT', self.cmd_AUTO_STARTNEXT,
                                desc=self.cmd_AUTO_STARTNEXT_help)
     def loadJobs(self):
         alljobs = []
@@ -39,7 +39,7 @@ class AutoPrint:
                         job[name] = ast.literal_eval(val)
                     # parse time from Date string
                     # job['Date'] = datetime.datetime.strptime(job['Date'], '%Y-%m-%d %H:%M:%S.%f')
-                    alljobs[i] = job
+                    alljobs.append(job)
                 else:
                     break
         except:
@@ -66,8 +66,7 @@ class AutoPrint:
     cmd_AUTO_ADDJOB_help = "add a print job to auto print job list"
     def cmd_AUTO_ADDJOB(self, gcmd):
         if len(self.allJobs) >= self.maxJobs:
-            gcode = self.printer.lookup_object('gcode')
-            gcode.respond_error("Max jobs(%d) reached" % self.maxJobs)
+            self.gcode.respond_info("Max jobs(%d) reached" % self.maxJobs)
             return
         
         # get new job's filename and print times, and current time as start time
@@ -75,42 +74,56 @@ class AutoPrint:
         times = gcmd.get_int('TIMES', 1, minval=1, maxval=1000)
         # get current system time
         curTime = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')
-        cnt = 0
-
-        job = {'Filename': filename, 'Times': times, 'Date': curTime, 'Completed': cnt}
+        job = {'Filename': filename, 'Times': times, 'Date': curTime, 'Completed': 0}
         self.allJobs.append(job)
         # save the jobs to file
         self.saveJobs()
 
     cmd_AUTO_DELJOB_help = "del a print job to auto print job list"
     def cmd_AUTO_DELJOB(self, gcmd):
-        id = gcmd.get_int('ID', -1, minval=-1, maxval=len(self.allJobs)-1)
-        if id == -1:
+        idx = gcmd.get_int('IDX', -1, minval=-1, maxval=len(self.allJobs)-1)
+        if idx == -1:
             filename = gcmd.get('FILE', "")
             for i, job in enumerate(self.allJobs):
                 if job['Filename'] == filename:
-                    id = i
+                    idx = i
                     break
-        if id == -1:
-            gcmd.respond_error("No such job")
+        if idx < 0 or idx >= len(self.allJobs):
+            self.gcode.respond_info("No such job")
             return
         
+        # cnt is the number of times to remove from the job, 0 means remove the job
         cnt = gcmd.get_int('CNT', 1000, minval=0, maxval=1000)
-        job = self.allJobs[id]
+        job = self.allJobs[idx]
         job['Times'] -= cnt
 
-        if job['completed'] >= job['Times']:
-            self.allJobs.pop(id)
+        if job['Completed'] >= job['Times']:
+            self.allJobs.pop(idx)
         
         # save the jobs to file
         self.saveJobs()
 
-
-    cmd_AUTO_FINISHJOB_help = "finish a job and remove it from auto print job list"
+    cmd_AUTO_FINISHJOB_help = "finish a job and remove it from auto print job list if it has been printed enough times"
     def cmd_AUTO_FINISHJOB(self, gcmd):
-
+        if len(self.allJobs) == 0:
+            self.gcode.respond_info("No jobs to finish")
+            return
+        
+        job = self.allJobs[0]
+        job['Completed'] += 1
+        if job['Completed'] >= job['Times']:
+            self.allJobs.pop(0)
+        
+        self.saveJobs()
+        
     cmd_AUTO_STARTNEXT_help = "start next job in auto print job list"
     def cmd_AUTO_STARTNEXT(self, gcmd):
+        if len(self.allJobs) == 0:
+            self.gcode.respond_info("No jobs in the autoprint list")
+            return
+        job = self.allJobs[0]
+        gcode = self.printer.lookup_object('gcode')
+        gcode.run_script_from_command( "SDCARD_PRINT_FILE FILENAME=%s" % job['Filename'])
 
     def get_status(self, eventtime):
         return {'autoprint_jobs': self.allJobs}
