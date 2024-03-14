@@ -224,6 +224,7 @@ class HX71X:
         self.endstop_threshold = config.getfloat('endstop_threshold', 100.0)
         self.endstop_max = config.getfloat('endstop_max', self.endstop_threshold * 20)
         self.endstop_report_time = config.getfloat('endstop_report_time', 0.05, minval=0.02)
+        self.endstop_trigger_delay = config.getfloat('endstop_trigger_deley', 0.01)
 
         # set collision warning value for endstop or z motor collision
         self.collision_err = config.getfloat('collision_err', 0.0)
@@ -368,7 +369,7 @@ class HX71X:
         # self._sample_cnt += 1
         self._sample_cnt[oid] = params['cnt']
         # get hx71x sample time.
-        next_clock = self.mcu.clock32_to_clock64(params['next_clock'])
+        next_clock = self.mcu.clock32_to_clock64(params['next_clock']) # next_clock is later than the real sample time.
         last_read_time = self.mcu.clock_to_print_time(next_clock)
 
         if value == 0:
@@ -453,7 +454,7 @@ class HX71X:
         if (self._endstop is not None) and self._endstop.bHoming:
             # call endstop trigger function.
             if self.is_endstop_on():
-                self._endstop.trigger(last_read_time)
+                self._endstop.trigger(last_read_time - self.endstop_trigger_delay)
 
     # compare the total weight with threshold, if total weight is bigger than it, return True.
     def is_endstop_on(self):
