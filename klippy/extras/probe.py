@@ -191,6 +191,7 @@ class PrinterProbe:
             if len(positions) < sample_count:
                 gcmd.respond_info("Retracting probe... cur: %.3f dis: %.3f, speed:%.3f" % (pos[2], probe_retract, lift_speed))
                 self._move(probexy + [pos[2] + probe_retract], lift_speed)
+                self.printer.lookup_object('toolhead').wait_moves()
         if must_notify_multi_probe:
             self.multi_probe_end()
         # Calculate and return result
