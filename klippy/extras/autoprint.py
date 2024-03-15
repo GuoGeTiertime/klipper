@@ -10,7 +10,7 @@ class AutoPrint:
     def __init__(self, config):
         self.printer = config.get_printer()
         self.filename = os.path.expanduser(config.get('filename'))
-        self.maxJobs = config.getint('maxJobs', 20, minval=1, maxval=100)
+        self.maxJobs = config.getint('maxjobs', 20, minval=1, maxval=100)
         self.allJobs = []
         try:
             if not os.path.exists(self.filename):
@@ -20,13 +20,19 @@ class AutoPrint:
             raise config.error(str(e))
         self.gcode = self.printer.lookup_object('gcode')
         self.gcode.register_command('AUTO_ADDJOB', self.cmd_AUTO_ADDJOB,
-                               desc=self.cmd_AUTO_ADDJOB_help)
+                                desc=self.cmd_AUTO_ADDJOB_help)
         self.gcode.register_command('AUTO_DELJOB', self.cmd_AUTO_DELJOB,
-                               desc=self.cmd_AUTO_DELJOB_help)
+                                desc=self.cmd_AUTO_DELJOB_help)
         self.gcode.register_command('AUTO_FINISHJOB', self.cmd_AUTO_FINISHJOB,
-                               desc=self.cmd_AUTO_FINISHJOB_help)
+                                desc=self.cmd_AUTO_FINISHJOB_help)
         self.gcode.register_command('AUTO_STARTNEXT', self.cmd_AUTO_STARTNEXT,
-                               desc=self.cmd_AUTO_STARTNEXT_help)
+                                desc=self.cmd_AUTO_STARTNEXT_help)
+        self.gcode.register_command('AUTO_LIST', self.cmd_AUTO_LIST,
+                                desc=self.cmd_AUTO_LIST_help)
+        self.gcode.register_command('AUTO_MOVEJOB', self.cmd_AUTO_MOVEJOB,
+                                desc=self.cmd_AUTO_MOVEJOB_help)
+        self.gcode.register_command('AUTO_CLEAR', self.cmd_AUTO_CLEAR, 
+                                desc=self.cmd_AUTO_CLEAR_help)
     def loadJobs(self):
         alljobs = []
         jobfile = configparser.ConfigParser()
@@ -35,10 +41,10 @@ class AutoPrint:
             for i in range(self.maxJobs): # max jobs
                 if jobfile.has_section('Job_%d' % i):
                     job = {}
-                    for name, val in jobfile.items('Job%d' % i):
+                    for name, val in jobfile.items('Job_%d' % i):
                         job[name] = ast.literal_eval(val)
                     # parse time from Date string
-                    # job['Date'] = datetime.datetime.strptime(job['Date'], '%Y-%m-%d %H:%M:%S.%f')
+                    # job['date'] = datetime.datetime.strptime(job['date'], '%Y-%m-%d %H:%M:%S.%f')
                     alljobs.append(job)
                 else:
                     break
@@ -74,18 +80,18 @@ class AutoPrint:
         times = gcmd.get_int('TIMES', 1, minval=1, maxval=1000)
         # get current system time
         curTime = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')
-        job = {'Filename': filename, 'Times': times, 'Date': curTime, 'Completed': 0}
+        job = {'filename': filename, 'times': times, 'date': curTime, 'completed': 0}
         self.allJobs.append(job)
         # save the jobs to file
         self.saveJobs()
 
-    cmd_AUTO_DELJOB_help = "del a print job to auto print job list"
+    cmd_AUTO_DELJOB_help = "Decrease print times of job or delete the job, negative CNT means increase print times of the job"
     def cmd_AUTO_DELJOB(self, gcmd):
         idx = gcmd.get_int('IDX', -1, minval=-1, maxval=len(self.allJobs)-1)
         if idx == -1:
             filename = gcmd.get('FILE', "")
             for i, job in enumerate(self.allJobs):
-                if job['Filename'] == filename:
+                if job['filename'] == filename:
                     idx = i
                     break
         if idx < 0 or idx >= len(self.allJobs):
@@ -93,15 +99,50 @@ class AutoPrint:
             return
         
         # cnt is the number of times to remove from the job, 0 means remove the job
-        cnt = gcmd.get_int('CNT', 1000, minval=0, maxval=1000)
+        cnt = gcmd.get_int('CNT', 1000, minval=-1000, maxval=1000)
         job = self.allJobs[idx]
-        job['Times'] -= cnt
+        job['times'] -= cnt
 
-        if job['Completed'] >= job['Times']:
+        if job['completed'] >= job['times']:
             self.allJobs.pop(idx)
         
         # save the jobs to file
         self.saveJobs()
+
+    # 添加帮助信息
+    cmd_AUTO_MOVEJOB_help = "Move a job in the auto print job list by index and move distance"
+    # 实现 AUTO_MOVEJOB 命令
+    def cmd_AUTO_MOVEJOB(self, gcmd):
+        idx = gcmd.get_int('IDX', minval=0, maxval=len(self.allJobs)-1)
+        move = gcmd.get_int('MOVE', minval=-(len(self.allJobs)-1), maxval=len(self.allJobs)-1)
+        # 确保索引在合法范围内
+        if idx < 0 or idx >= len(self.allJobs):
+            self.gcode.respond_info("Invalid job index")
+            return
+        new_idx = idx + move
+        # 确保新索引在合法范围内
+        if new_idx < 0 :
+            new_idx = 0
+        elif new_idx > len(self.allJobs)-1:
+            new_idx = len(self.allJobs)-1
+
+        # 移动作业
+        job = self.allJobs.pop(idx)
+        self.allJobs.insert(new_idx, job)
+        # 保存更改到文件
+        self.saveJobs()
+        self.gcode.respond_info("Job moved successfully")
+
+    # 添加帮助信息
+    cmd_AUTO_CLEAR_help = "Clear all jobs in the auto print job list"
+    # 实现 AUTO_CLEAR 命令
+    def cmd_AUTO_CLEAR(self, gcmd):
+        # 清空作业列表
+        self.allJobs.clear()
+        # 保存更改到文件
+        self.saveJobs()
+        # 响应命令执行成功
+        self.gcode.respond_info("All jobs cleared successfully")
 
     cmd_AUTO_FINISHJOB_help = "finish a job and remove it from auto print job list if it has been printed enough times"
     def cmd_AUTO_FINISHJOB(self, gcmd):
@@ -110,8 +151,8 @@ class AutoPrint:
             return
         
         job = self.allJobs[0]
-        job['Completed'] += 1
-        if job['Completed'] >= job['Times']:
+        job['completed'] += 1
+        if job['completed'] >= job['times']:
             self.allJobs.pop(0)
         
         self.saveJobs()
@@ -123,7 +164,27 @@ class AutoPrint:
             return
         job = self.allJobs[0]
         gcode = self.printer.lookup_object('gcode')
-        gcode.run_script_from_command( "SDCARD_PRINT_FILE FILENAME=%s" % job['Filename'])
+        gcode.run_script_from_command( "SDCARD_PRINT_FILE FILENAME=%s" % job['filename'])
+
+    cmd_AUTO_LIST_help = "list all jobs info or Specified job info"
+    def cmd_AUTO_LIST(self, gcmd):
+        idx = gcmd.get_int('IDX', -1, minval=-1, maxval=len(self.allJobs)-1)
+        if idx == -1:
+            filename = gcmd.get('FILE', "")
+            for i, job in enumerate(self.allJobs):
+                if job['filename'] == filename:
+                    idx = i
+                    break
+        
+        bAll = False if idx>=0 and idx<len(self.allJobs) else True
+
+        info = []
+        for i, job in enumerate(self.allJobs):
+            if bAll or idx == i:
+                msg = "Job %d: %s, printed %d/%d, date: %s" % (i, job['filename'], job['completed'], job['times'], job['date'])
+                info.append(msg)
+        
+        self.gcode.respond_info("Jobs in auto print list:\n" + "\n".join(info))
 
     def get_status(self, eventtime):
         return {'autoprint_jobs': self.allJobs}
