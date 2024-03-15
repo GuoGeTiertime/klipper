@@ -69,6 +69,20 @@ class AutoPrint:
             logging.exception(msg)
             raise self.printer.command_error(msg)(msg)
 
+    def _jobinfo(self, job):
+        return "File:%s, printed %d/%d, date: %s" % (job['filename'], job['completed'], job['times'], job['date'])
+    
+    def _loginfo(self, head, job):
+        msg = head + self._jobinfo(job)
+        self.gcode.respond_info(msg)
+
+    def _logalljobs(self):
+        info = []
+        for i, job in enumerate(self.allJobs):
+            msg = "Job %d: %s" % (i, self._jobinfo(job))
+            info.append(msg)
+        self.gcode.respond_info("Jobs in auto print list:\n" + "\n".join(info))
+
     cmd_AUTO_ADDJOB_help = "add a print job to auto print job list"
     def cmd_AUTO_ADDJOB(self, gcmd):
         if len(self.allJobs) >= self.maxJobs:
@@ -84,6 +98,7 @@ class AutoPrint:
         self.allJobs.append(job)
         # save the jobs to file
         self.saveJobs()
+        self._loginfo("Add print job, ", job)
 
     cmd_AUTO_DELJOB_help = "Decrease print times of job or delete the job, negative CNT means increase print times of the job"
     def cmd_AUTO_DELJOB(self, gcmd):
@@ -105,6 +120,7 @@ class AutoPrint:
 
         if job['completed'] >= job['times']:
             self.allJobs.pop(idx)
+            self._loginfo("Delete print job, ", job)
         
         # save the jobs to file
         self.saveJobs()
@@ -113,13 +129,13 @@ class AutoPrint:
     cmd_AUTO_MOVEJOB_help = "Move a job in the auto print job list by index and move distance"
     # 实现 AUTO_MOVEJOB 命令
     def cmd_AUTO_MOVEJOB(self, gcmd):
-        idx = gcmd.get_int('IDX', minval=0, maxval=len(self.allJobs)-1)
-        move = gcmd.get_int('MOVE', minval=-(len(self.allJobs)-1), maxval=len(self.allJobs)-1)
+        idx = gcmd.get_int('IDX', minval=0)
+        move = gcmd.get_int('MOVE', 1) # 默认向前移动一个位置
         # 确保索引在合法范围内
         if idx < 0 or idx >= len(self.allJobs):
             self.gcode.respond_info("Invalid job index")
             return
-        new_idx = idx + move
+        new_idx = idx - move
         # 确保新索引在合法范围内
         if new_idx < 0 :
             new_idx = 0
@@ -131,7 +147,7 @@ class AutoPrint:
         self.allJobs.insert(new_idx, job)
         # 保存更改到文件
         self.saveJobs()
-        self.gcode.respond_info("Job moved successfully")
+        self._loginfo("Job moved to index:%d successfully. " % new_idx, job)
 
     # 添加帮助信息
     cmd_AUTO_CLEAR_help = "Clear all jobs in the auto print job list"
@@ -153,8 +169,10 @@ class AutoPrint:
         job = self.allJobs[0]
         job['completed'] += 1
         if job['completed'] >= job['times']:
+            self._loginfo("job finished, delete from auto print list", job)
             self.allJobs.pop(0)
-        
+        else:
+           self._loginfo("job printed, ", job)
         self.saveJobs()
         
     cmd_AUTO_STARTNEXT_help = "start next job in auto print job list"
@@ -163,8 +181,9 @@ class AutoPrint:
             self.gcode.respond_info("No jobs in the autoprint list")
             return
         job = self.allJobs[0]
-        gcode = self.printer.lookup_object('gcode')
-        gcode.run_script_from_command( "SDCARD_PRINT_FILE FILENAME=%s" % job['filename'])
+        self._loginfo("Start next job, ", job)
+
+        self.gcode.run_script_from_command( "SDCARD_PRINT_FILE FILENAME=%s" % job['filename'])
 
     cmd_AUTO_LIST_help = "list all jobs info or Specified job info"
     def cmd_AUTO_LIST(self, gcmd):
@@ -176,18 +195,13 @@ class AutoPrint:
                     idx = i
                     break
         
-        bAll = False if idx>=0 and idx<len(self.allJobs) else True
-
-        info = []
-        for i, job in enumerate(self.allJobs):
-            if bAll or idx == i:
-                msg = "Job %d: %s, printed %d/%d, date: %s" % (i, job['filename'], job['completed'], job['times'], job['date'])
-                info.append(msg)
-        
-        self.gcode.respond_info("Jobs in auto print list:\n" + "\n".join(info))
+        if idx>=0 and idx<len(self.allJobs):
+            self._loginfo("Job %d: " % idx, self.allJobs[idx])
+        else:
+            self._logalljobs()
 
     def get_status(self, eventtime):
         return {'autoprint_jobs': self.allJobs}
-
+    
 def load_config(config):
     return AutoPrint(config)
