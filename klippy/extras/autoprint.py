@@ -43,15 +43,28 @@ class AutoPrint:
                     job = {}
                     for name, val in jobfile.items('Job_%d' % i):
                         job[name] = ast.literal_eval(val)
-                    # parse time from Date string
-                    # job['date'] = datetime.datetime.strptime(job['date'], '%Y-%m-%d %H:%M:%S.%f')
-                    alljobs.append(job)
+                    # job['date_add'] = datetime.datetime.strptime(job['date'], '%Y%m%d_%H:%M:%S')
+                    # verify the job is valid
+                    required_keys = ['filename', 'completed', 'times', 'date']
+                    is_missing_any_key = not all(key in job for key in required_keys)
+                    bValid = True
+                    if is_missing_any_key: # if any key is missing, fix this job
+                        if 'filename' not in job:
+                            bValid = False
+                        if 'completed' not in job:
+                            job['completed'] = 0
+                        if 'times' not in job:
+                            job['times'] = max( job['completed'], 1)
+                        if 'date' not in job:
+                            job['date'] = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+                    # add the job to the list if it is valid
+                    if bValid:
+                        alljobs.append(job)
                 else:
                     break
         except:
             msg = "Unable to parse existing autoprint file: %s" % self.filename
             logging.exception(msg)
-            raise self.printer.command_error(msg)
         self.allJobs = alljobs
     def saveJobs(self):
         # Write file
@@ -93,7 +106,7 @@ class AutoPrint:
         filename = gcmd.get('FILE')
         times = gcmd.get_int('TIMES', 1, minval=1, maxval=1000)
         # get current system time
-        curTime = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')
+        curTime = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
         job = {'filename': filename, 'times': times, 'date': curTime, 'completed': 0}
         self.allJobs.append(job)
         # save the jobs to file
