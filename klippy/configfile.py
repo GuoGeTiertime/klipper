@@ -3,7 +3,7 @@
 # Copyright (C) 2016-2021  Kevin O'Connor <kevin@koconnor.net>
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
-import sys, os, glob, re, time, logging, configparser, io
+import sys, os, glob, re, time, logging, configparser, io, shutil
 
 error = configparser.Error
 
@@ -159,10 +159,29 @@ class PrinterConfig:
             data = f.read()
             f.close()
         except:
-            msg = "Unable to open config file %s" % (filename,)
+            msg = "Unable to open config file %s" % (filename)
             logging.exception(msg)
             raise error(msg)
         return data.replace('\r\n', '\n')
+    def _restore_from_latest_backup(self, cfg_filename):
+        # 构建备份文件的搜索模式
+        backup_pattern = cfg_filename.replace('.cfg', '-????????_??????.cfg')
+        # 列出所有匹配的备份文件
+        backup_files = glob.glob(backup_pattern)
+        msg = "Found backup files for %s, pattern %s" % (cfg_filename, backup_pattern) + ". Backup files: " + str(backup_files)
+        logging.info(msg)
+        # 解析文件名中的时间戳并进行排序
+        backup_files.sort(key=lambda x: time.strptime(x.split('-')[-1].split('.')[0], '%Y%m%d_%H%M%S'), reverse=True)
+        # 用文件名排序
+        # backup_files.sort(reverse=True)
+        # 检查是否有备份文件
+        if backup_files:
+            latest_backup = backup_files[0]  # 最新的备份文件
+            # 用最新的备份文件替换原文件
+            shutil.copy(latest_backup, cfg_filename)
+            logging.info("Restored %s from %s" % (cfg_filename, latest_backup))
+        else:
+            logging.info("No backup file for %s, pattern%s" % (cfg_filename, backup_pattern))
     def _find_autosave_data(self, data):
         regular_data = data
         autosave_data = ""
@@ -276,6 +295,9 @@ class PrinterConfig:
                                           filename)
     def read_main_config(self):
         filename = self.printer.get_start_args()['config_file']
+        # verify the main config file exists and is not empty, add by guoge 20240318
+        if not os.path.exists(filename) or os.path.getsize(filename) < 100:
+            self._restore_from_latest_backup(filename)
         data = self._read_config_file(filename)
         regular_data, autosave_data = self._find_autosave_data(data)
         regular_config = self._build_config_wrapper(regular_data, filename)
@@ -419,7 +441,7 @@ class PrinterConfig:
             msg = "Unable to write config file during SAVE_CONFIG"
             logging.exception(msg)
             raise gcode.error(msg)
-        restartflag = gcmd.get_int('RESTART', 1)
+        restartflag = gcmd.get_int('RESTART', 1) # add by guoge 20240118
         logging.info("Restart flag: %d", restartflag)
         if restartflag == 0:
             return
