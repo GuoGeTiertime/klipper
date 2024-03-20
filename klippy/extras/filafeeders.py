@@ -55,21 +55,27 @@ class Feeder:  # Heater:
         algo = config.getchoice('control', algos)
         self.control = algo(self, config)
         # Setup output feeder motor
-        self.feeder_motor = config.get('feeder_motor')
-        self.stepper = self.printer.lookup_object("manual_stepper " + self.feeder_motor)
-        stepinfo = str(self.stepper)
-        logging.info("stepper:%s, name:%s",  stepinfo, self.feeder_motor)
-        # ppins = self.printer.lookup_object('pins')
-        # self.mcu_pwm = ppins.setup_pin('pwm', feeder_pin)
-        # pwm_cycle_time = config.getfloat('pwm_cycle_time', 0.100, above=0.,
-        #                                  maxval=self.feed_delay)
-        # self.mcu_pwm.setup_cycle_time(pwm_cycle_time)
+        # self.feeder_motor = config.get('feeder_motor')
+        # self.stepper = self.printer.lookup_object("manual_stepper " + self.feeder_motor)
+        # stepinfo = str(self.stepper)
+        # logging.info("stepper:%s, name:%s",  stepinfo, self.feeder_motor)
+
+        self.cur_cycle_time = 0.1
+        # Setup PWM output as stepper's pulse generator, and normal output as direct control.
+        step_pin = config.get('step_pin')
+        dir_pin = config.get('dir_pin')
+        ppins = self.printer.lookup_object('pins')
+        self.step = ppins.setup_pin('pwm', step_pin)
+        self.dir = ppins.setup_pin('digital_out', dir_pin)
+        self.stepfreq = config.getfloat('step_freq', 100, above=0., maxval=5000) # max 5kHz
+        self.cur_cycle_time = 1.0 / self.stepfreq
+        self.step.setup_cycle_time(self.cur_cycle_time)
         # self.mcu_pwm.setup_max_duration(MAX_HEAT_TIME)
         # Load additional modules
         # self.printer.load_object(config, "verify_feeder %s" % (self.name,))
         # self.printer.load_object(config, "pid_calibrate")
-        gcode = self.printer.lookup_object("gcode")
-        gcode.register_mux_command("SET_FEEDER_DISTANCE", "FEEDER",
+        self.gcode = self.printer.lookup_object("gcode")
+        self.gcode.register_mux_command("SET_FEEDER_DISTANCE", "FEEDER",
                                    self.name, self.cmd_SET_FEEDER_DISTANCE,
                                    desc=self.cmd_SET_FEEDER_DISTANCE_help)
         
