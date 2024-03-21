@@ -372,11 +372,11 @@ class HX71X:
         next_clock = self.mcu.clock32_to_clock64(params['next_clock']) # next_clock is later than the real sample time.
         last_read_time = self.mcu.clock_to_print_time(next_clock)
 
-        if value == 0:
+        if value == 0 or abs(value-0x800000)<0x100:
             self._error_cnt[oid] += 1
-            if self._error_cnt[oid] > 100 and (self._error_cnt[oid] % 16):
-                return
-            logging.info("  *** Error Senser:%s(oid:%d) can't read hx711 @ %.3f, cnt:%d, value:%d, errcnt:%d", self.name, oid, last_read_time, self._sample_cnt[oid], value, self._error_cnt[oid])
+            if (self._error_cnt[oid] < 100) or ((self._error_cnt[oid] % 16)==0):
+                logging.info("  *** Error Senser:%s(oid:%d) can't read hx711 or data error @ %.3f, cnt:%d, value:%d(0x%X), errcnt:%d", 
+                         self.name, oid, last_read_time, self._sample_cnt[oid], value, value, self._error_cnt[oid])
             return
                 
         self.weight[oid] = value * self.scale  # weight scale
@@ -401,7 +401,7 @@ class HX71X:
             
         # collision warning test
         if self.collision_err > 0 and abs(self.weight[oid]) > self.collision_err:
-            msg = "Weight senser:%s(oid:%d) collision warning, weight:%.2f. Shutdown the printer!" % (self.name, oid, self.weight[oid])
+            msg = "Weight senser:%s(oid:%d) collision warning, weight:%.2f(%d-%X). Shutdown the printer!" % (self.name, oid, self.weight[oid], value, value)
             self._loginfo(msg)
             self.gcode.run_script_from_command("M112")  # emergency stop
 
