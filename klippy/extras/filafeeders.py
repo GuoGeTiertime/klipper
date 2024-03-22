@@ -46,9 +46,7 @@ class Feeder:  # Heater:
         # feed caching
         self.next_feed_time = 0.
         self.last_feed_len = 0.
-        self.last_feed_speed = 1.
         self.total_feed_len = 0.0
-        
         self.last_feed_time = 0.0
         # Setup control algorithm sub-class
         algos = {'watermark': ControlBangBang, 'pid': ControlPID}
@@ -67,9 +65,16 @@ class Feeder:  # Heater:
         ppins = self.printer.lookup_object('pins')
         self.step = ppins.setup_pin('pwm', step_pin)
         self.dir = ppins.setup_pin('digital_out', dir_pin)
-        self.stepfreq = config.getfloat('step_freq', 100, above=0., maxval=5000) # max 5kHz
-        self.cur_cycle_time = 1.0 / self.stepfreq
-        self.step.setup_cycle_time(self.cur_cycle_time)
+
+
+        # setup stepper microstep and rotate distance.
+        self.microstep = config.getint('microstep', 16, above=0, maxval=256)
+        self.rotate_distance = config.getfloat('rotate_distance', 31.4, above=0.0) #defaul: the diameter is 10mm, so the rotate distance is 31.4mm.
+        self.scale_speed2freq = self.microstep * 200 / self.rotate_distance # 200 steps per round. default 16 microstep. the value freq for per mm/s.
+
+        self.feed_speed = config.getfloat('feed_speed', 10.0, above=0.0, maxval=100.0) # unit: mm/s, default 10mm/s.
+        self.feed_cycle_time = self._cal_step_cycle_time(self.feed_speed) # calculate the cycle time of feed stepper's pulse.
+
         # self.mcu_pwm.setup_max_duration(MAX_HEAT_TIME)
         # Load additional modules
         # self.printer.load_object(config, "verify_feeder %s" % (self.name,))
@@ -81,14 +86,26 @@ class Feeder:  # Heater:
         
         # test command: SET_FEEDER_DISTANCE FEEDER=feeder0 TARGET=1.23
 
-    def set_feed(self, read_time, value): # set feed len with speed. value is the length to feed.
-        if self.target_dis <= 0.:
-            value = 0.
-        if (read_time < self.next_feed_time or value < self.min_feed_len): 
+    def _cal_step_cycle_time(self, speed):
+        freq = speed * self.scale_speed2freq
+        return 1.0 / freq
+
+    # feed filament len at speed
+    def set_feed(self, print_time, speed, len): # set feed len with speed. value is the length to feed.
+        # set dir pin.
+        self.dir.set_digital(print_time, 1 if len > 0 else 0)
+    
+        if (print_time < self.next_feed_time or value < self.min_feed_len): 
             # not reach the next feed time or the feed len is too short.
             return
-        self.next_feed_time = read_time + self.feed_delay  # set the next feed time as now + feed_delay(sensor report time).
-        self.last_feed_len = value
+        
+        # calculate the cycle time of feed stepper's pulse and time to feed the len.
+        cycle_time = self._cal_step_cycle_time(speed)
+        feed_time = len / speed
+
+        self.next_feed_time = print_time + feed_time  # set the next feed time as now + feed time.
+        self.last_feed_len = len
+        
         speed = self.last_feed_len / self.feed_delay  # calculate the speed.
         if speed > self.max_speed:
             speed = self.max_speed
