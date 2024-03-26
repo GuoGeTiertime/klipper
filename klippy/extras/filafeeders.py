@@ -73,9 +73,11 @@ class Feeder:  # Heater:
         self.cur_feed_len = 0.          # total feed length for a feed without interruption
         self.total_feed_len = 0.0
         self.last_feed_time = 0.0
+        self.last_feed_speed = 0.0
         self.is_feeding = False
 
         self.min_feed_len = config.getfloat('min_feed_len', 0, minval=0.1)  # min feed length. not feed if len < min_feed_len.
+        self.max_feed_len = config.getfloat('max_feed_len', 10000, minval=0.1)  # max feed length. warning if curfeedlen > max_feed_len.
         self.max_speed = config.getfloat('max_speed', 1., above=0., maxval=1000.)
 
         self.cur_cycle_time = 0.1
@@ -97,6 +99,8 @@ class Feeder:  # Heater:
         self.feed_speed = config.getfloat('feed_speed', 10.0, minval=1, maxval=100.0) # unit: mm/s, default 10mm/s.
         self.feed_cycle_time = self._cal_step_cycle_time(self.feed_speed) # calculate the cycle time of feed stepper's pulse.
 
+        self.switch_invert = False # switch signal invert, for init feeding.
+
         # self.mcu_pwm.setup_max_duration(MAX_HEAT_TIME)
         # Load additional modules
         # self.printer.load_object(config, "verify_feeder %s" % (self.name,))
@@ -105,6 +109,9 @@ class Feeder:  # Heater:
         self.gcode.register_mux_command("SET_FEEDER_DISTANCE", "FEEDER",
                                    self.name, self.cmd_SET_FEEDER_DISTANCE,
                                    desc=self.cmd_SET_FEEDER_DISTANCE_help)
+        self.gcode.register_mux_command("FEED_INIT", "FEEDER",
+                                   self.name, self.cmd_FEED_INIT,
+                                   desc=self.cmd_FEED_INIT_help)
         
         # test command: SET_FEEDER_DISTANCE FEEDER=feeder0 TARGET=1.23
 
@@ -117,32 +124,41 @@ class Feeder:  # Heater:
 
     # feed filament len at speed
     def feed_filament(self, print_time, speed, len): # set feed len with speed. value is the length to feed.
-        if print_time < self.next_feed_time: 
-            # not reach the next feed time or the feed len is too short.
+        # if print_time < self.next_feed_time: 
+        if print_time < self.last_feed_time + MIN_DIRPULSE_TIME: # at least 0.1s interval.
             return
 
         # set dir pin
         self.set_dir(print_time, 1 if len > 0 else 0)
 
+        # calculate the feed time and speed. send the pulse pwm cmd.
         self.is_feeding = len != 0
-        
-        # calculate the cycle time of feed stepper's pulse and time to feed the len.
-        speed = max(0.01, min(speed, self.max_speed)) # limit the speed between 0.01 and max_speed.
-        cycle_time = self._cal_step_cycle_time(speed)
-        feed_time = len / speed
-
-        # set the feed stepper's pulse freq, 0.5 is the duty.
-        self.set_pulse(print_time, 0.5 if self.is_feeding else 0, cycle_time)
-
-        self.next_feed_time = print_time + feed_time  # set the next feed time as now + feed time.
-        self.last_feed_len = len
-
         if self.is_feeding:
-            self.total_feed_len += len
+            # calculate the cycle time of feed stepper's pulse and time to feed the len.
+            speed = max(0.01, min(speed, self.max_speed)) # limit the speed between 0.01 and max_speed.
+            cycle_time = self._cal_step_cycle_time(speed)
+            feed_time = abs(len/speed)
+            # set the feed stepper's pulse freq, 0.5 is the duty.
+            self.set_pulse(print_time, 0.5, cycle_time)
         else:
-            self.cur_feed_len = 0.0
+            speed = 0.0
+            feed_time = self.feed_delay
+            self.set_pulse(print_time, 0, 1.0)
+
+        # update feed len info
+        prevlen = (print_time - self.last_feed_time) * self.last_feed_speed
+        self.last_feed_len = prevlen
+        self.cur_feed_len += prevlen
+        self.total_feed_len += prevlen
+        # update feed time info
+        self.last_feed_speed = speed
+        self.last_feed_time = print_time
+        self.next_feed_time = print_time + feed_time  # set the next feed time as now + feed time.
 
         # verify max feed len, if over, stop feed.
+        if self.cur_feed_len > self.max_feed_len:
+            self._loginfo("feeder %s feed len:%.3fmm over max:%.3fmm" % (self.name, self.cur_feed_len, self.max_feed_len))
+            raise self.printer.command_error("Feeder %s reach the max feed lenght. feed len:%.3fmm over max:%.3fmm" % (self.name, self.cur_feed_len, self.max_feed_len))
 
         # log info for debug
         self._loginfo("feeder %s feed_filament: %.3fmm @ %.3fmm/s, cycle time:%.6f, feed time:%.3f" % (self.name, len, speed, cycle_time, feed_time))
@@ -173,8 +189,8 @@ class Feeder:  # Heater:
        
     # update feeder when the feeder's switch is pressed or released.
     def _switch_handler(self, eventtime, state):
-        self._switch_state = state        
-        if state: # switch on, pressed
+        self._switch_state = state
+        if state ^ self.switch_invert: # switch on, pressed
             self.feed_filament(eventtime, self.feed_speed, self.switch_feed_len)
             self._loginfo("feeder %s switch pressed" % self.name)
         else: # switch off, released
@@ -183,12 +199,14 @@ class Feeder:  # Heater:
             self._loginfo("feeder %s switch released" % self.name)
 
     def _switch_update_event(self, eventtime):
-        if self._switch_state: # switch pressed, continue feed filament.
+        if self._switch_state ^ self.switch_invert: # switch pressed, continue feed filament.
             self.feed_filament(eventtime, self.feed_speed, self.switch_feed_len)
             pass
         elif self.is_feeding: # switch released, stop feed filament.
-                self.feed_filament(eventtime, 0.0, 0.0)
-        return eventtime + self.feed_delay
+            self.feed_filament(eventtime, 0.0, 0.0)
+        next_time = min(eventtime + self.feed_delay, self.next_feed_time)
+        next_time = max(next_time, eventtime + 0.1) # at least 0.1s.
+        return next_time
 
     def distance_callback(self, read_time, distance):
         with self.lock:
@@ -257,7 +275,6 @@ class Feeder:  # Heater:
             'last_feed_time': self.last_feed_time}
 
     cmd_SET_FEEDER_DISTANCE_help = "Sets a feeder hold distance"
-
     def cmd_SET_FEEDER_DISTANCE(self, gcmd):
         distance = gcmd.get_float('TARGET', 0.)
         gcode = self.printer.lookup_object("gcode")
@@ -265,6 +282,12 @@ class Feeder:  # Heater:
         gcode.respond_raw(ok_msg)
         pfeeders = self.printer.lookup_object('filafeeders')
         pfeeders.set_distance(self, distance)
+
+    cmd_FEED_INIT_help = "init feed, send the filament to the nozzle."
+    def cmd_FEED_INIT(self, gcmd):
+        max_feed_len = gcmd.get_float('MAX_LEN', 1000.)
+        invert = gcmd.get_int('INVERT', 0)
+        speed = gcmd.get_float('SPEED', 20.0)
 
 
 ######################################################################
