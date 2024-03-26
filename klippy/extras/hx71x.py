@@ -524,12 +524,29 @@ class HX71X:
     #         return eventtime + self.report_time
 
     def get_status(self, eventtime):
-        return {
+        state = {
             'weight': round(self.total_weight, 2),
             'temperature': round(self.last_temp, 2),
             'measured_min_temp': round(self.measured_min, 2),
             'measured_max_temp': round(self.measured_max, 2)
         }
+
+        idx = 0
+        for oid in self.oids:
+            idx += 1
+            state['weight%d' % idx] = round(self.weight[oid], 2)
+            state['weight%d_min' % idx] = round(self.weight_min[oid], 2)
+            state['weight%d_max' % idx] = round(self.weight_max[oid], 2)
+        
+        # analyze the weight sensor data, get max diff and min diff.
+        minDiff = min(self.weight_min.values())
+        maxDiff = max(self.weight_max.values())            
+        maxErr = max(abs(minDiff), abs(maxDiff))
+        state['min_diff'] = round(minDiff, 2)
+        state['max_diff'] = round(maxDiff, 2)
+        state['max_err'] = round(maxErr, 2)
+
+        return state
 
     def setup_pin(self, pin_type, pin_params):
         msg = "add a hx71x endstop, type:%s, pin: %s", pin_type, pin_params['pin']
