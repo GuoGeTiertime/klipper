@@ -25,8 +25,9 @@ class Feeder:  # Heater:
         self.name = config.get_name().split()[-1]
         self.sensor = sensor
         self.lock = threading.Lock()
+        self.bfeeder_on = False    # feeder on/off
+        self.bInited = False    # feeder inited, has send the filament to the nozzle.
 
-        
         switch_pin = config.get('switch_pin')
         if switch_pin is not None:
             logging.info("Add feeder %s with switch:%s", self.name, switch_pin)
@@ -97,7 +98,7 @@ class Feeder:  # Heater:
         self.scale_speed2freq = self.microstep * 200 / self.rotate_distance # 200 steps per round. default 16 microstep. the value freq for per mm/s.
 
         self.feed_speed = config.getfloat('feed_speed', 10.0, minval=1, maxval=100.0) # unit: mm/s, default 10mm/s.
-        self.feed_cycle_time = self._cal_step_cycle_time(self.feed_speed) # calculate the cycle time of feed stepper's pulse.
+        self.feed_spped_init = config.getfloat('feed_speed_init', self.feed_speed * 2.0, minval=1, maxval=200.0) 
 
         self.switch_invert = False # switch signal invert, for init feeding.
 
@@ -190,8 +191,9 @@ class Feeder:  # Heater:
     # update feeder when the feeder's switch is pressed or released.
     def _switch_handler(self, eventtime, state):
         self._switch_state = state
-        if state ^ self.switch_invert: # switch on, pressed
-            self.feed_filament(eventtime, self.feed_speed, self.switch_feed_len)
+        if (state ^ self.switch_invert) and self.bfeeder_on: # switch on, pressed
+            speed = self.feed_speed if self.bInited else self.feed_spped_init
+            self.feed_filament(eventtime, speed, self.switch_feed_len)
             self._loginfo("feeder %s switch pressed" % self.name)
         else: # switch off, released
             # self.feed_filament(eventtime, 0.0, 0.0)
@@ -199,11 +201,14 @@ class Feeder:  # Heater:
             self._loginfo("feeder %s switch released" % self.name)
 
     def _switch_update_event(self, eventtime):
-        if self._switch_state ^ self.switch_invert: # switch pressed, continue feed filament.
-            self.feed_filament(eventtime, self.feed_speed, self.switch_feed_len)
+        if (self._switch_state ^ self.switch_invert) and self.bfeeder_on: # switch pressed, continue feed filament.
+            speed = self.feed_speed if self.bInited else self.feed_spped_init
+            self.feed_filament(eventtime, speed, self.switch_feed_len)
             pass
         elif self.is_feeding: # switch released, stop feed filament.
             self.feed_filament(eventtime, 0.0, 0.0)
+            if not self.bInited:
+                self.bInited = True
         next_time = min(eventtime + self.feed_delay, self.next_feed_time)
         next_time = max(next_time, eventtime + 0.1) # at least 0.1s.
         return next_time
@@ -285,9 +290,13 @@ class Feeder:  # Heater:
 
     cmd_FEED_INIT_help = "init feed, send the filament to the nozzle."
     def cmd_FEED_INIT(self, gcmd):
-        max_feed_len = gcmd.get_float('MAX_LEN', 1000.)
-        invert = gcmd.get_int('INVERT', 0)
-        speed = gcmd.get_float('SPEED', 20.0)
+        self.max_feed_len = gcmd.get_float('MAX_LEN', 1000.)
+        self.switch_invert = gcmd.get_int('INVERT', 0)
+        self.feed_speed = gcmd.get_float('SPEED', 20.0)
+        self.switch_feed_len = gcmd.get_float('FEED_LEN', self.switch_feed_len)
+        init = gcmd.get_int('INIT', 0)
+        self.bInited = not init
+        self.bfeeder_on = True
 
 
 ######################################################################
