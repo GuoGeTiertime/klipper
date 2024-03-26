@@ -15,12 +15,17 @@ import os, logging, threading
 # AMBIENT_TEMP = 25.
 PID_PARAM_BASE = 255.
 
+MIN_DIRPULSE_TIME = 0.05
+PINOUT_DELAY = 0.0 # 10ms, avoid Timer too close or Missed scheduling of next digital out event, 0.0 is ok after test.
 
 class Feeder:  # Heater:
     def __init__(self, config, sensor):
         self.printer = config.get_printer()
         self.reactor = self.printer.get_reactor()  # add by guoge 20231130.
         self.name = config.get_name().split()[-1]
+        self.sensor = sensor
+        self.lock = threading.Lock()
+
         
         switch_pin = config.get('switch_pin')
         if switch_pin is not None:
@@ -32,10 +37,7 @@ class Feeder:  # Heater:
             self.feed_delay = config.getfloat('feed_delay', 0.5, minval=0.1) # check switch per delay time
             self._switch_update_timer = self.reactor.register_timer(self._switch_update_event)
             self.printer.register_event_handler("klippy:connect", self.handle_connect_switch)
-
-        # Setup distance sensor
-        self.sensor = sensor
-        if sensor is not None:
+        elif sensor is not None:  # Setup distance sensor
             logging.info("Add feeder %s with sensor:%s", self.name, sensor)
             self.hold_dis = config.getfloat('hold_dis', minval=-1000)
             self.min_dis = config.getfloat('min_dis', minval=-1000)
@@ -53,7 +55,6 @@ class Feeder:  # Heater:
             
             self.smooth_time = config.getfloat('smooth_time', 1., above=0.)
             self.inv_smooth_time = 1. / self.smooth_time
-            self.lock = threading.Lock()
             self.last_dis = self.smoothed_dis = self.target_dis = 0.
             self.last_dis_time = 0.
             # Setup control algorithm sub-class
@@ -72,8 +73,9 @@ class Feeder:  # Heater:
         self.cur_feed_len = 0.          # total feed length for a feed without interruption
         self.total_feed_len = 0.0
         self.last_feed_time = 0.0
+        self.is_feeding = False
 
-        self.min_feed_len = config.getfloat('min_feed_len', minval=0.1)  # min feed length. not feed if len < min_feed_len.
+        self.min_feed_len = config.getfloat('min_feed_len', 0, minval=0.1)  # min feed length. not feed if len < min_feed_len.
         self.max_speed = config.getfloat('max_speed', 1., above=0., maxval=1000.)
 
         self.cur_cycle_time = 0.1
@@ -83,14 +85,16 @@ class Feeder:  # Heater:
         ppins = self.printer.lookup_object('pins')
         self.step = ppins.setup_pin('pwm', step_pin)
         self.dir = ppins.setup_pin('digital_out', dir_pin)
-
+        self.dir.setup_max_duration(0.)
+        self.last_dirtime = 0.0
+        self.last_pulsetime = 0.0
 
         # setup stepper microstep and rotate distance.
-        self.microstep = config.getint('microstep', 16, above=0, maxval=256)
-        self.rotate_distance = config.getfloat('rotate_distance', 31.4, above=0.0) #defaul: the diameter is 10mm, so the rotate distance is 31.4mm.
+        self.microstep = config.getint('microstep', 16, minval=1, maxval=256)
+        self.rotate_distance = config.getfloat('rotate_distance', 31.4, above=0.1) #defaul: the diameter is 10mm, so the rotate distance is 31.4mm.
         self.scale_speed2freq = self.microstep * 200 / self.rotate_distance # 200 steps per round. default 16 microstep. the value freq for per mm/s.
 
-        self.feed_speed = config.getfloat('feed_speed', 10.0, above=0.0, maxval=100.0) # unit: mm/s, default 10mm/s.
+        self.feed_speed = config.getfloat('feed_speed', 10.0, minval=1, maxval=100.0) # unit: mm/s, default 10mm/s.
         self.feed_cycle_time = self._cal_step_cycle_time(self.feed_speed) # calculate the cycle time of feed stepper's pulse.
 
         # self.mcu_pwm.setup_max_duration(MAX_HEAT_TIME)
@@ -104,32 +108,64 @@ class Feeder:  # Heater:
         
         # test command: SET_FEEDER_DISTANCE FEEDER=feeder0 TARGET=1.23
 
+    def _loginfo(self, msg):
+        self.gcode.respond_raw(msg)
+
     def _cal_step_cycle_time(self, speed):
         freq = speed * self.scale_speed2freq
         return 1.0 / freq
 
     # feed filament len at speed
     def feed_filament(self, print_time, speed, len): # set feed len with speed. value is the length to feed.
-        # set dir pin.
-        self.dir.set_digital(print_time, 1 if len > 0 else 0)
-    
-        if (print_time < self.next_feed_time or len < self.min_feed_len): 
+        if print_time < self.next_feed_time: 
             # not reach the next feed time or the feed len is too short.
             return
+
+        # set dir pin
+        self.set_dir(print_time, 1 if len > 0 else 0)
+
+        self.is_feeding = len != 0
         
         # calculate the cycle time of feed stepper's pulse and time to feed the len.
+        speed = max(0.01, min(speed, self.max_speed)) # limit the speed between 0.01 and max_speed.
         cycle_time = self._cal_step_cycle_time(speed)
         feed_time = len / speed
 
+        # set the feed stepper's pulse freq, 0.5 is the duty.
+        self.set_pulse(print_time, 0.5 if self.is_feeding else 0, cycle_time)
+
         self.next_feed_time = print_time + feed_time  # set the next feed time as now + feed time.
         self.last_feed_len = len
-        self.cur_feed_len += len
 
-        # set the feed stepper's pulse freq
-        self.step.set_pwm(self.next_feed_time, 0.5, cycle_time)
+        if self.is_feeding:
+            self.total_feed_len += len
+        else:
+            self.cur_feed_len = 0.0
+
+        # verify max feed len, if over, stop feed.
 
         # log info for debug
-        logging.info("feeder %s feed_filament: %.3fmm @ %.3fmm/s, cycle time:%.3f, feed time:%.3f" % (self.name, len, speed, cycle_time, feed_time))
+        self._loginfo("feeder %s feed_filament: %.3fmm @ %.3fmm/s, cycle time:%.6f, feed time:%.3f" % (self.name, len, speed, cycle_time, feed_time))
+            
+    def set_dir(self, print_time, value):
+        print_time = max(print_time + PINOUT_DELAY, self.last_dirtime + MIN_DIRPULSE_TIME)
+        self.last_dirtime = print_time
+        toolhead = self.printer.lookup_object('toolhead')
+        toolhead.register_lookahead_callback(
+            lambda print_time: self.dir.set_digital(print_time, value))
+        
+    # debug, not used. show set_pwm()'s call times and value
+    # def _set_pulse(self, print_time, value, cycle_time):
+    #     self.step.set_pwm(print_time, value, cycle_time)
+    #     # self._loginfo("feeder %s set cycle time: %.6fs @ %.3f" % (self.name, cycle_time, print_time))
+        
+    def set_pulse(self, print_time, value, cycle_time):
+        print_time = max(print_time + PINOUT_DELAY, self.last_pulsetime + MIN_DIRPULSE_TIME)
+        self.last_pulsetime = print_time
+        toolhead = self.printer.lookup_object('toolhead')
+        toolhead.register_lookahead_callback(
+            lambda print_time: self.step.set_pwm(print_time, value, cycle_time))
+            # lambda print_time: self._set_pulse(print_time, value, cycle_time))
 
     def handle_connect_switch(self):
         self.reactor.update_timer(self._switch_update_timer, self.reactor.NOW)
@@ -137,17 +173,21 @@ class Feeder:  # Heater:
        
     # update feeder when the feeder's switch is pressed or released.
     def _switch_handler(self, eventtime, state):
-        self._switch_state = state
+        self._switch_state = state        
         if state: # switch on, pressed
             self.feed_filament(eventtime, self.feed_speed, self.switch_feed_len)
-            self.feeding = True
+            self._loginfo("feeder %s switch pressed" % self.name)
         else: # switch off, released
-            self.feeding = False
-            self.cur_feed_len = 0.0
+            # self.feed_filament(eventtime, 0.0, 0.0)
+            # self.cur_feed_len = 0.0
+            self._loginfo("feeder %s switch released" % self.name)
 
     def _switch_update_event(self, eventtime):
         if self._switch_state: # switch pressed, continue feed filament.
             self.feed_filament(eventtime, self.feed_speed, self.switch_feed_len)
+            pass
+        elif self.is_feeding: # switch released, stop feed filament.
+                self.feed_filament(eventtime, 0.0, 0.0)
         return eventtime + self.feed_delay
 
     def distance_callback(self, read_time, distance):
@@ -210,22 +250,11 @@ class Feeder:  # Heater:
             target_dis = max(self.min_dis, min(self.max_dis, target_dis))
         self.target_dis = target_dis
 
-    def stats(self, eventtime):
-        with self.lock:
-            target_dis = self.target_dis
-            last_dis = self.last_dis
-            last_feed_len = self.last_feed_len
-        is_active = target_dis or last_dis > 1.0
-        return is_active, '%s: target=%.0f distance=%.1f feed len=%.3f' % (
-            self.name, target_dis, last_dis, last_feed_len)
-
     def get_status(self, eventtime):
-        with self.lock:
-            target_dis = self.target_dis
-            smoothed_dis = self.smoothed_dis
-            last_feed_len = self.last_feed_len
-        return {'distance': round(smoothed_dis, 2), 'target': target_dis,
-                'feedlen': last_feed_len}
+        return {
+            'total_feed_len': self.total_feed_len,
+            'cur_feed_len': self.cur_feed_len,
+            'last_feed_time': self.last_feed_time}
 
     cmd_SET_FEEDER_DISTANCE_help = "Sets a feeder hold distance"
 
@@ -423,48 +452,6 @@ class RunoutHelper:
     def cmd_SET_FILAMENT_SENSOR(self, gcmd):
         self.sensor_enabled = gcmd.get_int("ENABLE", 1)
 
-class SwitchFeeder:
-    def __init__(self, config):
-        printer = config.get_printer()
-        buttons = printer.load_object(config, 'buttons')
-        switch_pin = config.get('switch_pin')
-        buttons.register_buttons([switch_pin], self._button_handler)
-        self.state = False
-        self.feeding = False
-    def _button_handler(self, eventtime, state):
-        self.last_state = state
-        if state: # switch on, pressed
-            self.feed_filament(self, eventtime, self.feed_speed, self.feed_distance)
-            self.feeding = True
-        else: # switch off, released
-            self.feeding = False
-
-    # feed filament len at speed
-    def feed_filament(self, print_time, speed, len): # set feed len with speed. value is the length to feed.
-        # set dir pin.
-        self.dir.set_digital(print_time, 1 if len > 0 else 0)
-    
-        if (print_time < self.next_feed_time or len < self.min_feed_len): 
-            # not reach the next feed time or the feed len is too short.
-            return
-        
-        # calculate the cycle time of feed stepper's pulse and time to feed the len.
-        cycle_time = self._cal_step_cycle_time(speed)
-        feed_time = len / speed
-
-        self.next_feed_time = print_time + feed_time  # set the next feed time as now + feed time.
-        self.last_feed_len = len
-
-        # set the feed stepper's pulse freq
-        self.step.set_pwm(self.next_feed_time, 0.5, cycle_time)
-
-        # log info for debug
-        logging.info("feeder %s feed_filament: %.3fmm @ %.3fmm/s, cycle time:%.3f, feed time:%.3f" % (self.name, len, speed, cycle_time, feed_time))
-    def get_status(self, eventtime):
-        return {
-            "feeder_switch": self.state,
-            "feeding": bool(self.sensor_enabled)}
-
 
 class FilaFeeders:  # PrinterHeaters:
     def __init__(self, config):
@@ -508,21 +495,13 @@ class FilaFeeders:  # PrinterHeaters:
         if feeder_name in self.feeders:
             raise config.error("Feeder %s already registered" % (feeder_name,))
         
-        # Setup Feeder type, switch or distance sensor.
-        type = config.get('feedtype', 'swtich')
-        if type == 'switch':
-            feeder = SwitchFeeder(config)
-            return feeder
-        elif type == 'distance':
         # Setup distance sensor/feeder
-            sensor = self.setup_sensor(config)
-            # Create feeder
-            self.feeders[feeder_name] = feeder = Feeder(config, sensor)
-            self.register_sensor(config, feeder, gcode_id)
-            self.available_feeders.append(config.get_name())
-            return feeder
-        else:
-            raise config.error("Unknown feeder type '%s'" % (type,))
+        sensor = self.setup_sensor(config)
+        # Create feeder
+        self.feeders[feeder_name] = feeder = Feeder(config, sensor)
+        self.register_sensor(config, feeder, gcode_id)
+        self.available_feeders.append(config.get_name())
+        return feeder
 
     def get_all_feeders(self):
         return self.available_feeders
