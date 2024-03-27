@@ -125,6 +125,10 @@ class Feeder:  # Heater:
 
     # feed filament len at speed
     def feed_filament(self, print_time, speed, len): # set feed len with speed. value is the length to feed.
+        if not self.bfeeder_on:
+            return
+        if abs(len) < self.min_feed_len:
+            len = 0.0
         # if print_time < self.next_feed_time: 
         if print_time < self.last_feed_time + MIN_DIRPULSE_TIME: # at least 0.1s interval.
             return
@@ -191,7 +195,7 @@ class Feeder:  # Heater:
     # update feeder when the feeder's switch is pressed or released.
     def _switch_handler(self, eventtime, state):
         self._switch_state = state
-        if (state ^ self.switch_invert) and self.bfeeder_on: # switch on, pressed
+        if state ^ self.switch_invert: # switch on, pressed
             speed = self.feed_speed if self.bInited else self.feed_spped_init
             self.feed_filament(eventtime, speed, self.switch_feed_len)
             self._loginfo("feeder %s switch pressed" % self.name)
@@ -201,10 +205,9 @@ class Feeder:  # Heater:
             self._loginfo("feeder %s switch released" % self.name)
 
     def _switch_update_event(self, eventtime):
-        if (self._switch_state ^ self.switch_invert) and self.bfeeder_on: # switch pressed, continue feed filament.
+        if self._switch_state ^ self.switch_invert: # switch pressed, continue feed filament.
             speed = self.feed_speed if self.bInited else self.feed_spped_init
             self.feed_filament(eventtime, speed, self.switch_feed_len)
-            pass
         elif self.is_feeding: # switch released, stop feed filament.
             self.feed_filament(eventtime, 0.0, 0.0)
             if not self.bInited:
@@ -288,6 +291,7 @@ class Feeder:  # Heater:
         pfeeders = self.printer.lookup_object('filafeeders')
         pfeeders.set_distance(self, distance)
 
+    # eg: FEED_INIT FEEDER=feeder1 SPEED=20.0 MAX_LEN=1000.0 INVERT=0 FEED_LEN=5.0 INIT=0 
     cmd_FEED_INIT_help = "init feed, send the filament to the nozzle."
     def cmd_FEED_INIT(self, gcmd):
         self.max_feed_len = gcmd.get_float('MAX_LEN', 1000.)
