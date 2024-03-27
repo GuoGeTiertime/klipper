@@ -93,6 +93,9 @@ class TMCErrorCheck:
         self.mcu_tmc = mcu_tmc
         self.fields = mcu_tmc.get_fields()
         self.check_timer = None
+        self.check_disabled = False
+        self.check_start_time = 0
+        self.check_auto_disable = 600   # stop checks after 10 minutes
         self.last_drv_status = self.last_drv_fields = None
         # Setup for GSTAT query
         reg_name = self.fields.lookup_register("drv_err")
@@ -175,6 +178,10 @@ class TMCErrorCheck:
             self.adc_temp = None
             return
     def _do_periodic_check(self, eventtime):
+        if self.check_disabled:
+            return eventtime + 1.
+        if self.check_auto_disable>0 and  eventtime > self.check_start_time + self.check_auto_disable:
+            self.check_disabled = True
         try:
             self._query_register(self.drv_status_reg_info)
             if self.gstat_reg_info is not None:
@@ -191,6 +198,7 @@ class TMCErrorCheck:
         self.printer.get_reactor().unregister_timer(self.check_timer)
         self.check_timer = None
     def start_checks(self):
+        self.check_disabled = False
         if self.check_timer is not None:
             self.stop_checks()
         cleared_flags = 0
@@ -200,6 +208,7 @@ class TMCErrorCheck:
                                                  try_clear=self.clear_gstat)
         reactor = self.printer.get_reactor()
         curtime = reactor.monotonic()
+        self.check_start_time = curtime
         self.check_timer = reactor.register_timer(self._do_periodic_check,
                                                   curtime + 1.)
         if cleared_flags:
@@ -260,6 +269,9 @@ class TMCCommandHelper:
         gcode.register_mux_command("SET_TMC_CURRENT", "STEPPER", self.name,
                                    self.cmd_SET_TMC_CURRENT,
                                    desc=self.cmd_SET_TMC_CURRENT_help)
+        gcode.register_mux_command("SET_TMC_CHECK", "STEPPER", self.name,
+                                   self.cmd_SET_TMC_CHECK,
+                                   desc=self.cmd_SET_TMC_CHECK_help)
     def _init_registers(self, print_time=None):
         # Send registers
         for reg_name, val in self.fields.registers.items():
@@ -312,6 +324,11 @@ class TMCCommandHelper:
         else:
             gcmd.respond_info("Run Current: %0.2fA Hold Current: %0.2fA"
                               % (prev_cur, prev_hold_cur))
+    cmd_SET_TMC_CHECK_help = "Enable or disable the TMC Check function"
+    def cmd_SET_TMC_CHECK(self, gcmd):
+        bEnable = gcmd.get_bool('ENABLE', default=True)
+        self.echeck_helper.check_disabled = not bEnable
+        self.echeck_helper.check_auto_disable = gcmd.get_int('AUTO', default=self.echeck_helper.check_auto_disable, minval=0)
     # Stepper phase tracking
     def _get_phases(self):
         return (256 >> self.fields.get_field("mres")) * 4
