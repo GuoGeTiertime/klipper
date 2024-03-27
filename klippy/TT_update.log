@@ -10,6 +10,7 @@ hx71x.py
 manual_stepper.py
 probe.py
 save_variables.py
+TMC.py  //添加自动关闭TMC check的功能
 z_tilt.py
 
 
