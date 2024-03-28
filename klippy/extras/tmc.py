@@ -326,9 +326,9 @@ class TMCCommandHelper:
                               % (prev_cur, prev_hold_cur))
     cmd_SET_TMC_CHECK_help = "Enable or disable the TMC Check function"
     def cmd_SET_TMC_CHECK(self, gcmd):
-        bEnable = gcmd.get_bool('ENABLE', default=True)
+        bEnable = gcmd.get_int('ENABLE', default=1)
         self.echeck_helper.check_disabled = not bEnable
-        self.echeck_helper.check_auto_disable = gcmd.get_int('AUTO', default=self.echeck_helper.check_auto_disable, minval=0)
+        self.echeck_helper.check_auto_disable = gcmd.get_int('DURATION', default=self.echeck_helper.check_auto_disable, minval=0)
     # Stepper phase tracking
     def _get_phases(self):
         return (256 >> self.fields.get_field("mres")) * 4
