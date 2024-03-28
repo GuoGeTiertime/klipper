@@ -296,7 +296,7 @@ class Feeder:  # Heater:
     def cmd_FEED_INIT(self, gcmd):
         self.max_feed_len = gcmd.get_float('MAX_LEN', 1000.)
         self.switch_invert = gcmd.get_int('INVERT', 0)
-        self.feed_speed = gcmd.get_float('SPEED', 20.0)
+        self.feed_speed = gcmd.get_float('SPEED', self.feed_speed)
         self.switch_feed_len = gcmd.get_float('FEED_LEN', self.switch_feed_len)
         init = gcmd.get_int('INIT', 0)
         self.bInited = not init
