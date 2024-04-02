@@ -6,6 +6,8 @@
 import logging
 import mcu, chelper
 
+MIN_TRIGGER_DELAY_TIME = 0.1  #min time after begin home move. avoid trigger too early before movement.
+
 ######################################################################
 # Compatible Sensors:
 #       HX710A / HX711 / HX712 
@@ -29,6 +31,8 @@ class HX71X_endstop:
         self.bHoming = False
         self.bTouched = False
         self.trigger_time = -1.0
+
+        self.activetime = 0.0
 
     def get_mcu(self):
         return self._mcu
@@ -83,6 +87,7 @@ class HX71X_endstop:
         # 设定complete(1)可以模拟IO端口触发
         # self._trigger_completion.complete(1)
 
+        self.activetime = print_time
         self.bHoming = True
         self.bTouched = False
         self.trigger_time = -1.0
@@ -95,7 +100,7 @@ class HX71X_endstop:
 
         return self._trigger_completion
 
-    def home_wait(self, home_end_time):
+    def home_wait(self, home_end_time): # the endstop has been triggered or movement is done.
         logging.info("wait home in hx71x virtual stopend object")
 
         # # 注销定时器,停止更新限位状态
@@ -129,6 +134,9 @@ class HX71X_endstop:
         return self.trigger_time
     
     def trigger(self, eventime):
+        if( eventime - self.activetime < MIN_TRIGGER_DELAY_TIME):
+            logging.info("Error, hx71x virtual endstop is triggered too early @ %.4f, active: %.4f", eventime, self.activetime)
+            return
         if self._trigger_completion is not None :
             msg = "hx71x virtual endstop is triggered @ %.4f with weight:%.2f" % (eventime, self._hx71x.total_weight)
             self._hx71x._loginfo(msg)
