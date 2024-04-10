@@ -13,6 +13,7 @@ class AutoPrint:
         self.maxJobs = config.getint('maxjobs', 20, minval=1, maxval=100)
         self.allJobs = []
         self.autoflag = 0
+        self.pause = True #default pause the auto print process.
         try:
             if not os.path.exists(self.filename):
                 open(self.filename, "w").close()
@@ -42,6 +43,8 @@ class AutoPrint:
                                 desc=self.cmd_AUTO_MOVEJOB_help)
         self.gcode.register_command('AUTO_CLEAR', self.cmd_AUTO_CLEAR, 
                                 desc=self.cmd_AUTO_CLEAR_help)
+        self.gcode.register_command('AUTO_PAUSE', self.cmd_AUTO_PAUSE, 
+                                desc=self.cmd_AUTO_PAUSE_help)
     def loadJobs(self):
         alljobs = []
         jobfile = configparser.ConfigParser()
@@ -106,6 +109,10 @@ class AutoPrint:
             msg = "Job %d: %s" % (i, self._jobinfo(job))
             info.append(msg)
         self.gcode.respond_info("Jobs in auto print list:\n" + "\n".join(info))
+
+    def _pauselist(self):
+        self.autoflag = 0
+        self.pause = True
 
     cmd_AUTO_ADDJOB_help = "add a print job to auto print job list"
     def cmd_AUTO_ADDJOB(self, gcmd):
@@ -188,7 +195,7 @@ class AutoPrint:
     def cmd_AUTO_FINISHJOB(self, gcmd):
         if self.autoflag != 1:   # only set to finish state when the job is printed from auto print list, and finised successfully!
             self._loginfo("Not in auto print mode, can't finish job, autoflag: %d" % self.autoflag)
-            self.autoflag = 0   # maybe reset to 0 if the job is not printed from auto print list or flag is wrong.
+            self._pauselist()
             return
 
         if len(self.allJobs) == 0:
@@ -210,7 +217,7 @@ class AutoPrint:
     def cmd_AUTO_PREPARENEXT(self, gcmd):
         if self.autoflag != 2:  # only set to prepare state when the job is finished successfully!
             self._loginfo("Print not finished succesufully, can't auto prepare next job, autoflag: %d" % self.autoflag)
-            self.autoflag = 0   # maybe reset to 0 if the job is not printed from auto print list or flag is wrong.
+            self._pauselist()
             return
 
         self.autoflag = 3 # set to begin prepare state
@@ -224,7 +231,7 @@ class AutoPrint:
     def cmd_AUTO_PREPARE_OK(self, gcmd):
         if self.autoflag != 3:  # only set to prepare state when the job is finished successfully!
             self._loginfo("Prepare for next job failed, autoflag: %d" % self.autoflag)
-            self.autoflag = 0   # maybe reset to 0 if the job is not printed from auto print list or flag is wrong.
+            self._pauselist()
             return
         
         self.autoflag = 4
@@ -233,12 +240,20 @@ class AutoPrint:
     def cmd_AUTO_STARTNEXT(self, gcmd):
         if len(self.allJobs) == 0:
             self.gcode.respond_info("No jobs in the autoprint list")
+            self._pauselist()
             return
         
         flag = gcmd.get_int('FLAG', default=-1, minval=-1, maxval=4)
         if( flag != -1 and flag != self.autoflag):
             self._loginfo("Not in the right state to start next job, autoflag: %d" % self.autoflag)
-            self.autoflag = 0   # reset flag to 0 forcibly
+            self._pauselist()
+            return
+        
+        if flag==-1: # force to resume the auto print list.
+            self.pause = False
+
+        if self.pause:
+            self._loginfo("Auto print is paused, can't start next job")
             return
 
         job = self.allJobs[0]
@@ -261,6 +276,17 @@ class AutoPrint:
             self._loginfo("Job %d: " % idx, self.allJobs[idx])
         else:
             self._logalljobs()
+
+    # 添加帮助信息
+    cmd_AUTO_PAUSE_help = "Pause/resume the auto print process"
+    # 实现 AUTO_PAUSE 命令
+    def cmd_AUTO_PAUSE(self, gcmd):
+        bPause = gcmd.get_int('PAUSE', 0 if self.pause else 1, minval=0, maxval=1)
+        self.pause = not not bPause
+        if self.pause:
+            self._loginfo("Auto print paused")
+        else:
+            self._loginfo("Auto print resumed")
 
     def get_status(self, eventtime):
         return {'autoprint_jobs': self.allJobs}
