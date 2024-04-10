@@ -42,6 +42,8 @@ choice
         bool "Extruder"
     config MACH_BED
         bool "Bed"
+    config MACH_FILA
+        bool "Fila"
 endchoice
 
 source "src/avr/Kconfig"
@@ -203,3 +205,4 @@ config MCUFUNC
     default "MainBoard"   if MACH_MAINBOARD
     default "Extruder"    if MACH_EXTRUDER
     default "Bed"         if MACH_BED
+    default "Fila"        if MACH_FILA
