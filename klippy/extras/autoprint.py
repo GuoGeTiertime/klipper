@@ -12,12 +12,17 @@ class AutoPrint:
         self.filename = os.path.expanduser(config.get('filename'))
         self.maxJobs = config.getint('maxjobs', 20, minval=1, maxval=100)
         self.allJobs = []
+        self.autoflag = 0
         try:
             if not os.path.exists(self.filename):
                 open(self.filename, "w").close()
             self.loadJobs()
         except self.printer.command_error as e:
             raise config.error(str(e))
+        
+        gcode_macro = self.printer.load_object(config, 'gcode_macro')
+        self.prepare_gcode = gcode_macro.load_template(config, "prepare_gcode", "AUTO_PREPARE_OK")
+
         self.gcode = self.printer.lookup_object('gcode')
         self.gcode.register_command('AUTO_ADDJOB', self.cmd_AUTO_ADDJOB,
                                 desc=self.cmd_AUTO_ADDJOB_help)
@@ -25,6 +30,10 @@ class AutoPrint:
                                 desc=self.cmd_AUTO_DELJOB_help)
         self.gcode.register_command('AUTO_FINISHJOB', self.cmd_AUTO_FINISHJOB,
                                 desc=self.cmd_AUTO_FINISHJOB_help)
+        self.gcode.register_command('AUTO_PREPARENEXT', self.cmd_AUTO_PREPARENEXT,
+                                desc=self.cmd_AUTO_PREPARENEXT_help)
+        self.gcode.register_command('AUTO_PREPARE_OK', self.cmd_AUTO_PREPARE_OK,
+                                desc=self.cmd_AUTO_PREPARE_OK_help)
         self.gcode.register_command('AUTO_STARTNEXT', self.cmd_AUTO_STARTNEXT,
                                 desc=self.cmd_AUTO_STARTNEXT_help)
         self.gcode.register_command('AUTO_LIST', self.cmd_AUTO_LIST,
@@ -85,8 +94,10 @@ class AutoPrint:
     def _jobinfo(self, job):
         return "File:%s, printed %d/%d, date: %s" % (job['filename'], job['completed'], job['times'], job['date'])
     
-    def _loginfo(self, head, job):
-        msg = head + self._jobinfo(job)
+    def _loginfo(self, head, job=None):
+        msg = head
+        if job is not None:
+            msg += self._jobinfo(job)
         self.gcode.respond_info(msg)
 
     def _logalljobs(self):
@@ -175,8 +186,13 @@ class AutoPrint:
 
     cmd_AUTO_FINISHJOB_help = "finish a job and remove it from auto print job list if it has been printed enough times"
     def cmd_AUTO_FINISHJOB(self, gcmd):
+        if self.autoflag != 1:   # only set to finish state when the job is printed from auto print list, and finised successfully!
+            self._loginfo("Not in auto print mode, can't finish job, autoflag: %d" % self.autoflag)
+            self.autoflag = 0   # maybe reset to 0 if the job is not printed from auto print list or flag is wrong.
+            return
+
         if len(self.allJobs) == 0:
-            self.gcode.respond_info("No jobs to finish")
+            self._loginfo("No jobs to finish")
             return
         
         job = self.allJobs[0]
@@ -187,16 +203,49 @@ class AutoPrint:
         else:
            self._loginfo("job printed, ", job)
         self.saveJobs()
+
+        self.autoflag = 2   # set to finish state
+
+    cmd_AUTO_PREPARENEXT_help = "Perpare for next job, change platform or other things if needed"
+    def cmd_AUTO_PREPARENEXT(self, gcmd):
+        if self.autoflag != 2:  # only set to prepare state when the job is finished successfully!
+            self._loginfo("Print not finished succesufully, can't auto prepare next job, autoflag: %d" % self.autoflag)
+            self.autoflag = 0   # maybe reset to 0 if the job is not printed from auto print list or flag is wrong.
+            return
+
+        self.autoflag = 3 # set to begin prepare state
+
+        # run a gcode cmd to prepare for next job, like change platform or other things
+        cmdstr = self.prepare_gcode.render()
+        self._loginfo("Run parpare next gcode cmd: %s" % cmdstr)
+        self.gcode.run_script_from_command(cmdstr)
+
+    cmd_AUTO_PREPARE_OK_help = "Perpare for next job, change platform or other things if needed"
+    def cmd_AUTO_PREPARE_OK(self, gcmd):
+        if self.autoflag != 3:  # only set to prepare state when the job is finished successfully!
+            self._loginfo("Prepare for next job failed, autoflag: %d" % self.autoflag)
+            self.autoflag = 0   # maybe reset to 0 if the job is not printed from auto print list or flag is wrong.
+            return
         
+        self.autoflag = 4
+
     cmd_AUTO_STARTNEXT_help = "start next job in auto print job list"
     def cmd_AUTO_STARTNEXT(self, gcmd):
         if len(self.allJobs) == 0:
             self.gcode.respond_info("No jobs in the autoprint list")
             return
+        
+        flag = gcmd.get_int('FLAG', default=-1, minval=-1, maxval=4)
+        if( flag != -1 and flag != self.autoflag):
+            self._loginfo("Not in the right state to start next job, autoflag: %d" % self.autoflag)
+            self.autoflag = 0   # reset flag to 0 forcibly
+            return
+
         job = self.allJobs[0]
         self._loginfo("Start next job, ", job)
 
         self.gcode.run_script_from_command( "SDCARD_PRINT_FILE FILENAME=%s" % job['filename'])
+        self.autoflag = 1 # set to start state
 
     cmd_AUTO_LIST_help = "list all jobs info or Specified job info"
     def cmd_AUTO_LIST(self, gcmd):
