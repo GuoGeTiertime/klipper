@@ -7,6 +7,7 @@ import logging
 import mcu, chelper
 
 MIN_TRIGGER_DELAY_TIME = 0.1  #min time after begin home move. avoid trigger too early before movement.
+MIN_REPORT_TIME = 0.01
 
 ######################################################################
 # Compatible Sensors:
@@ -31,6 +32,8 @@ class HX71X_endstop:
         self.bHoming = False
         self.bTouched = False
         self.trigger_time = -1.0
+        
+        self.deformation = 0   # error of deformation of platform with nozzle.
 
         self.activetime = 0.0
 
@@ -100,7 +103,7 @@ class HX71X_endstop:
 
         return self._trigger_completion
 
-    def home_wait(self, home_end_time): # the endstop has been triggered or movement is done.
+    def home_wait(self, home_end_time, homespeed): # the endstop has been triggered or movement is done.
         logging.info("wait home in hx71x virtual stopend object")
 
         # # 注销定时器,停止更新限位状态
@@ -131,6 +134,12 @@ class HX71X_endstop:
         # self.query_endstop(home_end_time)
         # /next_clock = self._mcu.clock32_to_clock64(params['next_clock'])
         # return self._mcu.clock_to_print_time(self._startclock - self._rest_ticks)
+        
+        # modify the trigger time by deformation(weight) of probe.
+        if homespeed>0:
+            self.trigger_time -= self.deformation / homespeed
+            # msg = "hx71x endstop deformation:%.4f, speed:%.1f, time offset:%.4f" % (self.deformation, homespeed, self.deformation / homespeed)
+            # self._hx71x._loginfo(msg)
         return self.trigger_time
     
     def trigger(self, eventime):
@@ -138,8 +147,8 @@ class HX71X_endstop:
             logging.info("Error, hx71x virtual endstop is triggered too early @ %.4f, active: %.4f", eventime, self.activetime)
             return
         if self._trigger_completion is not None :
-            msg = "hx71x virtual endstop is triggered @ %.4f with weight:%.2f" % (eventime, self._hx71x.total_weight)
-            self._hx71x._loginfo(msg)
+            # msg = "hx71x virtual endstop is triggered @ %.4f with weight:%.2f" % (eventime, self._hx71x.total_weight)
+            # self._hx71x._loginfo(msg)
             self._trigger_completion.complete(1)
             if not self.bTouched:
                 self.bTouched = True
@@ -221,7 +230,7 @@ class HX71X:
             self.read_time[oid] = 0.0
 
         # update period
-        self.report_time = config.getfloat('hx71x_report_time', 1, minval=0.02)
+        self.report_time = config.getfloat('hx71x_report_time', 1, minval=MIN_REPORT_TIME)
         self.pulse_cnt = config.getint('hx71x_pluse_cnt', 25)
 
         # unit scale
@@ -231,8 +240,9 @@ class HX71X:
         self.endstop_base = config.getfloat('endstop_base', 0.0)
         self.endstop_threshold = config.getfloat('endstop_threshold', 100.0)
         self.endstop_max = config.getfloat('endstop_max', self.endstop_threshold * 20)
-        self.endstop_report_time = config.getfloat('endstop_report_time', 0.05, minval=0.02)
+        self.endstop_report_time = config.getfloat('endstop_report_time', 0.05, minval=MIN_REPORT_TIME)
         self.endstop_trigger_delay = config.getfloat('endstop_trigger_deley', 0.01)
+        self.endstop_deformation = config.getfloat("endstop_deformation", 600.0) # 600 gram / 0.1mm deformation
 
         # set collision warning value for endstop or z motor collision
         self.collision_err = config.getfloat('collision_err', 0.0)
@@ -304,14 +314,16 @@ class HX71X:
     def cmd_TARE_WEIGHT(self, gcmd):
         for oid in self.oids:
             self._sample_tare[oid] += self.weight[oid]
+            self.weight[oid] = 0.0
             self.weight_min[oid] = self.weight_max[oid] = 0.0
+
         self.total_weight = self.total_weight_min = self.total_weight_max = 0.0
 
     cmd_RESPONSE_WEIGHT_help = "Set the GCode respose time of the weight sensor, paramters: TIME, THRESHOLD, REPORT"
     def cmd_RESPONSE_WEIGHT(self, gcmd):
         self.gcode_response_time = gcmd.get_float('TIME', self.gcode_response_time, minval=0.0)
         self.gcode_response_threshold = gcmd.get_float('THRESHOLD', self.gcode_response_threshold, minval=0.0)
-        self.report_time = gcmd.get_float('REPORT', self.report_time, minval=0.02)
+        self.report_time = gcmd.get_float('REPORT', self.report_time, minval=MIN_REPORT_TIME)
         self.updateNow()
         msg = "Set HX71X sensor response time: %.2f, report time:%.2f, threshold: %.2f" % (self.gcode_response_time, self.report_time, self.gcode_response_threshold)
         self._loginfo(msg)
@@ -462,6 +474,7 @@ class HX71X:
         if (self._endstop is not None) and self._endstop.bHoming:
             # call endstop trigger function.
             if self.is_endstop_on():
+                self._endstop.deformation = 0.1 * self.total_weight / self.endstop_deformation
                 self._endstop.trigger(last_read_time - self.endstop_trigger_delay)
 
     # compare the total weight with threshold, if total weight is bigger than it, return True.

@@ -293,7 +293,7 @@ class MCU_endstop:
              sample_count, rest_ticks, triggered ^ self._invert,
              etrsync.get_oid(), etrsync.REASON_ENDSTOP_HIT], reqclock=clock)
         return self._trigger_completion
-    def home_wait(self, home_end_time):
+    def home_wait(self, home_end_time, homespeed=0.):
         etrsync = self._trsyncs[0]
         etrsync.set_home_end_time(home_end_time)
         if self._mcu.is_fileoutput():
