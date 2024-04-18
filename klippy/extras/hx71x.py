@@ -61,9 +61,9 @@ class HX71X_endstop:
 
     def home_start(self, print_time, sample_time, sample_count, rest_time,
                    triggered=True):
-        logging.info("start home in hx71x virtual stopend object")
-        logging.info("params: %.6f, %.6f, %d, rest time:%.6f, %d", 
-                     print_time, sample_time, sample_count, rest_time, triggered)
+        # logging.info("start home in hx71x virtual stopend object")
+        # logging.info("params: %.6f, %.6f, %d, rest time:%.6f, %d", 
+        #              print_time, sample_time, sample_count, rest_time, triggered)
         #print_time 打印机时间,单位为秒.
         #sample_time 第一次触发后的采样间隔, 做sample_count递减时需要的间隔时间.防止误报
         # sample_count 采样计数, 需要有count数量的采样才认为可以触发.防止误报.

@@ -190,8 +190,10 @@ MIN_KIN_TIME = 0.100
 MOVE_BATCH_TIME = 0.500
 SDS_CHECK_TIME = 0.001 # step+dir+step filter in stepcompress.c
 
-DRIP_SEGMENT_TIME = 0.050
-DRIP_TIME = 0.100
+# DRIP_SEGMENT_TIME = 0.050
+# DRIP_TIME = 0.100
+DRIP_SEGMENT_TIME = 0.005
+DRIP_TIME = 0.01
 class DripModeEndSignal(Exception):
     pass
 
@@ -447,7 +449,7 @@ class ToolHead:
                or self.print_time >= self.mcu.estimated_print_time(eventtime)):
             if not self.can_pause:
                 break
-            eventtime = self.reactor.pause(eventtime + 0.100)
+            eventtime = self.reactor.pause(eventtime + 0.100*0.2)
     def set_extruder(self, extruder, extrude_pos):
         self.extruder = extruder
         self.commanded_pos[3] = extrude_pos
