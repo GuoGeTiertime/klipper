@@ -467,6 +467,7 @@ class ToolHead:
             if wait_time > 0. and self.can_pause:
                 # Pause before sending more steps
                 self.drip_completion.wait(curtime + wait_time)
+                logging.info(" --- drip move wait time:%.3f, flush_delay: %.4f", wait_time, flush_delay)
                 continue
             npt = min(self.print_time + DRIP_SEGMENT_TIME, next_print_time)
             self._update_move_time(npt)
@@ -492,13 +493,15 @@ class ToolHead:
         except DripModeEndSignal as e:
             self.move_queue.reset()
             self.trapq_finalize_moves(self.trapq, self.reactor.NEVER)
+            curtime = self.reactor.monotonic()
+            logging.info(" --- drip move end, curtime:%.4f", curtime)
         # Exit "Drip" state
         self.flush_step_generation()
     # Misc commands
     def stats(self, eventtime):
         # self._calc_print_time()
         for m in self.all_mcus:
-            logging.info("\n --- check active mcu: %s", m.get_name())
+            # logging.info("\n --- check active mcu: %s", m.get_name())
             m.check_active(self.print_time, eventtime)
         buffer_time = self.print_time - self.mcu.estimated_print_time(eventtime)
         is_active = buffer_time > -60. or not self.special_queuing_state

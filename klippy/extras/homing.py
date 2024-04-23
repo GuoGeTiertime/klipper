@@ -118,7 +118,9 @@ class HomingMove:
             haltpos = trigpos = self.calc_toolhead_pos(kin_spos, trig_steps)
             if trig_steps != halt_steps:
                 haltpos = self.calc_toolhead_pos(kin_spos, halt_steps)
-            logging.info("Probe halt pos:%s, trig pos:%s" % (haltpos, trigpos))
+            
+            curtime = self.printer.reactor.monotonic()
+            logging.info("Probe pos @ %.4f halt pos:%s, trig pos:%s" % (curtime, haltpos, trigpos))
         else:
             haltpos = trigpos = movepos
             over_steps = {sp.stepper_name: sp.halt_pos - sp.trig_pos

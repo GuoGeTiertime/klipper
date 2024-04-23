@@ -104,18 +104,21 @@ class HX71X_endstop:
         return self._trigger_completion
 
     def home_wait(self, home_end_time, homespeed): # the endstop has been triggered or movement is done.
-        logging.info("wait home in hx71x virtual stopend object")
+        curtime = self._hx71x.reactor.monotonic()
+        logging.info("Call HX71X_endstop.home_wait() @ curtime: %.4f, home end time:%.4f, diff:%.4f", curtime, home_end_time, home_end_time-curtime)
 
         # # 注销定时器,停止更新限位状态
         # self._reactor.unregister_timer(self._sample_timer)
         self.bHoming = False
-        self._hx71x.updateNow()  # update sensor weight NOW! stop endstop mode.
+        # self._hx71x.updateNow()  # update sensor weight NOW! stop endstop mode.
 
         etrsync = self._trsyncs[0]
         etrsync.set_home_end_time(home_end_time)
         if self._mcu.is_fileoutput():
             self._trigger_completion.complete(True)
         self._trigger_completion.wait()
+        curtime = self._hx71x.reactor.monotonic()
+        logging.info("wait trigger completion @ curtime: %.4f", curtime)
 
         ffi_main, ffi_lib = chelper.get_ffi()
         ffi_lib.trdispatch_stop(self._trdispatch)
@@ -140,6 +143,8 @@ class HX71X_endstop:
             self.trigger_time -= self.deformation / homespeed
             # msg = "hx71x endstop deformation:%.4f, speed:%.1f, time offset:%.4f" % (self.deformation, homespeed, self.deformation / homespeed)
             # self._hx71x._loginfo(msg)
+        curtime = self._hx71x.reactor.monotonic()
+        logging.info("exit HX71X_endstop.home_wait() @ curtime: %.4f trigger time:%.4f", curtime, self.trigger_time)
         return self.trigger_time
     
     def trigger(self, eventime):
@@ -153,6 +158,9 @@ class HX71X_endstop:
             if not self.bTouched:
                 self.bTouched = True
                 self.trigger_time = eventime
+                curtime = self._hx71x.reactor.monotonic()
+                logging.info("trigger hx71x virtual endstop @ eventtime: %.4f, curtime: %.4f", eventime, curtime)
+
                 
     def query_endstop(self, eventime):
         return self._hx71x.is_endstop_on()
