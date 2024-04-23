@@ -331,6 +331,7 @@ class PrinterConfig:
         lines = ["===== Config file =====",
                  self._build_config_string(config),
                  "======================="]
+        lines = ["not log config file, too long", "Remove @ 20240422"]
         self.printer.set_rollover_info("config", "\n".join(lines))
     # Status reporting
     def deprecate(self, section, option, value=None, msg=None):
