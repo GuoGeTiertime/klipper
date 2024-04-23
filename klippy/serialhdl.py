@@ -173,7 +173,7 @@ class SerialReader:
             ret = self._start_session(serial_dev)
             if ret:
                 break
-    def connect_uart(self, serialport, baud, rts=True):
+    def connect_uart(self, serialport, baud, rts=True): xx
         # Initial connection
         logging.info("%sStarting serial connect", self.warn_prefix)
         start_time = self.reactor.monotonic()

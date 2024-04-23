@@ -36,6 +36,7 @@ class HX71X_endstop:
         self.deformation = 0   # error of deformation of platform with nozzle.
 
         self.activetime = 0.0
+        self.activecurtime = 0.0
 
     def get_mcu(self):
         return self._mcu
@@ -91,6 +92,7 @@ class HX71X_endstop:
         # self._trigger_completion.complete(1)
 
         self.activetime = print_time
+        self.activecurtime = self._hx71x.reactor.monotonic()
         self.bHoming = True
         self.bTouched = False
         self.trigger_time = -1.0
@@ -149,7 +151,8 @@ class HX71X_endstop:
     
     def trigger(self, eventime):
         if( eventime - self.activetime < MIN_TRIGGER_DELAY_TIME):
-            logging.info("Error, hx71x virtual endstop is triggered too early @ %.4f, active: %.4f", eventime, self.activetime)
+            curtime = self._hx71x.reactor.monotonic()
+            logging.info("Error, hx71x virtual endstop is triggered too early @ %.4f, active: %.4f, active:%.4f/curtime:%.4f", eventime, self.activetime, self.activecurtime, curtime)
             return
         if self._trigger_completion is not None :
             # msg = "hx71x virtual endstop is triggered @ %.4f with weight:%.2f" % (eventime, self._hx71x.total_weight)

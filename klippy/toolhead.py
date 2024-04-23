@@ -192,8 +192,8 @@ SDS_CHECK_TIME = 0.001 # step+dir+step filter in stepcompress.c
 
 # DRIP_SEGMENT_TIME = 0.050
 # DRIP_TIME = 0.100
-DRIP_SEGMENT_TIME = 0.005
-DRIP_TIME = 0.01
+DRIP_SEGMENT_TIME = 0.01
+DRIP_TIME = 0.05
 class DripModeEndSignal(Exception):
     pass
 
@@ -467,7 +467,8 @@ class ToolHead:
             if wait_time > 0. and self.can_pause:
                 # Pause before sending more steps
                 self.drip_completion.wait(curtime + wait_time)
-                logging.info(" --- drip move wait time:%.3f, flush_delay: %.4f", wait_time, flush_delay)
+                curtime = self.reactor.monotonic()
+                logging.info(" --- drip move wait time:%.3f, flush_delay: %.4f, curtime:%.4f", wait_time, flush_delay, curtime)
                 continue
             npt = min(self.print_time + DRIP_SEGMENT_TIME, next_print_time)
             self._update_move_time(npt)

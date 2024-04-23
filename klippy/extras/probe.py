@@ -136,8 +136,9 @@ class PrinterProbe:
                 axis_twist_compensation.get_z_compensation_value(pos))
         # add z compensation to probe position
         epos[2] += z_compensation
-        self.gcode.respond_info("probe at %.3f,%.3f is z=%.6f"
-                                % (epos[0], epos[1], epos[2]))
+        curtime = self.printer.get_reactor().monotonic()
+        self.gcode.respond_info("probe at %.3f,%.3f is z=%.6f, time:%.4f\n"
+                                % (epos[0], epos[1], epos[2], curtime))
         return epos[:3]
     def _move(self, coord, speed):
         self.printer.lookup_object('toolhead').manual_move(coord, speed)
@@ -171,12 +172,15 @@ class PrinterProbe:
         retries = 0
         bFirst = True
         positions = []
+        reactor = self.printer.get_reactor()
         while len(positions) < sample_count:
             # speed/retract for first probe is greater then for the rest
             probe_speed = speed if bFirst else speed / 2
             probe_retract = sample_retract_dist if bFirst else sample_retract_dist / 2
             bFirst = False
             # Probe position
+            curtime = reactor.monotonic()
+            gcmd.respond_info("Start Next Probe retry:%d @ %.4f / " % (retries, curtime))
             pos = self._probe(probe_speed)
             positions.append(pos)
             # Check samples tolerance
@@ -189,9 +193,12 @@ class PrinterProbe:
                 positions = positions[-1:] # only keep the last sample
             # Retract
             if len(positions) < sample_count:
-                gcmd.respond_info("Retracting probe... cur: %.3f dis: %.3f, speed:%.3f" % (pos[2], probe_retract, lift_speed))
+                curtime = reactor.monotonic()
+                gcmd.respond_info("Retracting probe... cur: %.3f dis: %.3f, speed:%.3f, time:%.4f" % (pos[2], probe_retract, lift_speed, curtime))
                 self._move(probexy + [pos[2] + probe_retract], lift_speed)
                 self.printer.lookup_object('toolhead').wait_moves()
+                curtime = reactor.monotonic()
+                gcmd.respond_info("Probe retracted probe end time:%.4f" % (curtime))
         if must_notify_multi_probe:
             self.multi_probe_end()
         # Calculate and return result

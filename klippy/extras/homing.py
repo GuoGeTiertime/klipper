@@ -67,6 +67,9 @@ class HomingMove:
         return list(kin.calc_position(kin_spos))[:3] + thpos[3:]
     def homing_move(self, movepos, speed, probe_pos=False,
                     triggered=True, check_triggered=True):
+        reactor = self.printer.get_reactor()
+        curtime = reactor.monotonic()
+        logging.info("Homing move start @ %.4f" % (curtime) )
         # Notify start of homing/probing move
         self.printer.send_event("homing:homing_move_begin", self)
         # Note start location
@@ -88,12 +91,20 @@ class HomingMove:
             endstop_triggers.append(wait)
         all_endstop_trigger = multi_complete(self.printer, endstop_triggers)
         self.toolhead.dwell(HOMING_START_DELAY)
+
+        curtime = reactor.monotonic()
+        logging.info("Homing move home_start() end @ %.4f" % (curtime) )
+
         # Issue move
         error = None
         try:
             self.toolhead.drip_move(movepos, speed, all_endstop_trigger)
         except self.printer.command_error as e:
             error = "Error during homing move: %s" % (str(e),)
+
+        curtime = reactor.monotonic()
+        logging.info("Homing move drip_move() end @ %.4f" % (curtime) )
+
         # Wait for endstops to trigger
         trigger_times = {}
         move_end_print_time = self.toolhead.get_last_move_time()
@@ -105,6 +116,10 @@ class HomingMove:
                 error = "Communication timeout during homing %s" % (name,)
             elif check_triggered and error is None:
                 error = "No trigger on %s after full movement" % (name,)
+
+        curtime = reactor.monotonic()
+        logging.info("Homing move home_wait() end @ %.4f" % (curtime) )
+
         # Determine stepper halt positions
         self.toolhead.flush_step_generation()
         for sp in self.stepper_positions:
