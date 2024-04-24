@@ -227,10 +227,14 @@ class ToolHead:
             'buffer_time_low', 1.000, above=0.)
         self.buffer_time_high = config.getfloat(
             'buffer_time_high', 2.000, above=self.buffer_time_low)
+        # self.buffer_time_start = config.getfloat(
+        #     'buffer_time_start', 0.250, above=0.)
+        # self.move_flush_time = config.getfloat(
+        #     'move_flush_time', 0.050, above=0.)
         self.buffer_time_start = config.getfloat(
-            'buffer_time_start', 0.250, above=0.)
+            'buffer_time_start', 0.030, above=0.)
         self.move_flush_time = config.getfloat(
-            'move_flush_time', 0.050, above=0.)
+            'move_flush_time', 0.020, above=0.)
         self.print_time = 0.
         self.special_queuing_state = "Flushed"
         self.need_check_stall = -1.
@@ -546,6 +550,8 @@ class ToolHead:
             self.kin_flush_times.append(delay)
         new_delay = max(self.kin_flush_times + [SDS_CHECK_TIME])
         self.kin_flush_delay = new_delay
+        logging.info(" --- Reset kin_flush_delay:%.4f", self.kin_flush_delay)
+
     def register_lookahead_callback(self, callback):
         last_move = self.move_queue.get_last()
         if last_move is None:

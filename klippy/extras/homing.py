@@ -68,12 +68,11 @@ class HomingMove:
     def homing_move(self, movepos, speed, probe_pos=False,
                     triggered=True, check_triggered=True):
         reactor = self.printer.get_reactor()
-        curtime = reactor.monotonic()
-        logging.info("Homing move start @ %.4f" % (curtime) )
+        logging.info("Homing move start @ %.4f" % (reactor.monotonic()) )
         # Notify start of homing/probing move
         self.printer.send_event("homing:homing_move_begin", self)
         # Note start location
-        self.toolhead.flush_step_generation()
+        self.toolhead.flush_step_generation() # remove by guoge 20240424, 尝试提速probe
         kin = self.toolhead.get_kinematics()
         kin_spos = {s.get_name(): s.get_commanded_position()
                     for s in kin.get_steppers()}
@@ -92,8 +91,7 @@ class HomingMove:
         all_endstop_trigger = multi_complete(self.printer, endstop_triggers)
         self.toolhead.dwell(HOMING_START_DELAY)
 
-        curtime = reactor.monotonic()
-        logging.info("Homing move home_start() end @ %.4f" % (curtime) )
+        logging.info("Homing move home_start() end @ %.4f" % (reactor.monotonic()) )
 
         # Issue move
         error = None
@@ -102,8 +100,7 @@ class HomingMove:
         except self.printer.command_error as e:
             error = "Error during homing move: %s" % (str(e),)
 
-        curtime = reactor.monotonic()
-        logging.info("Homing move drip_move() end @ %.4f" % (curtime) )
+        logging.info("Homing move drip_move() end @ %.4f" % (reactor.monotonic()) )
 
         # Wait for endstops to trigger
         trigger_times = {}
@@ -117,8 +114,7 @@ class HomingMove:
             elif check_triggered and error is None:
                 error = "No trigger on %s after full movement" % (name,)
 
-        curtime = reactor.monotonic()
-        logging.info("Homing move home_wait() end @ %.4f" % (curtime) )
+        logging.info("Homing move home_wait() end @ %.4f" % (reactor.monotonic()) )
 
         # Determine stepper halt positions
         self.toolhead.flush_step_generation()
@@ -134,8 +130,7 @@ class HomingMove:
             if trig_steps != halt_steps:
                 haltpos = self.calc_toolhead_pos(kin_spos, halt_steps)
             
-            curtime = self.printer.reactor.monotonic()
-            logging.info("Probe pos @ %.4f halt pos:%s, trig pos:%s" % (curtime, haltpos, trigpos))
+            logging.info("Probe pos @ %.4f halt pos:%s, trig pos:%s" % (reactor.monotonic(), haltpos, trigpos))
         else:
             haltpos = trigpos = movepos
             over_steps = {sp.stepper_name: sp.halt_pos - sp.trig_pos

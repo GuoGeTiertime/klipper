@@ -179,8 +179,7 @@ class PrinterProbe:
             probe_retract = sample_retract_dist if bFirst else sample_retract_dist / 2
             bFirst = False
             # Probe position
-            curtime = reactor.monotonic()
-            gcmd.respond_info("Start Next Probe retry:%d @ %.4f / " % (retries, curtime))
+            gcmd.respond_info("Start Next Probe retry:%d @ %.4f / " % (retries, reactor.monotonic()))
             pos = self._probe(probe_speed)
             positions.append(pos)
             # Check samples tolerance
@@ -193,12 +192,13 @@ class PrinterProbe:
                 positions = positions[-1:] # only keep the last sample
             # Retract
             if len(positions) < sample_count:
-                curtime = reactor.monotonic()
-                gcmd.respond_info("Retracting probe... cur: %.3f dis: %.3f, speed:%.3f, time:%.4f" % (pos[2], probe_retract, lift_speed, curtime))
+                gcmd.respond_info("Retracting probe... cur: %.3f dis: %.3f, speed:%.3f, time:%.4f" % (pos[2], probe_retract, lift_speed, reactor.monotonic()))
+                next_print_time_0 = self.printer.lookup_object('toolhead').get_last_move_time()
                 self._move(probexy + [pos[2] + probe_retract], lift_speed)
-                self.printer.lookup_object('toolhead').wait_moves()
-                curtime = reactor.monotonic()
-                gcmd.respond_info("Probe retracted probe end time:%.4f" % (curtime))
+                # self.printer.lookup_object('toolhead').wait_moves() #add by guoge 29249314, remove 20240424
+                next_print_time_1 = self.printer.lookup_object('toolhead').get_last_move_time()
+                gcmd.respond_info("Probe retracted end time:%.4f, next print time(last move time):%.4f / %.4f" % (reactor.monotonic(), next_print_time_0, next_print_time_1))
+
         if must_notify_multi_probe:
             self.multi_probe_end()
         # Calculate and return result

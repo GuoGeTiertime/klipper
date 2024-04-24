@@ -426,7 +426,7 @@ class HX71X:
         self.weight_max[oid] = max(self.weight_max[oid], self.weight[oid])
 
         # debug log, print hx711 read value every 256 times.
-        if self._sample_cnt[oid] < 10 or (self._sample_cnt[oid] % 256) == 0:
+        if (self._sample_cnt[oid] < 5 or (self._sample_cnt[oid] % 256) == 0) :
             logging.info("Senser:%s(oid:%d) read hx711 @ %.3f , weight:%.2f, cnt:%d, tare:%.2f, value:%d", 
                          self.name, oid, last_read_time, self.weight[oid], self._sample_cnt[oid], self._sample_tare[oid], value)
             
@@ -462,6 +462,9 @@ class HX71X:
                 bResponse = True
             elif( last_read_time - self.last_response_time > (100.0*self.gcode_response_time)): # force response every 100 times of response time.
                 bResponse = True
+
+        # if self._endstop.bHoming: #add by guoge 20240424, 检测probe时,重力传感器的响应速度和变化幅度.
+        #     bResponse = True
 
         if bResponse:
             self.last_response_weight = self.total_weight
