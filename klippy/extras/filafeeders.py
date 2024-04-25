@@ -83,7 +83,8 @@ class Feeder:  # Heater:
         self.is_feeding = False
 
         self.min_feed_len = config.getfloat('min_feed_len', 0, minval=0.1)  # min feed length. not feed if len < min_feed_len.
-        self.max_feed_len = config.getfloat('max_feed_len', 10000, minval=0.1)  # max feed length. warning if curfeedlen > max_feed_len.
+        self.max_feed_len = config.getfloat('max_feed_len', 100, minval=0.1)  # max continue feed length. warning if curfeedlen > max_feed_len.
+        self.init_feed_len = config.getfloat('init_feed_len', 2000.0, minval=0.1)  # max feed length of init feed.
         self.max_speed = config.getfloat('max_speed', 1., above=0., maxval=1000.)
 
         self.cur_cycle_time = 0.1
@@ -103,7 +104,7 @@ class Feeder:  # Heater:
         self.scale_speed2freq = self.microstep * 200 / self.rotate_distance # 200 steps per round. default 16 microstep. the value freq for per mm/s.
 
         self.feed_speed = config.getfloat('feed_speed', 10.0, minval=1, maxval=100.0) # unit: mm/s, default 10mm/s.
-        self.feed_spped_init = config.getfloat('feed_speed_init', self.feed_speed * 2.0, minval=1, maxval=200.0) 
+        self.feed_speed_init = config.getfloat('feed_speed_init', self.feed_speed * 2.0, minval=1, maxval=200.0) 
 
         self.switch_invert = False # switch signal invert, for init feeding.
 
@@ -144,10 +145,10 @@ class Feeder:  # Heater:
             return
 
         # verify max feed len, if over, stop feed after set pwm with value 0.
-        if self.cur_feed_len > self.max_feed_len:
-            self._loginfo("feeder %s cur feed len:%.3fmm over max:%.3fmm" % (self.name, self.cur_feed_len, self.max_feed_len))
+        max_len = self.max_feed_len if self.bInited else self.init_feed_len
+        if self.cur_feed_len > max_len:
+            self._loginfo("feeder %s cur feed len:%.3f over max len:%.1f(inited:%s), stoped!" % (self.name, self.cur_feed_len, max_len, str(self.bInited)))
             # raise self.printer.command_error("Feeder %s reach the max feed lenght. feed len:%.3fmm over max:%.3fmm" % (self.name, self.cur_feed_len, self.max_feed_len))
-            self._loginfo("feeder %s is stoped by over max lenght" % self.name)
             self.bfeeder_on = False
             len = 0.0
 
@@ -228,7 +229,7 @@ class Feeder:  # Heater:
     def _switch_handler(self, eventtime, state):
         self._switch_state = state
         if state ^ self.switch_invert: # switch on, pressed
-            speed = self.feed_speed if self.bInited else self.feed_spped_init
+            speed = self.feed_speed if self.bInited else self.feed_speed_init
             self.feed_filament(eventtime, speed, self.switch_feed_len)
             self._loginfo("feeder %s switch pressed" % self.name)
         else: # switch off, released
@@ -238,10 +239,10 @@ class Feeder:  # Heater:
 
     def _switch_update_event(self, eventtime):
         if self._switch_state ^ self.switch_invert: # switch pressed, continue feed filament.
-            speed = self.feed_speed if self.bInited else self.feed_spped_init
+            speed = self.feed_speed if self.bInited else self.feed_speed_init
             self.feed_filament(eventtime, speed, self.switch_feed_len)
         elif self.is_feeding: # switch released, stop feed filament.
-            self.feed_filament(eventtime, 1.0, 0.0)
+            self.feed_filament(eventtime, 1.0, 0.0) #send 0 length to stop feed.
             if not self.bInited:
                 self.bInited = True
         next_time = min(eventtime + self.feed_delay, self.next_feed_time)
@@ -326,9 +327,9 @@ class Feeder:  # Heater:
     # eg: FEED_INIT FEEDER=feeder1 SPEED=20.0 MAX_LEN=1000.0 INVERT=0 FEED_LEN=5.0 INIT=0 
     cmd_FEED_INIT_help = "init feed, send the filament to the nozzle."
     def cmd_FEED_INIT(self, gcmd):
-        self.max_feed_len = gcmd.get_float('MAX_LEN', 1000.)
+        self.max_feed_len = gcmd.get_float('MAX_LEN', self.init_feed_len, minval=1.0)
         self.switch_invert = gcmd.get_int('INVERT', 0)
-        self.feed_speed = gcmd.get_float('SPEED', self.feed_speed)
+        self.feed_speed = gcmd.get_float('SPEED', self.feed_speed_init, minval=1.0)
         self.switch_feed_len = gcmd.get_float('FEED_LEN', self.switch_feed_len)
         init = gcmd.get_int('INIT', 0)
         self.bInited = not init
