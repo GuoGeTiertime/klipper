@@ -126,11 +126,10 @@ class Feeder:  # Heater:
 
     def _cal_step_cycle_time(self, speed):
         freq = speed * self.scale_speed2freq
-        return 1.0 / freq
+        return 1.0 / freq if freq > 0 else 0.1
 
     # feed filament len at speed
     def feed_filament(self, print_time, speed, len): # set feed len with speed. value is the length to feed.
-        return
         if not self.bfeeder_on:
             return
         if abs(len) < self.min_feed_len:
@@ -143,6 +142,14 @@ class Feeder:  # Heater:
         # if print_time < self.next_feed_time: 
         if print_time < self.last_feed_time + MIN_DIRPULSE_TIME: # at least 0.1s interval.
             return
+
+        # verify max feed len, if over, stop feed after set pwm with value 0.
+        if self.cur_feed_len > self.max_feed_len:
+            self._loginfo("feeder %s cur feed len:%.3fmm over max:%.3fmm" % (self.name, self.cur_feed_len, self.max_feed_len))
+            # raise self.printer.command_error("Feeder %s reach the max feed lenght. feed len:%.3fmm over max:%.3fmm" % (self.name, self.cur_feed_len, self.max_feed_len))
+            self._loginfo("feeder %s is stoped by over max lenght" % self.name)
+            self.bfeeder_on = False
+            len = 0.0
 
         # set dir pin
         self.set_dir(print_time, 1 if len > 0 else 0)
@@ -160,7 +167,9 @@ class Feeder:  # Heater:
             speed = 0.0
             cycle_time = 1.0
             feed_time = self.feed_delay
-            self.set_pulse(print_time, 0, 1.0)
+            self.cur_feed_len = 0.0 # reset the current feed len.
+            self.set_pulse(print_time, 0, cycle_time)
+            self._loginfo("feeder stop, set pwm with value=0 @ time:%.3f" % print_time)
 
         # update feed len info
         prevlen = (print_time - self.last_feed_time) * self.last_feed_speed
@@ -172,15 +181,10 @@ class Feeder:  # Heater:
         self.last_feed_time = print_time
         self.next_feed_time = print_time + feed_time  # set the next feed time as now + feed time.
 
-        # verify max feed len, if over, stop feed.
-        if self.cur_feed_len > self.max_feed_len:
-            self._loginfo("feeder %s feed len:%.3fmm over max:%.3fmm" % (self.name, self.cur_feed_len, self.max_feed_len))
-            # raise self.printer.command_error("Feeder %s reach the max feed lenght. feed len:%.3fmm over max:%.3fmm" % (self.name, self.cur_feed_len, self.max_feed_len))
-            self._loginfo("feeder %s is stoped by over max lenght" % self.name)
-            self.bfeeder_on = False
 
         # log info for debug
-        self._loginfo("feeder %s feed_filament: %.3fmm @ %.3fmm/s, cycle time:%.6f, feed time:%.3f, total lenght:%.2f" % (self.name, len, speed, cycle_time, feed_time, self.total_feed_len))
+        self._loginfo("feeder %s feed_filament: %.3fmm @ %.3fmm/s, cycle time:%.6f, feed time:%.3f, curlen:%.2f, total lenght:%.2f" % 
+                      (self.name, len, speed, cycle_time, feed_time, self.cur_feed_len, self.total_feed_len))
             
     def set_dir(self, print_time, value):
         print_time = max(print_time, self.last_dirtime + MIN_DIRPULSE_TIME)
@@ -237,7 +241,7 @@ class Feeder:  # Heater:
             speed = self.feed_speed if self.bInited else self.feed_spped_init
             self.feed_filament(eventtime, speed, self.switch_feed_len)
         elif self.is_feeding: # switch released, stop feed filament.
-            self.feed_filament(eventtime, 0.0, 0.0)
+            self.feed_filament(eventtime, 1.0, 0.0)
             if not self.bInited:
                 self.bInited = True
         next_time = min(eventtime + self.feed_delay, self.next_feed_time)
