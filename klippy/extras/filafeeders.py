@@ -17,7 +17,7 @@ import mcu
 PID_PARAM_BASE = 255.
 
 MIN_DIRPULSE_TIME = 0.05
-PINOUT_DELAY = 0.09 # 10ms, avoid Timer too close or Missed scheduling of next digital out event
+PINOUT_DELAY = 0.01 # 10ms, avoid Timer too close or Missed scheduling of next digital out event
 
 class Feeder:  # Heater:
     def __init__(self, config, sensor):
@@ -32,7 +32,7 @@ class Feeder:  # Heater:
         buttons = self.printer.load_object(config, 'buttons')
         fila_pin = config.get('fila_pin')
         buttons.register_buttons([fila_pin], self._check_filament)
-        self._fila_state = False # released.
+        self._fila_state = True # released.
 
         switch_pin = config.get('switch_pin')
         if switch_pin is not None:
@@ -91,10 +91,13 @@ class Feeder:  # Heater:
         # Setup PWM output as stepper's pulse generator, and normal output as direct control.
         step_pin = config.get('step_pin')
         dir_pin = config.get('dir_pin')
+        enable_pin = config.get('enable_pin')
         ppins = self.printer.lookup_object('pins')
         self.step = ppins.setup_pin('pwm', step_pin)
         self.dir = ppins.setup_pin('digital_out', dir_pin)
         self.dir.setup_max_duration(0.)
+        self.stepenable = ppins.setup_pin('digital_out', enable_pin)
+        self.stepenable.setup_max_duration(0.)
         self.last_dirtime = 0.0
         self.last_pulsetime = 0.0
 
@@ -147,7 +150,7 @@ class Feeder:  # Heater:
         if self.cur_feed_len > max_len:
             self._loginfo("feeder %s cur feed len:%.3f over max len:%.1f(inited:%s), stoped!" % (self.name, self.cur_feed_len, max_len, str(self.bInited)))
             # raise self.printer.command_error("Feeder %s reach the max feed lenght. feed len:%.3fmm over max:%.3fmm" % (self.name, self.cur_feed_len, self.max_feed_len))
-            self.bfeeder_on = False
+            self.enable_stepper(False)
 
         if not self.bfeeder_on or abs(len) < self.min_feed_len:
             len = 0.0
@@ -193,7 +196,17 @@ class Feeder:  # Heater:
         toolhead = self.printer.lookup_object('toolhead')
         toolhead.register_lookahead_callback(
             lambda print_time: self.dir.set_digital(print_time, value))
-        
+
+    def enable_stepper(self, bOn):
+        self.bfeeder_on = not not bOn
+        curtime = self.reactor.monotonic()
+        print_time = self.step.get_mcu().estimated_print_time(curtime) + PINOUT_DELAY
+        self.stepenable.set_digital(print_time, 1 if bOn else 0)
+        self._loginfo("feeder %s is %s" % (self.name, "enabled" if bOn else "disabled") )
+        # toolhead = self.printer.lookup_object('toolhead')
+        # toolhead.register_lookahead_callback(
+        #     lambda print_time: self.stepenable.set_digital(print_time, value))
+
     # debug, not used. show set_pwm()'s call times and value
     # def _set_pulse(self, print_time, value, cycle_time):
     #     self.step.set_pwm(print_time, value, cycle_time)
@@ -220,10 +233,11 @@ class Feeder:  # Heater:
         if self._fila_state: # fila is inserted into the feeder
             self._loginfo("feeder: %s fila inserted, begin sending" % self.name)
             self._switch_handler(eventtime, self._switch_state)
-            self.bfeeder_on = True
+            self.enable_stepper(True)
+            self.bInited = False    # reset the inited flag forcelly.
         else:
-            self.bfeeder_on = False
-            self._loginfo("feeder: %s fila removed, stop sending, add code the pause or stop print job" % self.name)
+            self.enable_stepper(False)
+            self._loginfo("feeder: %s fila removed, stop feeding, add code the pause or stop print job" % self.name)
 
     # update feeder when the feeder's switch is pressed or released.
     def _switch_handler(self, eventtime, state):
@@ -337,7 +351,7 @@ class Feeder:  # Heater:
         if not self._fila_state:
             enable = 0  
             self._loginfo("feeder %s fila not inserted, can't feed filament" % self.name)
-        self.bfeeder_on = not not enable
+        self.enable_stepper(enable)
 
 
 ######################################################################
