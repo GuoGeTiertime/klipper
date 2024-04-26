@@ -116,9 +116,9 @@ class Feeder:  # Heater:
         self.gcode.register_mux_command("SET_FEEDER_DISTANCE", "FEEDER",
                                    self.name, self.cmd_SET_FEEDER_DISTANCE,
                                    desc=self.cmd_SET_FEEDER_DISTANCE_help)
-        self.gcode.register_mux_command("FEED_INIT", "FEEDER",
-                                   self.name, self.cmd_FEED_INIT,
-                                   desc=self.cmd_FEED_INIT_help)
+        self.gcode.register_mux_command("FEED_IN", "FEEDER",
+                                   self.name, self.cmd_FEED_IN,
+                                   desc=self.cmd_FEED_IN_help)
         
         # test command: SET_FEEDER_DISTANCE FEEDER=feeder0 TARGET=1.23
 
@@ -131,10 +131,8 @@ class Feeder:  # Heater:
 
     # feed filament len at speed
     def feed_filament(self, print_time, speed, len): # set feed len with speed. value is the length to feed.
-        if not self.bfeeder_on:
+        if not self.bfeeder_on and not self.is_feeding:
             return
-        if abs(len) < self.min_feed_len:
-            len = 0.0
 
         # estimate the print time for output dir and pulse.
         curtime = self.reactor.monotonic()
@@ -150,6 +148,8 @@ class Feeder:  # Heater:
             self._loginfo("feeder %s cur feed len:%.3f over max len:%.1f(inited:%s), stoped!" % (self.name, self.cur_feed_len, max_len, str(self.bInited)))
             # raise self.printer.command_error("Feeder %s reach the max feed lenght. feed len:%.3fmm over max:%.3fmm" % (self.name, self.cur_feed_len, self.max_feed_len))
             self.bfeeder_on = False
+
+        if not self.bfeeder_on or abs(len) < self.min_feed_len:
             len = 0.0
 
         # set dir pin
@@ -325,18 +325,19 @@ class Feeder:  # Heater:
         pfeeders.set_distance(self, distance)
 
     # eg: FEED_INIT FEEDER=feeder1 SPEED=20.0 MAX_LEN=1000.0 INVERT=0 FEED_LEN=5.0 INIT=0 
-    cmd_FEED_INIT_help = "init feed, send the filament to the nozzle."
-    def cmd_FEED_INIT(self, gcmd):
-        self.max_feed_len = gcmd.get_float('MAX_LEN', self.init_feed_len, minval=1.0)
+    cmd_FEED_IN_help = "Begin feed filament, send to the nozzle."
+    def cmd_FEED_IN(self, gcmd):
+        self.max_feed_len = gcmd.get_float('MAX_LEN', self.max_feed_len, minval=1.0)
         self.switch_invert = gcmd.get_int('INVERT', 0)
-        self.feed_speed = gcmd.get_float('SPEED', self.feed_speed_init, minval=1.0)
+        self.feed_speed = gcmd.get_float('SPEED', self.feed_speed, minval=1.0)
         self.switch_feed_len = gcmd.get_float('FEED_LEN', self.switch_feed_len)
         init = gcmd.get_int('INIT', 0)
+        enable = gcmd.get_int('ENABLE', 1)
         self.bInited = not init
         if not self._fila_state:
-            self._loginfo("feeder %s fila not inserted, can't init feed" % self.name)
-        else :
-            self.bfeeder_on = True
+            enable = 0  
+            self._loginfo("feeder %s fila not inserted, can't feed filament" % self.name)
+        self.bfeeder_on = not not enable
 
 
 ######################################################################
