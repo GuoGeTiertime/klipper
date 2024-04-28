@@ -5,6 +5,7 @@
 # This file may be distributed under the terms of the GNU GPLv3 license.
 import os, logging, threading
 import mcu
+from . import filament_switch_sensor
 
 
 ######################################################################
@@ -28,6 +29,8 @@ class Feeder:  # Heater:
         self.lock = threading.Lock()
         self.bfeeder_on = False    # feeder on/off
         self.bInited = False    # feeder inited, has send the filament to the nozzle.
+
+        self.runout_helper = filament_switch_sensor.RunoutHelper(config)
 
         buttons = self.printer.load_object(config, 'buttons')
         fila_pin = config.get('fila_pin')
@@ -151,6 +154,7 @@ class Feeder:  # Heater:
             self._loginfo("feeder %s cur feed len:%.3f over max len:%.1f(inited:%s), stoped!" % (self.name, self.cur_feed_len, max_len, str(self.bInited)))
             # raise self.printer.command_error("Feeder %s reach the max feed lenght. feed len:%.3fmm over max:%.3fmm" % (self.name, self.cur_feed_len, self.max_feed_len))
             self.enable_stepper(False)
+            self.runout_helper.note_filament_present(False)
 
         if not self.bfeeder_on or abs(len) < self.min_feed_len:
             len = 0.0
@@ -187,8 +191,8 @@ class Feeder:  # Heater:
 
 
         # log info for debug
-        self._loginfo("feeder %s feed_filament: %.3fmm @ %.3fmm/s, cycle time:%.6f, feed time:%.3f, curlen:%.2f, total lenght:%.2f" % 
-                      (self.name, len, speed, cycle_time, feed_time, self.cur_feed_len, self.total_feed_len))
+        self._loginfo("feeder %s feed_filament: %.3fmm @ %.3fmm/s, freq:%.3fkHz, period:%.3fms, feed time:%.3f, curlen:%.2f, total lenght:%.2f" % 
+                      (self.name, len, speed, 0.001/cycle_time, cycle_time*0.01, feed_time, self.cur_feed_len, self.total_feed_len))
             
     def set_dir(self, print_time, value):
         print_time = max(print_time, self.last_dirtime + MIN_DIRPULSE_TIME)
@@ -238,6 +242,8 @@ class Feeder:  # Heater:
         else:
             self.enable_stepper(False)
             self._loginfo("feeder: %s fila removed, stop feeding, add code the pause or stop print job" % self.name)
+
+        self.runout_helper.note_filament_present(self._fila_state)
 
     # update feeder when the feeder's switch is pressed or released.
     def _switch_handler(self, eventtime, state):
@@ -328,6 +334,18 @@ class Feeder:  # Heater:
             'total_feed_len': self.total_feed_len,
             'cur_feed_len': self.cur_feed_len,
             'last_feed_time': self.last_feed_time}
+    
+    def _runout_event_handler(self, eventtime):
+        # Pausing from inside an event requires that the pause portion
+        # of pause_resume execute immediately.
+        pause_prefix = ""
+        if self.runout_pause:
+            pause_resume = self.printer.lookup_object('pause_resume')
+            pause_resume.send_pause_command()
+            pause_prefix = "PAUSE\n"
+            self.printer.get_reactor().pause(eventtime + self.pause_delay)
+        self._exec_gcode(pause_prefix, self.runout_gcode)
+
 
     cmd_SET_FEEDER_DISTANCE_help = "Sets a feeder hold distance"
     def cmd_SET_FEEDER_DISTANCE(self, gcmd):
@@ -436,108 +454,6 @@ class ControlPID:
         return abs(dis_diff) > PID_SETTLE_DELTA
                 # or abs(self.prev_dis_deriv) > PID_SETTLE_SLOPE)
 
-
-######################################################################
-# Sensor and feeder lookup
-######################################################################
-
-class RunoutHelper:
-    def __init__(self, config):
-        self.name = config.get_name().split()[-1]
-        self.printer = config.get_printer()
-        self.reactor = self.printer.get_reactor()
-        self.gcode = self.printer.lookup_object('gcode')
-        # Read config
-        self.runout_pause = config.getboolean('pause_on_runout', True)
-        if self.runout_pause:
-            self.printer.load_object(config, 'pause_resume')
-        self.runout_gcode = self.insert_gcode = None
-        gcode_macro = self.printer.load_object(config, 'gcode_macro')
-        if self.runout_pause or config.get('runout_gcode', None) is not None:
-            self.runout_gcode = gcode_macro.load_template(
-                config, 'runout_gcode', '')
-        if config.get('insert_gcode', None) is not None:
-            self.insert_gcode = gcode_macro.load_template(
-                config, 'insert_gcode')
-        self.pause_delay = config.getfloat('pause_delay', .5, above=.0)
-        self.event_delay = config.getfloat('event_delay', 3., above=0.)
-        # Internal state
-        self.min_event_systime = self.reactor.NEVER
-        self.filament_present = False
-        self.sensor_enabled = True
-        # Register commands and event handlers
-        self.printer.register_event_handler("klippy:ready", self._handle_ready)
-        self.gcode.register_mux_command(
-            "QUERY_FILAMENT_SENSOR", "SENSOR", self.name,
-            self.cmd_QUERY_FILAMENT_SENSOR,
-            desc=self.cmd_QUERY_FILAMENT_SENSOR_help)
-        self.gcode.register_mux_command(
-            "SET_FILAMENT_SENSOR", "SENSOR", self.name,
-            self.cmd_SET_FILAMENT_SENSOR,
-            desc=self.cmd_SET_FILAMENT_SENSOR_help)
-    def _handle_ready(self):
-        self.min_event_systime = self.reactor.monotonic() + 2.
-    def _runout_event_handler(self, eventtime):
-        # Pausing from inside an event requires that the pause portion
-        # of pause_resume execute immediately.
-        pause_prefix = ""
-        if self.runout_pause:
-            pause_resume = self.printer.lookup_object('pause_resume')
-            pause_resume.send_pause_command()
-            pause_prefix = "PAUSE\n"
-            self.printer.get_reactor().pause(eventtime + self.pause_delay)
-        self._exec_gcode(pause_prefix, self.runout_gcode)
-    def _insert_event_handler(self, eventtime):
-        self._exec_gcode("", self.insert_gcode)
-    def _exec_gcode(self, prefix, template):
-        try:
-            self.gcode.run_script(prefix + template.render() + "\nM400")
-        except Exception:
-            logging.exception("Script running error")
-        self.min_event_systime = self.reactor.monotonic() + self.event_delay
-    def note_filament_present(self, is_filament_present):
-        if is_filament_present == self.filament_present:
-            return
-        self.filament_present = is_filament_present
-        eventtime = self.reactor.monotonic()
-        if eventtime < self.min_event_systime or not self.sensor_enabled:
-            # do not process during the initialization time, duplicates,
-            # during the event delay time, while an event is running, or
-            # when the sensor is disabled
-            return
-        # Determine "printing" status
-        idle_timeout = self.printer.lookup_object("idle_timeout")
-        is_printing = idle_timeout.get_status(eventtime)["state"] == "Printing"
-        # Perform filament action associated with status change (if any)
-        if is_filament_present:
-            if not is_printing and self.insert_gcode is not None:
-                # insert detected
-                self.min_event_systime = self.reactor.NEVER
-                logging.info(
-                    "Filament Sensor %s: insert event detected, Time %.2f" %
-                    (self.name, eventtime))
-                self.reactor.register_callback(self._insert_event_handler)
-        elif is_printing and self.runout_gcode is not None:
-            # runout detected
-            self.min_event_systime = self.reactor.NEVER
-            logging.info(
-                "Filament Sensor %s: runout event detected, Time %.2f" %
-                (self.name, eventtime))
-            self.reactor.register_callback(self._runout_event_handler)
-    def get_status(self, eventtime):
-        return {
-            "filament_detected": bool(self.filament_present),
-            "enabled": bool(self.sensor_enabled)}
-    cmd_QUERY_FILAMENT_SENSOR_help = "Query the status of the Filament Sensor"
-    def cmd_QUERY_FILAMENT_SENSOR(self, gcmd):
-        if self.filament_present:
-            msg = "Filament Sensor %s: filament detected" % (self.name)
-        else:
-            msg = "Filament Sensor %s: filament not detected" % (self.name)
-        gcmd.respond_raw(msg)
-    cmd_SET_FILAMENT_SENSOR_help = "Sets the filament sensor on/off"
-    def cmd_SET_FILAMENT_SENSOR(self, gcmd):
-        self.sensor_enabled = gcmd.get_int("ENABLE", 1)
 
 
 class FilaFeeders:  # PrinterHeaters:
