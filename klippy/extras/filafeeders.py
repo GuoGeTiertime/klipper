@@ -17,8 +17,8 @@ from . import filament_switch_sensor
 # AMBIENT_TEMP = 25.
 PID_PARAM_BASE = 255.
 
-MIN_DIRPULSE_TIME = 0.05
-PINOUT_DELAY = 0.01 # 10ms, avoid Timer too close or Missed scheduling of next digital out event
+MIN_DIRPULSE_TIME = 0.1
+PINOUT_DELAY = 0.05 # 50ms, avoid Timer too close or Missed scheduling of next digital out event
 
 class Feeder:  # Heater:
     def __init__(self, config, sensor):
@@ -144,8 +144,8 @@ class Feeder:  # Heater:
         curtime = self.reactor.monotonic()
         print_time = self.step.get_mcu().estimated_print_time(curtime) + PINOUT_DELAY
 
-        # if print_time < self.next_feed_time: 
-        if print_time < self.last_feed_time + MIN_DIRPULSE_TIME: # at least 0.1s interval.
+        if print_time < self.next_feed_time: 
+        # if print_time < self.last_feed_time + MIN_DIRPULSE_TIME: # at least 0.1s interval.
             return
 
         # verify max feed len, if over, stop feed after set pwm with value 0.
@@ -153,8 +153,12 @@ class Feeder:  # Heater:
         if self.cur_feed_len > max_len:
             self._loginfo("feeder %s cur feed len:%.3f over max len:%.1f(inited:%s), stoped!" % (self.name, self.cur_feed_len, max_len, str(self.bInited)))
             # raise self.printer.command_error("Feeder %s reach the max feed lenght. feed len:%.3fmm over max:%.3fmm" % (self.name, self.cur_feed_len, self.max_feed_len))
+            len = 0.0
             self.enable_stepper(False)
-            self.runout_helper.note_filament_present(False)
+            if self.bInited :
+               self.runout_helper.note_filament_present(False)
+            else:
+                self._loginfo("Can't feed filament to nozzle, fila feeder initialize failed, please check the feeder, filament and extruder.")
 
         if not self.bfeeder_on or abs(len) < self.min_feed_len:
             len = 0.0
@@ -192,20 +196,24 @@ class Feeder:  # Heater:
 
         # log info for debug
         self._loginfo("feeder %s feed_filament: %.3fmm @ %.3fmm/s, freq:%.3fkHz, period:%.3fms, feed time:%.3f, curlen:%.2f, total lenght:%.2f" % 
-                      (self.name, len, speed, 0.001/cycle_time, cycle_time*0.01, feed_time, self.cur_feed_len, self.total_feed_len))
+                      (self.name, len, speed, 0.001/cycle_time, cycle_time*1000, feed_time, self.cur_feed_len, self.total_feed_len))
             
     def set_dir(self, print_time, value):
         print_time = max(print_time, self.last_dirtime + MIN_DIRPULSE_TIME)
         self.last_dirtime = print_time
-        toolhead = self.printer.lookup_object('toolhead')
-        toolhead.register_lookahead_callback(
-            lambda print_time: self.dir.set_digital(print_time, value))
+        self.dir.set_digital(print_time, value)
+        # toolhead = self.printer.lookup_object('toolhead')
+        # toolhead.register_lookahead_callback(
+        #     lambda print_time: self.dir.set_digital(print_time, value))
 
     def enable_stepper(self, bOn):
         self.bfeeder_on = not not bOn
         curtime = self.reactor.monotonic()
         print_time = self.step.get_mcu().estimated_print_time(curtime) + PINOUT_DELAY
         self.stepenable.set_digital(print_time, 1 if bOn else 0)
+        # toolhead = self.printer.lookup_object('toolhead')
+        # toolhead.register_lookahead_callback(
+        #     lambda print_time: self.stepenable.set_digital(print_time, 1 if bOn else 0) )
         self._loginfo("feeder %s is %s" % (self.name, "enabled" if bOn else "disabled") )
         # toolhead = self.printer.lookup_object('toolhead')
         # toolhead.register_lookahead_callback(
@@ -219,10 +227,10 @@ class Feeder:  # Heater:
     def set_pulse(self, print_time, value, cycle_time):
         print_time = max(print_time, self.last_pulsetime + MIN_DIRPULSE_TIME)
         self.last_pulsetime = print_time
-        toolhead = self.printer.lookup_object('toolhead')
-        toolhead.register_lookahead_callback(
-            lambda print_time: self.step.set_pwm(print_time, value, cycle_time))
-            # lambda print_time: self._set_pulse(print_time, value, cycle_time))
+        self.step.set_pwm(print_time, value, cycle_time)
+        # toolhead = self.printer.lookup_object('toolhead')
+        # toolhead.register_lookahead_callback(
+        #     lambda print_time: self.step.set_pwm(print_time, value, cycle_time))
 
     def handle_connect_switch(self):
         self.reactor.update_timer(self._switch_update_timer, self.reactor.NOW)
