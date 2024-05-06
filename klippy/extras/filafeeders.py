@@ -506,6 +506,20 @@ class FilaFeeders:  # PrinterHeaters:
         if feeder_name in self.feeders:
             raise config.error("Feeder %s already registered" % (feeder_name,))
         
+        # test mcu is exist.
+        sensor_pin = config.get('sensor_pin')
+        # Parse pins
+        ppins = self.printer.lookup_object('pins')
+        try:
+            pin_params = ppins.lookup_pin(sensor_pin)
+        except:
+            logging.error("Hx711 sensor_pin %s not found, maybe the mcu is disconnected", sensor_pin)
+            # 遍历所有options, avoid the unused options error
+            for option in config.get_prefix_options(''):
+                option = option.lower()
+                config.get(option)
+            return None
+
         # Setup distance sensor/feeder
         sensor = self.setup_sensor(config)
         # Create feeder
