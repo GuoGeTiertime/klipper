@@ -507,13 +507,13 @@ class FilaFeeders:  # PrinterHeaters:
             raise config.error("Feeder %s already registered" % (feeder_name,))
         
         # test mcu is exist.
-        sensor_pin = config.get('sensor_pin')
+        fila_pin = config.get('fila_pin')
         # Parse pins
         ppins = self.printer.lookup_object('pins')
         try:
-            pin_params = ppins.lookup_pin(sensor_pin)
+            pin_params = ppins.parse_pin(fila_pin)
         except:
-            logging.error("Hx711 sensor_pin %s not found, maybe the mcu is disconnected", sensor_pin)
+            logging.error("Hx711 sensor_pin %s not found, maybe the mcu is disconnected", fila_pin)
             # 遍历所有options, avoid the unused options error
             for option in config.get_prefix_options(''):
                 option = option.lower()
