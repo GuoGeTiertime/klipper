@@ -262,9 +262,9 @@ class PrinterHoming:
                 raise self.printer.command_error(
                     "Probing failed due to printer shutdown")
             raise
-        if hmove.check_no_movement() is not None:
-            raise self.printer.command_error(
-                "Probe triggered prior to movement")
+        # if hmove.check_no_movement() is not None:
+        #     raise self.printer.command_error(
+        #         "Probe triggered prior to movement")
         return epos
     def cmd_G28(self, gcmd):
         # Move to origin
