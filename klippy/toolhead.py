@@ -472,7 +472,7 @@ class ToolHead:
                 # Pause before sending more steps
                 self.drip_completion.wait(curtime + wait_time)
                 curtime = self.reactor.monotonic()
-                logging.info(" --- drip move wait time:%.3f, flush_delay: %.4f, curtime:%.4f", wait_time, flush_delay, curtime)
+                # logging.info(" --- drip move wait time:%.3f, flush_delay: %.4f, curtime:%.4f", wait_time, flush_delay, curtime)
                 continue
             npt = min(self.print_time + DRIP_SEGMENT_TIME, next_print_time)
             self._update_move_time(npt)
@@ -499,7 +499,7 @@ class ToolHead:
             self.move_queue.reset()
             self.trapq_finalize_moves(self.trapq, self.reactor.NEVER)
             curtime = self.reactor.monotonic()
-            logging.info(" --- drip move end, curtime:%.4f", curtime)
+            # logging.info(" --- drip move end, curtime:%.4f", curtime)
         # Exit "Drip" state
         self.flush_step_generation()
     # Misc commands
