@@ -196,8 +196,9 @@ class SecondarySync(ClockSync):
         return "%s clock_adj=(%.3f %.3f)" % (
             ClockSync.dump_debug(self), adjusted_offset, adjusted_freq)
     def dump_TimeErr(self, print_time):
-        if abs(print_time-self.last_sync_time) > 10 :
-            logging.info("dump_TimeErr(), base time err over 10, print_time:%.3f  last_sync_time:%.3f", print_time, self.last_sync_time)
+        # if abs(print_time-self.last_sync_time) > 10 :
+        #     logging.info("dump_TimeErr(), base time err over 10, print_time:%.3f  last_sync_time:%.3f", print_time, self.last_sync_time)
+        pass
     def stats(self, eventtime):
         adjusted_offset, adjusted_freq = self.clock_adj
         return "%s adj=%d" % (ClockSync.stats(self, eventtime), adjusted_freq)
