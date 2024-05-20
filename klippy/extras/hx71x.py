@@ -202,6 +202,8 @@ class HX71X:
         self.total_weight_max = 0.0
         self.prev_weight = 0.0
 
+        self.isloginfo = 0  # 0: no log, 1:gcode response, 2: write log file, 3: response and write log file 
+
         # Determine pin from config
         ppins = config.get_printer().lookup_object("pins")
 
@@ -336,7 +338,8 @@ class HX71X:
         self.gcode_response_threshold = gcmd.get_float('THRESHOLD', self.gcode_response_threshold, minval=0.0)
         self.report_time = gcmd.get_float('REPORT', self.report_time, minval=MIN_REPORT_TIME)
         self.updateNow()
-        msg = "Set HX71X sensor response time: %.2f, report time:%.2f, threshold: %.2f" % (self.gcode_response_time, self.report_time, self.gcode_response_threshold)
+        self.isloginfo = gcmd.get_int('LOG', self.isloginfo)
+        msg = "Set HX71X sensor response time: %.2f, report time:%.2f, threshold: %.2f, log:%d" % (self.gcode_response_time, self.report_time, self.gcode_response_threshold, self.isloginfo)
         self._loginfo(msg)
 
     cmd_TEST_WEIGHT_help = "test the weight sensor with a threshold by run a gcode cmd, parameter: ID, MIN, MAX, COLLISION"
@@ -379,8 +382,12 @@ class HX71X:
         return
     
     def _loginfo(self, msg):
-        logging.info(msg)
-        self.gcode.respond_info(msg)
+        if self.isloginfo == 1:
+            self.gcode.respond_info(msg, False) # only respond to gcode.
+        elif self.isloginfo == 2:
+           logging.info(msg) # only write log file.
+        elif self.isloginfo == 3:
+            self.gcode.respond_info(msg, True) # respond to gcode and write log file.
 
     def build_config(self):
         # self.read_hx71x_cmd = self.mcu.lookup_query_command(
@@ -427,8 +434,8 @@ class HX71X:
 
         # debug log, print hx711 read value every 256 times.
         if (self._sample_cnt[oid] < 5 or (self._sample_cnt[oid] % 256) == 0) :
-            logging.info("Senser:%s(oid:%d) read hx711 @ %.3f , weight:%.2f, cnt:%d, tare:%.2f, value:%d", 
-                         self.name, oid, last_read_time, self.weight[oid], self._sample_cnt[oid], self._sample_tare[oid], value)
+            self._loginfo("Senser:%s(oid:%d) read hx711 @ %.3f , weight:%.2f, cnt:%d, tare:%.2f, value:%d" % 
+                         (self.name, oid, last_read_time, self.weight[oid], self._sample_cnt[oid], self._sample_tare[oid], value))
             
         # collision warning test
         if self.collision_err > 0 and abs(self.weight[oid]) > self.collision_err:
@@ -597,7 +604,7 @@ class HX71X:
         return self._endstop
 
     def get_temp(self, eventtime):
-        logging.info("call HX71X.get_temp() of %s ,eventtime: %.2f ", self.name, eventtime)
+        # logging.info("call HX71X.get_temp() of %s ,eventtime: %.2f ", self.name, eventtime)
         return self.last_temp, 0.
     
     def stats(self, eventtime):
