@@ -104,6 +104,7 @@ class GCodeDispatch:
         self.ready_gcode_handlers = {}
         self.mux_commands = {}
         self.gcode_help = {}
+        self.is_Stopping = False
         # Register commands needed before config file is loaded
         handlers = ['M110', 'M112', 'M115',
                     'RESTART', 'FIRMWARE_RESTART', 'ECHO', 'STATUS', 'HELP']
@@ -173,6 +174,8 @@ class GCodeDispatch:
     # Parse input into commands
     args_r = re.compile('([A-Z_]+|[A-Z*/])')
     def _process_commands(self, commands, need_ack=True):
+        if self.is_Stopping:   # Stop processing commands, add by guoge 20240521
+            return
         for line in commands:
             # Ignore comments and leading/trailing spaces
             line = origline = line.strip()
@@ -304,8 +307,24 @@ class GCodeDispatch:
     def cmd_M110(self, gcmd):
         # Set Current Line Number
         pass
+    def is_stopping(self):
+        return self.is_Stopping
+    def _stop_finished(self, eventtime): # stop finished, add by guoge 20240521
+        reactor = self.printer.get_reactor()
+        reactor.unregister_timer(self._stop_finished)
+        if self.is_Stopping:
+            self.is_Stopping = False
+            self.run_script_from_command("CANCEL_PRINT")
+        return self.printer.get_reactor().NEVER
     def cmd_M112(self, gcmd):
+        flag = gcmd.get_int('FLAG', None)
+        if flag is not None:    # Stop processing commands, add by guoge 20240521
+            self.is_Stopping = True
+            reactor = self.printer.get_reactor()
+            reactor.register_timer(self._stop_finished, reactor.monotonic() + 1.1) #ignore all commands for 1.1s, the check time of heater is 1.0s
+            return
         # Emergency Stop
+        raise gcmd.error("Emergency Stop")
         self.printer.invoke_shutdown("Shutdown due to M112 command")
     def cmd_M115(self, gcmd):
         # Get Firmware Version and Capabilities
