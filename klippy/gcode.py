@@ -174,9 +174,9 @@ class GCodeDispatch:
     # Parse input into commands
     args_r = re.compile('([A-Z_]+|[A-Z*/])')
     def _process_commands(self, commands, need_ack=True):
-        if self.is_Stopping:   # Stop processing commands, add by guoge 20240521
-            return
         for line in commands:
+            if self.is_Stopping:   # Stop processing commands, add by guoge 20240521
+                break
             # Ignore comments and leading/trailing spaces
             line = origline = line.strip()
             cpos = line.find(';')
@@ -212,8 +212,6 @@ class GCodeDispatch:
                 if not need_ack:
                     raise
             gcmd.ack()
-            if self.is_Stopping:
-                return
     def run_script_from_command(self, script):
         self._process_commands(script.split('\n'), need_ack=False)
     m112_r = re.compile('^(?:[nN][0-9]+)?\s*[mM]112(?:\s|$)')
@@ -334,7 +332,8 @@ class GCodeDispatch:
                 toolhead = self.printer.lookup_object('toolhead')
                 toolhead.move_queue.reset() # clear move queue, add by guoge 20240521
                 reactor = self.printer.get_reactor()
-                reactor.register_timer(self._stop_finished, reactor.monotonic() + 10.1) #ignore all commands for 1.1s, the check time of heater is 1.0s
+                with self.mutex:  # wait mutex for other pending commands, add by guoge 20240522
+                    reactor.register_timer(self._stop_finished, reactor.monotonic() + 1.1) #ignore all commands for 1.1s, the check time of heater is 1.0s
                 return
             logging.info("M112 command received, flag=None")
         else:
