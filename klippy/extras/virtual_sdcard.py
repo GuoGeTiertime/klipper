@@ -230,7 +230,7 @@ class VirtualSD:
         partial_input = ""
         lines = []
         error_message = None
-        while not self.must_pause_work:
+        while not self.must_pause_work and not self.gcode.is_stopping():
             if not lines:
                 # Read more data
                 try:
@@ -287,14 +287,14 @@ class VirtualSD:
         logging.info("Exiting SD card print (position %d)", self.file_position)
         self.work_timer = None
         self.cmd_from_sd = False
-        self.gcode.run_script_from_command("AUTO_PREPARENEXT")
-        self.gcode.run_script_from_command("AUTO_STARTNEXT FLAG=4")
         if error_message is not None:
             self.print_stats.note_error(error_message)
         elif self.current_file is not None:
             self.print_stats.note_pause()
         else:
             self.print_stats.note_complete()
+            self.gcode.run_script_from_command("AUTO_PREPARENEXT")
+            self.gcode.run_script_from_command("AUTO_STARTNEXT FLAG=4")
         return self.reactor.NEVER
 
 def load_config(config):
