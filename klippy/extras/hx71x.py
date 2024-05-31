@@ -191,7 +191,7 @@ class HX71X:
         # add simulate variable for temperature sensor.
         self.last_temp = 0.
         self.measured_min = 99999999.
-        self.measured_max = 0.
+        self.measured_max = -99999999.
 
         self.weight = {}  # 0.0
         self.read_time = {}  # 0.0
@@ -331,6 +331,8 @@ class HX71X:
             self.weight_min[oid] = self.weight_max[oid] = 0.0
 
         self.total_weight = self.total_weight_min = self.total_weight_max = 0.0
+        self.measured_min = 9999999.0
+        self.measured_max = -9999999.0
 
     cmd_RESPONSE_WEIGHT_help = "Set the GCode respose time of the weight sensor, paramters: TIME, THRESHOLD, REPORT"
     def cmd_RESPONSE_WEIGHT(self, gcmd):
@@ -348,6 +350,8 @@ class HX71X:
         thMin = gcmd.get_float('MIN', self.test_min, minval=0.0)
         thMax = gcmd.get_float('MAX', self.test_max, minval=thMin)
         self.collision_err = gcmd.get_float('COLLISION', self.collision_err, minval=0.0)
+        weightThreshold = gcmd.get_float('THRESHOLD', 0.0)
+        curThreshold = gcmd.get_float('CUR', 0.0)
 
         curTime = self.mcu.estimated_print_time(self.reactor.monotonic())
         self._loginfo("Test HX71X sensor with a program(ID:%d, threshold:%.2f~%.2f, collision:%.2f) @ %.3fs" % (id, thMin, thMax,self.collision_err, curTime))
@@ -369,6 +373,14 @@ class HX71X:
         maxDiff = max(self.weight_max.values())            
         maxErr = max(abs(minDiff), abs(maxDiff))
 
+        if weightThreshold > 0.0 and ( self.measured_max > weightThreshold or self.measured_min < -weightThreshold):
+            msg = "Error, Weight sensor(HX71x) test failed, measured min: %.2f, max: %.2f, threshold: %.2f" % (self.measured_min, self.measured_max, weightThreshold)
+            raise gcmd.error(msg)
+
+        if curThreshold > 0.0 and abs(self.total_weight) > curThreshold:
+            msg = "Error, Weight sensor(HX71x) test failed, cur weight: %.2f > cur threshold: %.2f" % (self.total_weight, curThreshold)
+            raise gcmd.error(msg)
+
         if( maxErr < thMin or maxErr > thMax ):
             msg = "Error, Weight sensor(HX71x) test failed, min: %.3f, max: %.3f, (threshold: %.2f~%.2f)" % (minDiff, maxDiff, thMin, thMax)
             # self._loginfo(msg)
@@ -376,6 +388,7 @@ class HX71X:
             # self.gcode.run_script_from_command("M112")  # emergency stop
         else:
             self._loginfo("Weight sensor(HX71x) test passed, min: %.3f, max: %.3f, (threshold: %.2f~%.2f)" % (minDiff, maxDiff, thMin, thMax) )
+
 
     def handle_connect(self):
         # self.reactor.update_timer(self.sample_timer, self.reactor.NOW)
