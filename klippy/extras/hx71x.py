@@ -252,7 +252,7 @@ class HX71X:
         # set base value and triger threshold for endstop
         self.endstop_base = config.getfloat('endstop_base', 0.0)
         self.endstop_threshold = config.getfloat('endstop_threshold', 100.0)
-        self.endstop_max = config.getfloat('endstop_max', self.endstop_threshold * 20)
+        self.endstop_max = config.getfloat('endstop_max', self.endstop_threshold * 5)
         self.endstop_report_time = config.getfloat('endstop_report_time', 0.05, minval=MIN_REPORT_TIME)
         self.endstop_trigger_delay = config.getfloat('endstop_trigger_deley', 0.01)
         self.endstop_deformation = config.getfloat("endstop_deformation", 600.0) # 600 gram / 0.1mm deformation
@@ -486,10 +486,10 @@ class HX71X:
             self._callback(last_read_time, self.last_temp)  # callback to update the temperature of heaters.
 
         # debug log, print weight when over endstop threshold every 16 times.
-        if (self._endstop is not None) and (self._sample_cnt_total[oid] % 16) == 0:
-            if self.is_endstop_on():
-                msg = "Weight:%.2f, over endstop threshold: %.2f @ %.3f" % (self.total_weight, self.endstop_threshold, last_read_time)
-                self._loginfo(msg)
+        # if (self._endstop is not None) and (self._sample_cnt_total[oid] % 16) == 0:
+        #     if self.is_endstop_on():
+        #         msg = "Weight:%.2f, over endstop threshold: %.2f @ %.3f" % (self.total_weight, self.endstop_threshold, last_read_time)
+        #         self._loginfo(msg)
 
         # timer interval is short when homing
         if (self._endstop is not None) and self._endstop.bHoming:
@@ -502,7 +502,10 @@ class HX71X:
     def is_endstop_on(self):
         if self.total_weight > self.endstop_threshold:
             # prev weight should less than threshold, or the weight is bigger than threshold2.
-            if self.prev_weight<self.endstop_threshold or self.total_weight > self.endstop_max:
+            if self.prev_weight<self.endstop_threshold:
+                return True
+            if self.total_weight > self.endstop_max:
+                self._loginfo("  ***** Error, weight is over endstop_max, weight:%.2f, max:%.2f, bHoming:%d" % (self.total_weight, self.endstop_max, self._endstop.bHoming))
                 return True
         return False
 
