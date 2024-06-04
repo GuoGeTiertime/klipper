@@ -114,7 +114,7 @@ class HomingMove:
             elif check_triggered and error is None:
                 error = "No trigger on %s after full movement" % (name,)
 
-        logging.info("Homing move home_wait() end @ %.4f" % (reactor.monotonic()) )
+        logging.info("240604 Homing move home_wait() end @ %.4f" % (reactor.monotonic()) )
 
         # Determine stepper halt positions
         self.toolhead.flush_step_generation()
@@ -140,6 +140,13 @@ class HomingMove:
                 halt_kin_spos = {s.get_name(): s.get_commanded_position()
                                  for s in kin.get_steppers()}
                 haltpos = self.calc_toolhead_pos(halt_kin_spos, over_steps)
+            cur_haltpos = {sp.stepper_name: sp.halt_pos
+                        for sp in self.stepper_positions}
+            cur_trigpos = {sp.stepper_name: sp.trig_pos
+                        for sp in self.stepper_positions}
+            msg = "20240604, home pos @ %s halt pos:%s, trig pos:%s" % (movepos, cur_haltpos, cur_trigpos)
+            self.printer.lookup_object('gcode').respond_info(msg)
+            logging.info(msg)
         self.toolhead.set_position(haltpos)
         # Signal homing/probing move complete
         try:
