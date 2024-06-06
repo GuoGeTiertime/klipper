@@ -48,6 +48,25 @@ class PrinterProbe:
                                                  minval=0.)
         self.samples_retries = config.getint('samples_tolerance_retries', 0,
                                              minval=0)
+        # probe corrections
+        self.x_min = 0
+        self.x_max = 0
+        self.y_min = 0
+        self.y_max = 0
+        self.corrcetions = {}
+        if config.has_section('stepper_x'):
+            xconfig = config.getsection('stepper_x')
+            self.x_min = xconfig.getfloat('position_min', 0., note_valid=False)
+            self.x_max = xconfig.getfloat('position_max', 0., note_valid=False)
+        if config.has_section('stepper_y'):
+            yconfig = config.getsection('stepper_y')
+            self.y_min = yconfig.getfloat('position_min', 0., note_valid=False)
+            self.y_max = yconfig.getfloat('position_max', 0., note_valid=False)
+        self.correct_rows = config.getint('correct_rows', default=0)
+        self.correct_cols = config.getint('correct_cols', default=0)
+        if self.correct_rows > 0 and self.correct_cols > 0:
+            self.corrcetions = config.getfloatlist('corrections', default=None, seps=(',', '\n'), count=self.correct_rows * self.correct_cols)
+
         # Register z_virtual_endstop pin
         self.printer.lookup_object('pins').register_chip('probe', self)
         # Register homing event handlers
@@ -93,6 +112,29 @@ class PrinterProbe:
             self.multi_probe_end()
         except:
             logging.exception("Multi-probe end")
+    def _calZCompensation(self, pos):
+        if len(self.corrcetions) == 0:
+            return 0
+        x = pos[0]
+        y = pos[1]
+        # x direction is row, y direction is col. corrections is row major, so x is row, y is col
+        # corrections points coordinate(x,y) is: (0,0) (50,0) (100,0) (0,60) (50,60) (100,60) (0,120) (50,120) (100,120)
+        deltax = (self.x_max - self.x_min) / self.correct_cols
+        deltay = (self.y_max - self.y_min) / self.correct_rows
+        idx_x = int((x - self.x_min) / deltax) # col index
+        idx_y = int((y - self.y_min) / deltay) # row index
+        idx_x = min(max(0, idx_x), self.correct_cols - 2)
+        idx_y = min(max(0, idx_y), self.correct_rows - 2)
+        z0 = self.corrcetions[idx_x + idx_y * self.correct_cols]
+        z1 = self.corrcetions[idx_x + 1 + idx_y * self.correct_cols]
+        z2 = self.corrcetions[idx_x + (idx_y + 1) * self.correct_cols]
+        z3 = self.corrcetions[idx_x + 1 + (idx_y + 1) * self.correct_cols]
+        ratio_x = (x - self.x_min - idx_x * deltax) / deltax
+        ratio_y = (y - self.y_min - idx_y * deltay) / deltay
+        zz0 = z0 + (z1 - z0) * ratio_x
+        zz1 = z2 + (z3 - z2) * ratio_x
+        zz = zz0 + (zz1 - zz0) * ratio_y
+        return zz
     def multi_probe_begin(self):
         self.mcu_probe.multi_probe_begin()
         self.multi_probe_pending = True
@@ -135,6 +177,7 @@ class PrinterProbe:
             z_compensation = (
                 axis_twist_compensation.get_z_compensation_value(pos))
         # add z compensation to probe position
+        z_compensation += self._calZCompensation(epos[:2])
         epos[2] += z_compensation
         curtime = self.printer.get_reactor().monotonic()
         self.gcode.respond_info("probe at %.3f,%.3f is z=%.6f, time:%.4f\n"
