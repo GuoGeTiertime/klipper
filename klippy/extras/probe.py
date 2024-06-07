@@ -62,10 +62,17 @@ class PrinterProbe:
             yconfig = config.getsection('stepper_y')
             self.y_min = yconfig.getfloat('position_min', 0., note_valid=False)
             self.y_max = yconfig.getfloat('position_max', 0., note_valid=False)
-        self.correct_rows = config.getint('correct_rows', default=0)
-        self.correct_cols = config.getint('correct_cols', default=0)
-        if self.correct_rows > 0 and self.correct_cols > 0:
-            self.corrcetions = config.getfloatlist('corrections', default=None, seps=(',', '\n'), count=self.correct_rows * self.correct_cols)
+        self.correct_rows = config.getint('correct_rows', default=0) # divide y direction, ydelta = (y_max - y_min) / correct_rows-1
+        self.correct_cols = config.getint('correct_cols', default=0) # divide x direction, xdelta = (x_max - x_min) / correct_cols-1
+        # the corrections is row major, the rows point positions is (0,y) (100,y) (200,y) (300,y)
+        if self.correct_rows > 1 and self.correct_cols > 1: # at least 2x2
+            self.corrcetions = config.getlists('corrections', seps=(',', '\n'), 
+                                               parser=float, count=self.correct_cols)
+        n = len(self.corrcetions)
+        if n != self.correct_rows:
+            logging.info("Error, corrections count:%d, correct_rows:%d, correct_cols:%d" % (n, self.correct_rows, self.correct_cols))
+            self.correctioins = {}
+            raise config.error("Probe corrections points are not correct, please check the config file, [probe] section, corrections item")
 
         # Register z_virtual_endstop pin
         self.printer.lookup_object('pins').register_chip('probe', self)
@@ -113,27 +120,29 @@ class PrinterProbe:
         except:
             logging.exception("Multi-probe end")
     def _calZCompensation(self, pos):
-        if len(self.corrcetions) == 0:
+        if len(self.corrcetions) < 2: #at least 2x2 matrix
             return 0
         x = pos[0]
         y = pos[1]
         # x direction is row, y direction is col. corrections is row major, so x is row, y is col
         # corrections points coordinate(x,y) is: (0,0) (50,0) (100,0) (0,60) (50,60) (100,60) (0,120) (50,120) (100,120)
-        deltax = (self.x_max - self.x_min) / self.correct_cols
-        deltay = (self.y_max - self.y_min) / self.correct_rows
-        idx_x = int((x - self.x_min) / deltax) # col index
-        idx_y = int((y - self.y_min) / deltay) # row index
-        idx_x = min(max(0, idx_x), self.correct_cols - 2)
-        idx_y = min(max(0, idx_y), self.correct_rows - 2)
-        z0 = self.corrcetions[idx_x + idx_y * self.correct_cols]
-        z1 = self.corrcetions[idx_x + 1 + idx_y * self.correct_cols]
-        z2 = self.corrcetions[idx_x + (idx_y + 1) * self.correct_cols]
-        z3 = self.corrcetions[idx_x + 1 + (idx_y + 1) * self.correct_cols]
-        ratio_x = (x - self.x_min - idx_x * deltax) / deltax
-        ratio_y = (y - self.y_min - idx_y * deltay) / deltay
+        deltax = (self.x_max - self.x_min) / (self.correct_cols-1)
+        deltay = (self.y_max - self.y_min) / (self.correct_rows-1)
+        nCol = int((x - self.x_min) / deltax) # col index
+        nRow = int((y - self.y_min) / deltay) # row index
+        nCol = min(max(0, nCol), self.correct_cols - 2)
+        nRow = min(max(0, nRow), self.correct_rows - 2)
+        z0 = self.corrcetions[nRow][nCol]
+        z1 = self.corrcetions[nRow][nCol+1]
+        z2 = self.corrcetions[nRow+1][nCol]
+        z3 = self.corrcetions[nRow+1][nCol+1]
+        ratio_x = (x - self.x_min - nCol * deltax) / deltax
+        ratio_y = (y - self.y_min - nRow * deltay) / deltay
         zz0 = z0 + (z1 - z0) * ratio_x
         zz1 = z2 + (z3 - z2) * ratio_x
         zz = zz0 + (zz1 - zz0) * ratio_y
+        # logging.info("x:%.3f y:%.3f z:%.3f, x:%d y:%d z0:%.3f z1:%.3f z2:%.3f z3:%.3f ratio_x:%.3f ratio_y:%.3f zz0:%.3f zz1:%.3f zz:%.3f" % 
+        #              (x, y, zz, nCol, nRow, z0, z1, z2, z3, ratio_x, ratio_y, zz0, zz1, zz) )
         return zz
     def multi_probe_begin(self):
         self.mcu_probe.multi_probe_begin()
@@ -180,8 +189,8 @@ class PrinterProbe:
         z_compensation += self._calZCompensation(epos[:2])
         epos[2] += z_compensation
         curtime = self.printer.get_reactor().monotonic()
-        self.gcode.respond_info("probe at %.3f,%.3f is z=%.6f, time:%.4f\n"
-                                % (epos[0], epos[1], epos[2], curtime))
+        self.gcode.respond_info("probe at %.3f,%.3f is z=%.6f, time:%.4f, z compensation:%.3f\n"
+                                % (epos[0], epos[1], epos[2], curtime, z_compensation))
         return epos[:3]
     def _move(self, coord, speed):
         self.printer.lookup_object('toolhead').manual_move(coord, speed)
