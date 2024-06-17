@@ -105,6 +105,7 @@ class GCodeDispatch:
         self.mux_commands = {}
         self.gcode_help = {}
         self.status_commands = {}
+        self.is_Stopping = False
         # Register commands needed before config file is loaded
         handlers = ['M110', 'M112', 'M115',
                     'RESTART', 'FIRMWARE_RESTART', 'ECHO', 'STATUS', 'HELP']
@@ -187,6 +188,8 @@ class GCodeDispatch:
     args_r = re.compile('([A-Z_]+|[A-Z*/])')
     def _process_commands(self, commands, need_ack=True):
         for line in commands:
+            if self.is_Stopping:   # Stop processing commands, add by guoge 20240521
+                break
             # Ignore comments and leading/trailing spaces
             line = origline = line.strip()
             cpos = line.find(';')
@@ -224,7 +227,12 @@ class GCodeDispatch:
             gcmd.ack()
     def run_script_from_command(self, script):
         self._process_commands(script.split('\n'), need_ack=False)
+    m112_r = re.compile('^(?:[nN][0-9]+)?\s*[mM]112(?:\s|$)')
     def run_script(self, script):
+        # add by guoge 20240521, M112 stop processing commands, should run now!
+        if self.m112_r.match(script) is not None:
+            self._process_commands(script.split('\n'), need_ack=False)
+            return
         with self.mutex:
             self._process_commands(script.split('\n'), need_ack=False)
     def get_mutex(self):
@@ -317,9 +325,35 @@ class GCodeDispatch:
     def cmd_M110(self, gcmd):
         # Set Current Line Number
         pass
+    def is_stopping(self):
+        return self.is_Stopping
+    def _stop_finished(self, eventtime): # stop finished, add by guoge 20240521
+        reactor = self.printer.get_reactor()
+        if self.is_Stopping:
+            logging.info("Stop finished, reset is_Stopping flag.")
+            self.is_Stopping = False
+            v_sd = self.printer.lookup_object('virtual_sdcard', None)
+            if v_sd is not None and v_sd.is_active() :  # stop print from sd card
+                self.run_script_from_command("CANCEL_PRINT")
+        return self.printer.get_reactor().NEVER
     def cmd_M112(self, gcmd):
+        if gcmd is not None:    # Stop processing commands, add by guoge 20240521
+            flag = gcmd.get_int('F', None)
+            if flag:
+                self.is_Stopping = True
+                logging.info("M112 command received, flag=%d, reset toolhead move queue, wait for 10 seconds." % flag)
+                toolhead = self.printer.lookup_object('toolhead')
+                toolhead.move_queue.reset() # clear move queue, add by guoge 20240521
+                reactor = self.printer.get_reactor()
+                with self.mutex:  # wait mutex for other pending commands, add by guoge 20240522
+                    reactor.register_timer(self._stop_finished, reactor.monotonic() + 1.1) #ignore all commands for 1.1s, the check time of heater is 1.0s
+                return
+            logging.info("M112 command received, flag=None")
+        else:
+            logging.info("M112 command received, no gcmd")
         # Emergency Stop
-        self.printer.invoke_shutdown("Shutdown due to M112 command")
+        raise gcmd.error("Emergency Stop")
+        # self.printer.invoke_shutdown("Shutdown due to M112 command")
     def cmd_M115(self, gcmd):
         # Get Firmware Version and Capabilities
         software_version = self.printer.get_start_args().get('software_version')
@@ -435,7 +469,8 @@ class GCodeIO:
                 # Check for M112 out-of-order
                 for line in lines:
                     if self.m112_r.match(line) is not None:
-                        self.gcode.cmd_M112(None)
+                        # self.gcode.cmd_M112()
+                        self.gcode.run_script_from_command(line)
             if self.is_processing_data:
                 if len(pending_commands) >= 20:
                     # Stop reading input

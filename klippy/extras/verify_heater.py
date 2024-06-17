@@ -56,6 +56,7 @@ class HeaterCheck:
                 self.error = 0.
             self.last_target = target
             return eventtime + 1.
+        prev_error = self.error
         self.error += (target - self.hysteresis) - temp
         if not self.approaching_target:
             if target != self.last_target:
@@ -66,6 +67,8 @@ class HeaterCheck:
                 self.goal_temp = temp + self.heating_gain
                 self.goal_systime = eventtime + self.check_gain_time
             elif self.error >= self.max_error:
+                logging.info( "***** Error, heater %s over max_error, temp:%.2f, target: %.2f, error:%.2f, preverr:%.2f, max:%.2f, add tiertime 20231130.",
+                             temp, target, self.error, prev_error, self.max_error)
                 # Failure due to inability to maintain target temperature
                 return self.heater_fault()
         elif temp >= self.goal_temp:

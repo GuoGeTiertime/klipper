@@ -34,6 +34,7 @@ class ManualStepper:
         gcode.register_mux_command('MANUAL_STEPPER', "STEPPER",
                                    stepper_name, self.cmd_MANUAL_STEPPER,
                                    desc=self.cmd_MANUAL_STEPPER_help)
+        self.printer.add_object(stepper_name, self)
     def sync_print_time(self):
         toolhead = self.printer.lookup_object('toolhead')
         print_time = toolhead.get_last_move_time()
@@ -124,6 +125,8 @@ class ManualStepper:
         return self.steppers
     def calc_position(self, stepper_positions):
         return [stepper_positions[self.rail.get_name()], 0., 0.]
+    def get_status(self, eventtime=None):
+        return {'pos': self.rail.get_commanded_position()}
 
 def load_config_prefix(config):
     return ManualStepper(config)

@@ -93,6 +93,10 @@ class ForceMove:
         toolhead.note_mcu_movequeue_activity(print_time)
         toolhead.dwell(accel_t + cruise_t + accel_t)
         toolhead.flush_step_generation()
+# ======= if force move wait too long, modify here
+#         toolhead.note_kinematic_activity(print_time)
+#         toolhead.dwell( min(0.100, move_time) ) # wait for move to complete, max 100ms.
+# >>>>>>> ProbeAdjust
     def _lookup_stepper(self, gcmd):
         name = gcmd.get('STEPPER')
         if name not in self.steppers:

@@ -20,6 +20,7 @@ class Heater:
         self.printer = config.get_printer()
         self.name = config.get_name()
         self.short_name = short_name = self.name.split()[-1]
+        self.reactor = self.printer.get_reactor() #add by guoge 20231130.
         # Setup sensor
         self.sensor = sensor
         self.min_temp = config.getfloat('min_temp', minval=KELVIN_TO_CELSIUS)
@@ -81,6 +82,8 @@ class Heater:
         #              self.last_temp, self.last_temp_time, self.target_temp)
     def temperature_callback(self, read_time, temp):
         with self.lock:
+            last_time = self.last_temp_time;
+            curtime = self.reactor.monotonic()
             time_diff = read_time - self.last_temp_time
             self.last_temp = temp
             self.last_temp_time = read_time
@@ -88,6 +91,14 @@ class Heater:
             temp_diff = temp - self.smoothed_temp
             adj_time = min(time_diff * self.inv_smooth_time, 1.)
             self.smoothed_temp += temp_diff * adj_time
+            if self.smoothed_temp > 500 :
+                logging.info(" *** Temp callbacke Error @ %.3f, heater: %s temp:%.3f/%.3f @ read time:%.3f - %.3f, timeDiff:%.2f, tempDiff:%.3f, too high", 
+                             curtime, self.name, self.smoothed_temp, temp, read_time, last_time, time_diff, temp_diff)
+                self.smoothed_temp = 500;
+            if self.smoothed_temp < -100 :
+                logging.info(" *** Temp callbacke Error @% .3f, heater: %s temp:%.3f/%.3f @ read time:%.3f - %.3f, timeDiff:%.2f, tempDiff:%.3f, too low", 
+                             curtime, self.name, self.smoothed_temp, temp, read_time, last_time, time_diff, temp_diff)
+                self.smoothed_temp = -100
             self.can_extrude = (self.smoothed_temp >= self.min_extrude_temp)
         #logging.debug("temp: %.3f %f = %f", read_time, temp)
     def _handle_shutdown(self):
@@ -222,8 +233,8 @@ class ControlPID:
             self.prev_temp_integ = temp_integ
     def check_busy(self, eventtime, smoothed_temp, target_temp):
         temp_diff = target_temp - smoothed_temp
-        return (abs(temp_diff) > PID_SETTLE_DELTA
-                or abs(self.prev_temp_deriv) > PID_SETTLE_SLOPE)
+        return (abs(temp_diff) > PID_SETTLE_DELTA )
+                # or abs(self.prev_temp_deriv) > PID_SETTLE_SLOPE)
 
 
 ######################################################################
@@ -340,7 +351,7 @@ class PrinterHeaters:
         gcode = self.printer.lookup_object("gcode")
         reactor = self.printer.get_reactor()
         eventtime = reactor.monotonic()
-        while not self.printer.is_shutdown() and heater.check_busy(eventtime):
+        while not self.printer.is_shutdown() and heater.check_busy(eventtime) and not gcode.is_stopping():
             print_time = toolhead.get_last_move_time()
             gcode.respond_raw(self._get_temp(eventtime))
             eventtime = reactor.pause(eventtime + 1.)

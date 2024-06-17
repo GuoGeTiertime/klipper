@@ -198,8 +198,10 @@ STEPCOMPRESS_FLUSH_TIME = 0.050
 SDS_CHECK_TIME = 0.001 # step+dir+step filter in stepcompress.c
 MOVE_HISTORY_EXPIRE = 30.
 
-DRIP_SEGMENT_TIME = 0.050
-DRIP_TIME = 0.100
+# DRIP_SEGMENT_TIME = 0.050
+# DRIP_TIME = 0.100
+DRIP_SEGMENT_TIME = 0.01
+DRIP_TIME = 0.05
 class DripModeEndSignal(Exception):
     pass
 
@@ -234,6 +236,25 @@ class ToolHead:
         self._calc_junction_deviation()
         # Input stall detection
         self.check_stall_time = 0.
+        # Print time tracking
+        self.buffer_time_low = config.getfloat(
+            'buffer_time_low', 1.000, above=0.)
+        self.buffer_time_high = config.getfloat(
+            'buffer_time_high', 2.000, above=self.buffer_time_low)
+        # self.buffer_time_start = config.getfloat(
+        #     'buffer_time_start', 0.250, above=0.)
+        # self.move_flush_time = config.getfloat(
+        #     'move_flush_time', 0.050, above=0.)
+        self.buffer_time_start = config.getfloat(
+            'buffer_time_start', 0.030, above=0.)
+        self.move_flush_time = config.getfloat(
+            'move_flush_time', 0.020, above=0.)
+        self.print_time = 0.
+        self.special_queuing_state = "Flushed"
+        self.need_check_stall = -1.
+        self.flush_timer = self.reactor.register_timer(self._flush_handler)
+        self.move_queue.set_flush_time(self.buffer_time_high)
+        self.idle_flush_print_time = 0.
         self.print_stall = 0
         # Input pause tracking
         self.can_pause = True
@@ -330,6 +351,7 @@ class ToolHead:
             self.print_time = min_print_time
             self.printer.send_event("toolhead:sync_print_time",
                                     curtime, est_print_time, self.print_time)
+            # logging.info(" *** calc print time:%.3f, est:%.3f", self.print_time, est_print_time);
     def _process_moves(self, moves):
         # Resync print_time if necessary
         if self.special_queuing_state:
@@ -491,7 +513,7 @@ class ToolHead:
                or self.print_time >= self.mcu.estimated_print_time(eventtime)):
             if not self.can_pause:
                 break
-            eventtime = self.reactor.pause(eventtime + 0.100)
+            eventtime = self.reactor.pause(eventtime + 0.100*0.2)
     def set_extruder(self, extruder, extrude_pos):
         self.extruder = extruder
         self.commanded_pos[3] = extrude_pos
@@ -509,6 +531,8 @@ class ToolHead:
             if wait_time > 0. and self.can_pause:
                 # Pause before sending more steps
                 self.drip_completion.wait(curtime + wait_time)
+                curtime = self.reactor.monotonic()
+                # logging.info(" --- drip move wait time:%.3f, flush_delay: %.4f, curtime:%.4f", wait_time, flush_delay, curtime)
                 continue
             npt = min(self.print_time + DRIP_SEGMENT_TIME, next_print_time)
             self.note_mcu_movequeue_activity(npt + self.kin_flush_delay,
@@ -589,6 +613,8 @@ class ToolHead:
             self.kin_flush_times.append(delay)
         new_delay = max(self.kin_flush_times + [SDS_CHECK_TIME])
         self.kin_flush_delay = new_delay
+        logging.info(" --- Reset kin_flush_delay:%.4f", self.kin_flush_delay)
+
     def register_lookahead_callback(self, callback):
         last_move = self.lookahead.get_last()
         if last_move is None:

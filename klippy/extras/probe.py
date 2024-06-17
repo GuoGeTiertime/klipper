@@ -262,6 +262,43 @@ class ProbeSessionHelper:
         # Session state
         self.multi_probe_pending = False
         self.results = []
+        # probe corrections, add by guoge 20240617
+        self.x_min = 0
+        self.x_max = 0
+        self.y_min = 0
+        self.y_max = 0
+        self.corrcetions = {}
+        if config.has_section('stepper_x'):
+            xconfig = config.getsection('stepper_x')
+            self.x_min = xconfig.getfloat('position_min', 0., note_valid=False)
+            self.x_max = xconfig.getfloat('position_max', 0., note_valid=False)
+        if config.has_section('stepper_y'):
+            yconfig = config.getsection('stepper_y')
+            self.y_min = yconfig.getfloat('position_min', 0., note_valid=False)
+            self.y_max = yconfig.getfloat('position_max', 0., note_valid=False)
+        self.correct_rows = config.getint('correct_rows', default=0) # divide y direction, ydelta = (y_max - y_min) / correct_rows-1
+        self.correct_cols = config.getint('correct_cols', default=0) # divide x direction, xdelta = (x_max - x_min) / correct_cols-1
+        # the corrections is row major, the rows point positions is (0,y) (100,y) (200,y) (300,y)
+        if self.correct_rows > 1 and self.correct_cols > 1: # at least 2x2
+            self.corrcetions = config.getlists('corrections', seps=(',', '\n'), 
+                                               parser=float, count=self.correct_cols)
+        n = len(self.corrcetions)
+        if n != self.correct_rows:
+            logging.info("Error, corrections count:%d, correct_rows:%d, correct_cols:%d" % (n, self.correct_rows, self.correct_cols))
+            self.correctioins = {}
+            raise config.error("Probe corrections points are not correct, please check the config file, [probe] section, corrections item")
+
+        # Register z_virtual_endstop pin
+        self.printer.lookup_object('pins').register_chip('probe', self)
+        # Register homing event handlers
+        self.printer.register_event_handler("homing:homing_move_begin",
+                                            self._handle_homing_move_begin)
+        self.printer.register_event_handler("homing:homing_move_end",
+                                            self._handle_homing_move_end)
+        self.printer.register_event_handler("homing:home_rails_begin",
+                                            self._handle_home_rails_begin)
+        self.printer.register_event_handler("homing:home_rails_end",
+                                            self._handle_home_rails_end)
         # Register event handlers
         self.printer.register_event_handler("gcode:command_error",
                                             self._handle_command_error)
@@ -293,6 +330,7 @@ class ProbeSessionHelper:
         probe_speed = gcmd.get_float("PROBE_SPEED", self.speed, above=0.)
         lift_speed = gcmd.get_float("LIFT_SPEED", self.lift_speed, above=0.)
         samples = gcmd.get_int("SAMPLES", self.sample_count, minval=1)
+
         sample_retract_dist = gcmd.get_float("SAMPLE_RETRACT_DIST",
                                              self.sample_retract_dist, above=0.)
         samples_tolerance = gcmd.get_float("SAMPLES_TOLERANCE",
@@ -323,6 +361,8 @@ class ProbeSessionHelper:
             raise self.printer.command_error(reason)
         # Allow axis_twist_compensation to update results
         self.printer.send_event("probe:update_results", epos)
+        zCompensation = self._calZCompensation(epos)    #add by guoge 20240617, calculate and apply the z compensation.
+        epos[2] += zCompensation
         # Report results
         gcode = self.printer.lookup_object('gcode')
         gcode.respond_info("probe at %.3f,%.3f is z=%.6f"
@@ -335,9 +375,14 @@ class ProbeSessionHelper:
         toolhead = self.printer.lookup_object('toolhead')
         probexy = toolhead.get_position()[:2]
         retries = 0
+        bFirst = True
         positions = []
         sample_count = params['samples']
         while len(positions) < sample_count:
+            # speed/retract for first probe is greater then for the rest
+            probe_speed = speed if bFirst else speed / 2
+            probe_retract = sample_retract_dist if bFirst else sample_retract_dist / 2
+            bFirst = False
             # Probe position
             pos = self._probe(params['probe_speed'])
             positions.append(pos)
@@ -348,7 +393,7 @@ class ProbeSessionHelper:
                     raise gcmd.error("Probe samples exceed samples_tolerance")
                 gcmd.respond_info("Probe samples exceed tolerance. Retrying...")
                 retries += 1
-                positions = []
+                positions = positions[-1:] # only keep the last sample
             # Retract
             if len(positions) < sample_count:
                 toolhead.manual_move(
@@ -361,6 +406,32 @@ class ProbeSessionHelper:
         res = self.results
         self.results = []
         return res
+
+    def _calZCompensation(self, pos):
+        if len(self.corrcetions) < 2: #at least 2x2 matrix
+            return 0
+        x = pos[0]
+        y = pos[1]
+        # x direction is row, y direction is col. corrections is row major, so x is row, y is col
+        # corrections points coordinate(x,y) is: (0,0) (50,0) (100,0) (0,60) (50,60) (100,60) (0,120) (50,120) (100,120)
+        deltax = (self.x_max - self.x_min) / (self.correct_cols-1)
+        deltay = (self.y_max - self.y_min) / (self.correct_rows-1)
+        nCol = int((x - self.x_min) / deltax) # col index
+        nRow = int((y - self.y_min) / deltay) # row index
+        nCol = min(max(0, nCol), self.correct_cols - 2)
+        nRow = min(max(0, nRow), self.correct_rows - 2)
+        z0 = self.corrcetions[nRow][nCol]
+        z1 = self.corrcetions[nRow][nCol+1]
+        z2 = self.corrcetions[nRow+1][nCol]
+        z3 = self.corrcetions[nRow+1][nCol+1]
+        ratio_x = (x - self.x_min - nCol * deltax) / deltax
+        ratio_y = (y - self.y_min - nRow * deltay) / deltay
+        zz0 = z0 + (z1 - z0) * ratio_x
+        zz1 = z2 + (z3 - z2) * ratio_x
+        zz = zz0 + (zz1 - zz0) * ratio_y
+        # logging.info("x:%.3f y:%.3f z:%.3f, x:%d y:%d z0:%.3f z1:%.3f z2:%.3f z3:%.3f ratio_x:%.3f ratio_y:%.3f zz0:%.3f zz1:%.3f zz:%.3f" % 
+        #              (x, y, zz, nCol, nRow, z0, z1, z2, z3, ratio_x, ratio_y, zz0, zz1, zz) )
+        return zz
 
 # Helper to read the xyz probe offsets from the config
 class ProbeOffsetsHelper:

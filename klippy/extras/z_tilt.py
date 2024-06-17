@@ -90,6 +90,10 @@ class RetryHelper:
             config.getfloat("retry_tolerance", 0., above=0.)
         self.value_label = "Probed points range"
         self.error_msg_extra = error_msg_extra
+        gcode_macro = config.get_printer().load_object(config, 'gcode_macro')
+        self.retry_gcode = gcode_macro.load_template(
+            config, 'retry_gcode', '')
+
     def start(self, gcmd):
         self.max_retries = gcmd.get_int('RETRIES', self.default_max_retries,
                                         minval=0, maxval=30)
@@ -122,6 +126,7 @@ class RetryHelper:
         self.current_retry += 1
         if self.current_retry > self.max_retries:
             raise self.gcode.error("Too many retries")
+        self.retry_gcode.run_gcode_from_command()    # add by guoge 20240531
         return "retry"
 
 class ZTilt:

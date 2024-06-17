@@ -33,7 +33,7 @@ class DelayedGcode:
         try:
             self.gcode.run_script(self.timer_gcode.render())
         except Exception:
-            logging.exception("Script running error")
+            logging.exception("Delayed Gcode Script running error")
         nextwake = self.reactor.NEVER
         if self.repeat:
             nextwake = eventtime + self.duration

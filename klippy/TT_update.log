@@ -1,0 +1,19 @@
+修改,并需要更新的的文件(仅修改log,代码没变动的不计入)
+configfile.py
+autoprint.py
+feeder.py
+filafeeders.py
+force_move.py
+//gcode_button.py 恢复为原来的版本了.
+heaters.py
+hx71x.py
+manual_stepper.py
+probe.py
+save_variables.py
+TMC.py  //添加自动关闭TMC check的功能
+z_tilt.py
+
+
+其他文件. 下面两个和生成bin文件中的usbid相关.
+src/Kconfig
+src/generic/usb_cdc.c

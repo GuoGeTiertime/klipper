@@ -17,6 +17,7 @@ RANGE_CHECK_COUNT = 4
 
 # Interface between ADC and heater temperature callbacks
 class PrinterADCtoTemperature:
+    s_last_read_time = 0.0
     def __init__(self, config, adc_convert):
         self.adc_convert = adc_convert
         ppins = config.get_printer().lookup_object('pins')
@@ -31,6 +32,9 @@ class PrinterADCtoTemperature:
     def adc_callback(self, read_time, read_value):
         temp = self.adc_convert.calc_temp(read_value)
         self.temperature_callback(read_time + SAMPLE_COUNT * SAMPLE_TIME, temp)
+        if read_time < PrinterADCtoTemperature.s_last_read_time :
+            logging.info(" *** time sequence error,  adc2Temp call backe, time:%.3f last time:%.3f, value: %.3f, last_time:%.3f", read_time, PrinterADCtoTemperature.s_last_read_time, temp)
+        PrinterADCtoTemperature.s_last_read_time = read_time;
     def setup_minmax(self, min_temp, max_temp):
         adc_range = [self.adc_convert.calc_adc(t) for t in [min_temp, max_temp]]
         self.mcu_adc.setup_minmax(SAMPLE_TIME, SAMPLE_COUNT,

@@ -67,10 +67,12 @@ class HomingMove:
         return list(kin.calc_position(kin_spos))[:3] + thpos[3:]
     def homing_move(self, movepos, speed, probe_pos=False,
                     triggered=True, check_triggered=True):
+        reactor = self.printer.get_reactor()
+        logging.info("Homing move start @ %.4f" % (reactor.monotonic()) )
         # Notify start of homing/probing move
         self.printer.send_event("homing:homing_move_begin", self)
         # Note start location
-        self.toolhead.flush_step_generation()
+        self.toolhead.flush_step_generation() # remove by guoge 20240424, 尝试提速probe
         kin = self.toolhead.get_kinematics()
         kin_spos = {s.get_name(): s.get_commanded_position()
                     for s in kin.get_steppers()}
@@ -88,18 +90,24 @@ class HomingMove:
             endstop_triggers.append(wait)
         all_endstop_trigger = multi_complete(self.printer, endstop_triggers)
         self.toolhead.dwell(HOMING_START_DELAY)
+
+        logging.info("Homing move home_start() end @ %.4f" % (reactor.monotonic()) )
+
         # Issue move
         error = None
         try:
             self.toolhead.drip_move(movepos, speed, all_endstop_trigger)
         except self.printer.command_error as e:
             error = "Error during homing move: %s" % (str(e),)
+
+        logging.info("Homing move drip_move() end @ %.4f" % (reactor.monotonic()) )
+
         # Wait for endstops to trigger
         trigger_times = {}
         move_end_print_time = self.toolhead.get_last_move_time()
         for mcu_endstop, name in self.endstops:
             try:
-                trigger_time = mcu_endstop.home_wait(move_end_print_time)
+                trigger_time = mcu_endstop.home_wait(move_end_print_time, speed)
             except self.printer.command_error as e:
                 if error is None:
                     error = "Error during homing %s: %s" % (name, str(e))
@@ -108,6 +116,9 @@ class HomingMove:
                 trigger_times[name] = trigger_time
             elif check_triggered and error is None:
                 error = "No trigger on %s after full movement" % (name,)
+
+        logging.info("240604 Homing move home_wait() end @ %.4f" % (reactor.monotonic()) )
+
         # Determine stepper halt positions
         self.toolhead.flush_step_generation()
         for sp in self.stepper_positions:
@@ -121,6 +132,8 @@ class HomingMove:
             haltpos = trigpos = self.calc_toolhead_pos(kin_spos, trig_steps)
             if trig_steps != halt_steps:
                 haltpos = self.calc_toolhead_pos(kin_spos, halt_steps)
+            
+            logging.info("Probe pos @ %.4f halt pos:%s, trig pos:%s" % (reactor.monotonic(), haltpos, trigpos))
         else:
             haltpos = trigpos = movepos
             over_steps = {sp.stepper_name: sp.halt_pos - sp.trig_pos
@@ -130,6 +143,13 @@ class HomingMove:
                 halt_kin_spos = {s.get_name(): s.get_commanded_position()
                                  for s in kin.get_steppers()}
                 haltpos = self.calc_toolhead_pos(halt_kin_spos, over_steps)
+            cur_haltpos = {sp.stepper_name: sp.halt_pos
+                        for sp in self.stepper_positions}
+            cur_trigpos = {sp.stepper_name: sp.trig_pos
+                        for sp in self.stepper_positions}
+            msg = "20240604, home pos @ %s halt pos:%s, trig pos:%s" % (movepos, cur_haltpos, cur_trigpos)
+            self.printer.lookup_object('gcode').respond_info(msg)
+            logging.info(msg)
         self.toolhead.set_position(haltpos)
         # Signal homing/probing move complete
         try:
@@ -252,9 +272,9 @@ class PrinterHoming:
                 raise self.printer.command_error(
                     "Probing failed due to printer shutdown")
             raise
-        if hmove.check_no_movement() is not None:
-            raise self.printer.command_error(
-                "Probe triggered prior to movement")
+        # if hmove.check_no_movement() is not None:
+        #     raise self.printer.command_error(
+        #         "Probe triggered prior to movement")
         return epos
     def cmd_G28(self, gcmd):
         # Move to origin

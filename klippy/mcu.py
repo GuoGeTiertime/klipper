@@ -331,7 +331,7 @@ class MCU_endstop:
              self._dispatch.get_oid(), MCU_trsync.REASON_ENDSTOP_HIT],
             reqclock=clock)
         return trigger_completion
-    def home_wait(self, home_end_time):
+    def home_wait(self, home_end_time, homespeed=0.):
         self._dispatch.wait_end(home_end_time)
         self._home_cmd.send([self._oid, 0, 0, 0, 0, 0, 0, 0])
         res = self._dispatch.stop()
@@ -570,6 +570,19 @@ class MCU:
             if not (self._serialport.startswith("/dev/rpmsg_")
                     or self._serialport.startswith("/tmp/klipper_host_")):
                 self._baud = config.getint('baud', 250000, minval=2400)
+        
+        # Check if serial port exists, ignore if not
+        self.isSerialExist = True
+        if self._serialport is not None:
+            self.isSerialExist = os.path.exists(self._serialport)
+            logging.info( "Serial port %s exists: %s" % (self._serialport, self.isSerialExist) )
+            # If serial port does not exist, ignore the rest of the config
+            if not self.isSerialExist:
+                for option in config.get_prefix_options(''):
+                    option = option.lower()
+                    config.get(option)
+                return
+
         # Restarts
         restart_methods = [None, 'arduino', 'cheetah', 'command', 'rpi_usb']
         self._restart_method = 'command'
@@ -1043,8 +1056,12 @@ def add_printer_objects(config):
     mainsync = clocksync.ClockSync(reactor)
     printer.add_object('mcu', MCU(config.getsection('mcu'), mainsync))
     for s in config.get_prefix_sections('mcu '):
-        printer.add_object(s.section, MCU(
-            s, clocksync.SecondarySync(reactor, mainsync)))
+        # add by guoge 20240508, if mcu is not exist, then do not add it
+        mcu_auxi = MCU(s, clocksync.SecondarySync(reactor, mainsync))
+        if mcu_auxi.isSerialExist:
+            printer.add_object(s.section, mcu_auxi)
+        else:
+            logging.info( "MCU %s is not connected" % s.section )
 
 def get_printer_mcu(printer, name):
     if name == 'mcu':

@@ -179,22 +179,30 @@ class SecondarySync(ClockSync):
         self.clock_adj = (0., self.mcu_freq)
     # clock frequency conversions
     def print_time_to_clock(self, print_time):
+        self.dump_TimeErr(print_time)
         adjusted_offset, adjusted_freq = self.clock_adj
         return int((print_time - adjusted_offset) * adjusted_freq)
     def clock_to_print_time(self, clock):
         adjusted_offset, adjusted_freq = self.clock_adj
-        return clock / adjusted_freq + adjusted_offset
+        print_time = clock / adjusted_freq + adjusted_offset
+        self.dump_TimeErr(print_time)
+        return print_time
     # misc commands
     def dump_debug(self):
         adjusted_offset, adjusted_freq = self.clock_adj
         return "%s clock_adj=(%.3f %.3f)" % (
             ClockSync.dump_debug(self), adjusted_offset, adjusted_freq)
+    def dump_TimeErr(self, print_time):
+        # if abs(print_time-self.last_sync_time) > 10 :
+        #     logging.info("dump_TimeErr(), base time err over 10, print_time:%.3f  last_sync_time:%.3f", print_time, self.last_sync_time)
+        pass
     def stats(self, eventtime):
         adjusted_offset, adjusted_freq = self.clock_adj
         return "%s adj=%d" % (ClockSync.stats(self, eventtime), adjusted_freq)
     def calibrate_clock(self, print_time, eventtime):
         # Calculate: est_print_time = main_sync.estimatated_print_time()
         ser_time, ser_clock, ser_freq = self.main_sync.clock_est
+        estSerTime = ser_clock / ser_freq
         main_mcu_freq = self.main_sync.mcu_freq
         est_main_clock = (eventtime - ser_time) * ser_freq + ser_clock
         est_print_time = est_main_clock / main_mcu_freq
@@ -206,12 +214,45 @@ class SecondarySync(ClockSync):
         sync2_main_clock = sync2_print_time * main_mcu_freq
         sync2_sys_time = ser_time + (sync2_main_clock - ser_clock) / ser_freq
         # Adjust freq so estimated print_time will match at sync2_print_time
-        sync1_clock = self.print_time_to_clock(sync1_print_time)
-        sync2_clock = self.get_clock(sync2_sys_time)
+        #comment: 调整频率用一个很小的时间段估算,造成较大误差,sync1_clock的误差被放大.print_time值远大于(sync2_print_time - sync1_print_time)
+        #所以这种估算频率和时间偏移的算法对频率有较大误差时会造成无法同步.
+        sync1_clock = self.print_time_to_clock(sync1_print_time) #int((print_time - adjusted_offset) * adjusted_freq)
+        sync2_clock = self.get_clock(sync2_sys_time) #int(clock + (eventtime - sample_time) * freq) (clock_est的时钟,频率,估算值,不是标准值)
         adjusted_freq = ((sync2_clock - sync1_clock)
                          / (sync2_print_time - sync1_print_time))
+        
+        printTimeDiff = sync2_print_time - sync1_print_time
+        syncTimeDiff = (sync2_clock - sync1_clock) / self.mcu_freq
+        
+        # 防止校准频率离原有频率相差太大.设一个范围.
+        maxFreqErr = self.mcu_freq * 0.00005;
+        sample_time, clock, freq = self.clock_est
+        # adjusted_freq = limit(adjusted_freq, freq - maxFreqErr, freq + maxFreqErr)
+        maxFreq = freq + maxFreqErr
+        minFreq = freq - maxFreqErr
+        # if adjusted_freq > maxFreq :
+        #     adjusted_freq = maxFreq
+        # elif adjusted_freq < minFreq :
+        #     adjusted_freq = minFreq
+            
+        # adjusted_freq = sync2_clock / sync2_print_time
         adjusted_offset = sync1_print_time - sync1_clock / adjusted_freq
+
+        # add by guoge, avoid adjust vibration. 20231205. adjust offset can't less 0.
+        # if adjusted_offset > 0.1 or adjusted_offset < 0.0 :
+        #     logging.info("\n *** Sync clock adjust too high, offset: %.3f freq:%.3f ", adjusted_offset, adjusted_freq)
+        #     # adjusted_freq = self.mcu_freq + 1000 if adjusted_freq > self.mcu_freq else self.mcu_freq - 1000
+        #     # adjusted_offset = 0.011 if adjusted_offset >0 else -0.011
+        #     # adjusted_freq = self.mcu_freq
+        #     # adjusted_offset = 0.030 
         # Apply new values
         self.clock_adj = (adjusted_offset, adjusted_freq)
         self.last_sync_time = sync2_print_time
+        # logging.info(" *** Sync clock by Second clock sync. print time: %.3f @ event time: %.3f, adj off: %.3f, freq: %.3f", print_time, eventtime, adjusted_offset, adjusted_freq)
+        # if abs(adjusted_offset) > 0.010 :
+        #     logging.info("ser_time:%.3f, ser_clock:%.3f, ser_freq:%.3f, estSerTime:%.3f", ser_time, ser_clock, ser_freq, estSerTime )
+        #     logging.info("est_main_clock:%.3f, est_print_time:%.3f, sync1_print_time:%.3f, sync2_print_time:%.3f, timeDiff: %.3f", est_main_clock, est_print_time, sync1_print_time, sync2_print_time, printTimeDiff )
+        #     logging.info("sync2_main_clock:%.3f, sync2_sys_time:%.3f, sync1_clock:%.3f, sync2_clock:%.3f, syncClock_TimeDiff:%.3f", sync2_main_clock, sync2_sys_time, sync1_clock, sync2_clock, syncTimeDiff )
+        #     logging.info("child mcu - sample_time:%.3f, clock:%.3f, freq:%.3f", sample_time, clock, freq )
+
         return self.clock_adj
