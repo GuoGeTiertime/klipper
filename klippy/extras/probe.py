@@ -288,20 +288,20 @@ class ProbeSessionHelper:
             self.correctioins = {}
             raise config.error("Probe corrections points are not correct, please check the config file, [probe] section, corrections item")
 
-        # Register z_virtual_endstop pin
-        self.printer.lookup_object('pins').register_chip('probe', self)
-        # Register homing event handlers
-        self.printer.register_event_handler("homing:homing_move_begin",
-                                            self._handle_homing_move_begin)
-        self.printer.register_event_handler("homing:homing_move_end",
-                                            self._handle_homing_move_end)
-        self.printer.register_event_handler("homing:home_rails_begin",
-                                            self._handle_home_rails_begin)
-        self.printer.register_event_handler("homing:home_rails_end",
-                                            self._handle_home_rails_end)
-        # Register event handlers
-        self.printer.register_event_handler("gcode:command_error",
-                                            self._handle_command_error)
+        # # Register z_virtual_endstop pin
+        # self.printer.lookup_object('pins').register_chip('probe', self)
+        # # Register homing event handlers
+        # self.printer.register_event_handler("homing:homing_move_begin",
+        #                                     self._handle_homing_move_begin)
+        # self.printer.register_event_handler("homing:homing_move_end",
+        #                                     self._handle_homing_move_end)
+        # self.printer.register_event_handler("homing:home_rails_begin",
+        #                                     self._handle_home_rails_begin)
+        # self.printer.register_event_handler("homing:home_rails_end",
+        #                                     self._handle_home_rails_end)
+        # # Register event handlers
+        # self.printer.register_event_handler("gcode:command_error",
+        #                                     self._handle_command_error)
     def _handle_command_error(self):
         if self.multi_probe_pending:
             try:

@@ -236,25 +236,25 @@ class ToolHead:
         self._calc_junction_deviation()
         # Input stall detection
         self.check_stall_time = 0.
-        # Print time tracking
-        self.buffer_time_low = config.getfloat(
-            'buffer_time_low', 1.000, above=0.)
-        self.buffer_time_high = config.getfloat(
-            'buffer_time_high', 2.000, above=self.buffer_time_low)
+        # # Print time tracking  # removed by guoge, discard by klipper 1.2.x
+        # self.buffer_time_low = config.getfloat(
+        #     'buffer_time_low', 1.000, above=0.)
+        # self.buffer_time_high = config.getfloat(
+        #     'buffer_time_high', 2.000, above=self.buffer_time_low)
+        # # self.buffer_time_start = config.getfloat(
+        # #     'buffer_time_start', 0.250, above=0.)
+        # # self.move_flush_time = config.getfloat(
+        # #     'move_flush_time', 0.050, above=0.)
         # self.buffer_time_start = config.getfloat(
-        #     'buffer_time_start', 0.250, above=0.)
+        #     'buffer_time_start', 0.030, above=0.)
         # self.move_flush_time = config.getfloat(
-        #     'move_flush_time', 0.050, above=0.)
-        self.buffer_time_start = config.getfloat(
-            'buffer_time_start', 0.030, above=0.)
-        self.move_flush_time = config.getfloat(
-            'move_flush_time', 0.020, above=0.)
-        self.print_time = 0.
-        self.special_queuing_state = "Flushed"
-        self.need_check_stall = -1.
-        self.flush_timer = self.reactor.register_timer(self._flush_handler)
-        self.move_queue.set_flush_time(self.buffer_time_high)
-        self.idle_flush_print_time = 0.
+        #     'move_flush_time', 0.020, above=0.)
+        # self.print_time = 0.
+        # self.special_queuing_state = "Flushed"
+        # self.need_check_stall = -1.
+        # self.flush_timer = self.reactor.register_timer(self._flush_handler)
+        # self.move_queue.set_flush_time(self.buffer_time_high)
+        # self.idle_flush_print_time = 0.
         self.print_stall = 0
         # Input pause tracking
         self.can_pause = True
