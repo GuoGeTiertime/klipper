@@ -378,13 +378,15 @@ class ProbeSessionHelper:
         bFirst = True
         positions = []
         sample_count = params['samples']
+        speed = params['probe_speed']
+        sample_retract_dist = params['sample_retract_dist']
         while len(positions) < sample_count:
             # speed/retract for first probe is greater then for the rest
             probe_speed = speed if bFirst else speed / 2
             probe_retract = sample_retract_dist if bFirst else sample_retract_dist / 2
             bFirst = False
             # Probe position
-            pos = self._probe(params['probe_speed'])
+            pos = self._probe(probe_speed)
             positions.append(pos)
             # Check samples tolerance
             z_positions = [p[2] for p in positions]
@@ -397,7 +399,7 @@ class ProbeSessionHelper:
             # Retract
             if len(positions) < sample_count:
                 toolhead.manual_move(
-                    probexy + [pos[2] + params['sample_retract_dist']],
+                    probexy + [pos[2] + probe_retract],
                     params['lift_speed'])
         # Calculate result
         epos = calc_probe_z_average(positions, params['samples_result'])

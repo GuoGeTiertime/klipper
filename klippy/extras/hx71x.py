@@ -79,7 +79,8 @@ class HX71X_endstop:
         if len(self._trsyncs) == 1:
             expire_timeout = 0.25 #TRSYNC_SINGLE_MCU_TIMEOUT
         for trsync in self._trsyncs:
-            trsync.start(print_time, self._trigger_completion, expire_timeout)
+            report_offset = 0.1 # float(i) / len(self._trsyncs)
+            trsync.start(print_time, report_offset, self._trigger_completion, expire_timeout)
         etrsync = self._trsyncs[0]
         ffi_main, ffi_lib = chelper.get_ffi()
         ffi_lib.trdispatch_start(self._trdispatch, etrsync.REASON_HOST_REQUEST)
