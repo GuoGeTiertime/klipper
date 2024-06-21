@@ -6,6 +6,16 @@
 # This file may be distributed under the terms of the GNU GPLv3 license.
 import os, logging, ast, configparser, datetime
 
+
+# how to use auto print:
+# 1. add [autoprint] section in printer.cfg file, and set filename to save the auto print jobs. 
+#    add maxjobs to set the max jobs in the list.
+#    add prepare_gcode to set the gcode to prepare for next job. replace platform or other things if needed. and add AUTO_PREPARE_OK command to finish the prepare.
+# 2. add AUTO_PREPARENEXT command at the end of print_end macro to prepare for next job.
+# 3. add AUTO_ADDJOB command to add a print job to auto print job list.
+# 4. use AUTO_DELJOB, AUTO_MOVEJOB, AUTO_CLEAR, AUTO_LIST command to manage the auto print job list.
+# 5. send AUTO_STARTNEXT command start the auto print process.
+
 class AutoPrint:
     def __init__(self, config):
         self.printer = config.get_printer()
@@ -23,6 +33,8 @@ class AutoPrint:
         
         gcode_macro = self.printer.load_object(config, 'gcode_macro')
         self.prepare_gcode = gcode_macro.load_template(config, "prepare_gcode", "AUTO_PREPARE_OK")
+
+        self.virtual_sdcard_dir = None #self.printer.lookup_object('virtual_sdcard').sdcard_dirname
 
         self.gcode = self.printer.lookup_object('gcode')
         self.gcode.register_command('AUTO_ADDJOB', self.cmd_AUTO_ADDJOB,
@@ -256,6 +268,28 @@ class AutoPrint:
             self._loginfo("Auto print is paused, can't start next job")
             return
 
+        # check if the file exists, if not, remove it from the auto print list
+        if self.virtual_sdcard_dir is None:
+            self.virtual_sdcard_dir = self.printer.lookup_object('virtual_sdcard').sdcard_dirname
+
+        while len(self.allJobs) > 0 :
+            if self.allJobs[0]['completed'] >= self.allJobs[0]['times']:
+                self.allJobs.pop(0)
+            else:
+                filename = self.allJobs[0]['filename']
+                pathname = os.path.join(self.virtual_sdcard_dir, filename)
+                if os.path.exists(pathname):
+                    break
+                else:
+                    self._loginfo("File not found: %s(%s), remove from auto print list" % (filename, pathname))
+                    self.allJobs.pop(0)
+        self.saveJobs()
+
+        if len(self.allJobs) == 0:
+            self._loginfo("No jobs in the autoprint list")
+            self._pauselist()
+            return
+        
         job = self.allJobs[0]
         self._loginfo("Start next job, ", job)
 
