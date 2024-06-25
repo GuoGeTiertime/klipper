@@ -343,7 +343,7 @@ class GCodeDispatch:
                 self.is_Stopping = True
                 logging.info("M112 command received, flag=%d, reset toolhead move queue, wait for 10 seconds." % flag)
                 toolhead = self.printer.lookup_object('toolhead')
-                toolhead.move_queue.reset() # clear move queue, add by guoge 20240521
+                toolhead.lookahead.reset() # clear move queue, add by guoge 20240521
                 reactor = self.printer.get_reactor()
                 with self.mutex:  # wait mutex for other pending commands, add by guoge 20240522
                     reactor.register_timer(self._stop_finished, reactor.monotonic() + 1.1) #ignore all commands for 1.1s, the check time of heater is 1.0s
@@ -352,8 +352,8 @@ class GCodeDispatch:
         else:
             logging.info("M112 command received, no gcmd")
         # Emergency Stop
-        raise gcmd.error("Emergency Stop")
-        # self.printer.invoke_shutdown("Shutdown due to M112 command")
+        # raise gcmd.error("Emergency Stop")
+        self.printer.invoke_shutdown("Shutdown due to M112 command")
     def cmd_M115(self, gcmd):
         # Get Firmware Version and Capabilities
         software_version = self.printer.get_start_args().get('software_version')
