@@ -97,6 +97,7 @@ class Feeder:  # Heater:
         enable_pin = config.get('enable_pin')
         ppins = self.printer.lookup_object('pins')
         self.step = ppins.setup_pin('pwm', step_pin)
+        self.step.setup_cycle_time(0.001)
         self.dir = ppins.setup_pin('digital_out', dir_pin)
         self.dir.setup_max_duration(0.)
         self.stepenable = ppins.setup_pin('digital_out', enable_pin)
@@ -227,7 +228,7 @@ class Feeder:  # Heater:
     def set_pulse(self, print_time, value, cycle_time):
         print_time = max(print_time, self.last_pulsetime + MIN_DIRPULSE_TIME)
         self.last_pulsetime = print_time
-        self.step.set_pwm(print_time, value, cycle_time)
+        self.step.set_pwm(print_time, value) #, cycle_time)
         # toolhead = self.printer.lookup_object('toolhead')
         # toolhead.register_lookahead_callback(
         #     lambda print_time: self.step.set_pwm(print_time, value, cycle_time))
