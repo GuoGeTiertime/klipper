@@ -135,6 +135,14 @@ class Feeder:  # Heater:
     def _cal_step_cycle_time(self, speed):
         freq = speed * self.scale_speed2freq
         return 1.0 / freq if freq > 0 else 0.1
+    
+    def _set_step_cycle_time(self, cycle_time):
+        if self.cur_cycle_time == cycle_time: # no need to change.
+            return
+        self.cur_cycle_time = cycle_time # update the cycle time.
+        mcu = self.step.get_mcu()
+        cycle_ticks = mcu.seconds_to_clock(cycle_time)
+        self.step.get_mcu()._serial.send("set_digital_out_pwm_cycle oid=%c cycle_ticks=%u" % (self.step._oid, cycle_ticks))  # set the cycle time of step pin.
 
     # feed filament len at speed
     def feed_filament(self, print_time, speed, len): # set feed len with speed. value is the length to feed.
@@ -228,6 +236,7 @@ class Feeder:  # Heater:
     def set_pulse(self, print_time, value, cycle_time):
         print_time = max(print_time, self.last_pulsetime + MIN_DIRPULSE_TIME)
         self.last_pulsetime = print_time
+        self._set_step_cycle_time(cycle_time)
         self.step.set_pwm(print_time, value) #, cycle_time)
         # toolhead = self.printer.lookup_object('toolhead')
         # toolhead.register_lookahead_callback(
