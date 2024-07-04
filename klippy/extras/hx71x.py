@@ -395,12 +395,14 @@ class HX71X:
         # self.reactor.update_timer(self.sample_timer, self.reactor.NOW)
         return
     
-    def _loginfo(self, msg):
-        if self.isloginfo == 1:
+    def _loginfo(self, msg, logflag=None):
+        if logflag is None:
+            logflag = self.isloginfo
+        if logflag == 1:
             self.gcode.respond_info(msg, False) # only respond to gcode.
-        elif self.isloginfo == 2:
+        elif logflag == 2:
            logging.info(msg) # only write log file.
-        elif self.isloginfo == 3:
+        elif logflag == 3:
             self.gcode.respond_info(msg, True) # respond to gcode and write log file.
 
     def build_config(self):
@@ -454,7 +456,7 @@ class HX71X:
         # collision warning test
         if self.collision_err > 0 and abs(self.weight[oid]) > self.collision_err:
             msg = "Weight senser:%s(oid:%d) collision warning, weight:%.2f(%d-%X). Shutdown the printer!" % (self.name, oid, self.weight[oid], value, value)
-            self._loginfo(msg)
+            self._loginfo(msg, 3) #log info at command line and log file
             self.gcode.run_script_from_command("M112")  # emergency stop
 
         # update total weight when all seners are read.
