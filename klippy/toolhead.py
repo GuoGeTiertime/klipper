@@ -310,6 +310,16 @@ class ToolHead:
                    "manual_probe", "tuning_tower"]
         for module_name in modules:
             self.printer.load_object(config, module_name)
+
+        # add by guoge, 20240705, add for backlash compensation
+        self.xbacklash = config.getfloat('x_backlash', default=0.05, above=0.)
+        self.ybacklash = config.getfloat('y_backlash', default=0.05, above=0.)
+        self.backlash_pos = [0., 0., 0., 0.]
+        self.xdir = 1 # 1: positive, 0: negative
+        self.ydir = 1
+        self.x_backlash_pos = 0.0
+        self.y_backlash_pos = 0.0
+
     # Print time and flush tracking
     def _advance_flush_time(self, flush_time):
         flush_time = max(flush_time, self.last_flush_time)
@@ -483,7 +493,29 @@ class ToolHead:
         self.commanded_pos[:] = newpos
         self.kin.set_position(newpos, homing_axes)
         self.printer.send_event("toolhead:set_position")
+    #判断方向是否调转,当新位置不小于前一位置减去阈值时，返回False，否则返回True
+    def is_direction_change(self, prevdir, prevpos, newpos, threshold=0.02):
+        if prevdir == 1: # prev move is positive
+            if newpos > prevpos-threshold :
+                return (1, max(prevpos, newpos))
+            else:
+                return (0, newpos)
+        else: # prev move is negative
+            if newpos < prevpos+threshold :
+                return (0, min(prevpos, newpos))
+            else:
+                return (1, newpos)
     def move(self, newpos, speed):
+        #add by guoge, 20240705, add backlash compensation
+        self.xdir, self.x_backlash_pos = self.is_direction_change(self.xdir, self.x_backlash_pos, newpos[0], self.xbacklash)
+        self.ydir, self.y_backlash_pos = self.is_direction_change(self.ydir, self.y_backlash_pos, newpos[1], self.ybacklash)
+
+        #add by guoge, 20240705, add backlash compensation at positive movement
+        if self.xdir == 1:
+            newpos[0] += self.xbacklash
+        if self.ydir == 1:
+            newpos[1] += self.ybacklash
+
         move = Move(self, self.commanded_pos, newpos, speed)
         if not move.move_d:
             return
