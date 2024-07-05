@@ -97,7 +97,7 @@ class Feeder:  # Heater:
         enable_pin = config.get('enable_pin')
         ppins = self.printer.lookup_object('pins')
         self.step = ppins.setup_pin('pwm', step_pin)
-        self.step.setup_cycle_time(0.001)
+        self.step.setup_cycle_time(0.0002)
         self.dir = ppins.setup_pin('digital_out', dir_pin)
         self.dir.setup_max_duration(0.)
         self.stepenable = ppins.setup_pin('digital_out', enable_pin)
@@ -107,8 +107,9 @@ class Feeder:  # Heater:
 
         # setup stepper microstep and rotate distance.
         self.microstep = config.getint('microstep', 16, minval=1, maxval=256)
+        full_steps = config.getint('full_steps_per_rotation', 200, minval=1) # default 200 steps per round.
         self.rotate_distance = config.getfloat('rotate_distance', 31.4, above=0.1) #defaul: the diameter is 10mm, so the rotate distance is 31.4mm.
-        self.scale_speed2freq = self.microstep * 200 / self.rotate_distance # 200 steps per round. default 16 microstep. the value freq for per mm/s.
+        self.scale_speed2freq = self.microstep * full_steps / self.rotate_distance # the value freq for per mm/s.
 
         self.feed_speed = config.getfloat('feed_speed', 10.0, minval=1, maxval=100.0) # unit: mm/s, default 10mm/s.
         self.feed_speed_init = config.getfloat('feed_speed_init', self.feed_speed * 2.0, minval=1, maxval=200.0) 
@@ -142,7 +143,9 @@ class Feeder:  # Heater:
         self.cur_cycle_time = cycle_time # update the cycle time.
         mcu = self.step.get_mcu()
         cycle_ticks = mcu.seconds_to_clock(cycle_time)
-        self.step.get_mcu()._serial.send("set_digital_out_pwm_cycle oid=%c cycle_ticks=%u" % (self.step._oid, cycle_ticks))  # set the cycle time of step pin.
+        cmd = "set_digital_out_pwm_cycle oid=%d cycle_ticks=%d" % (self.step._oid, cycle_ticks)
+        mcu._serial.send(cmd)  # set the cycle time of step pin.
+        self._loginfo("send command:" + cmd)
 
     # feed filament len at speed
     def feed_filament(self, print_time, speed, len): # set feed len with speed. value is the length to feed.
@@ -253,7 +256,7 @@ class Feeder:  # Heater:
 
         self._fila_state = state
         if self._fila_state: # fila is inserted into the feeder
-            self._loginfo("feeder: %s fila inserted, begin sending" % self.name)
+            self._loginfo("feeder: %s fila inserted, begin sending, reset inited flag to False" % self.name)
             self._switch_handler(eventtime, self._switch_state)
             self.enable_stepper(True)
             self.bInited = False    # reset the inited flag forcelly.
@@ -283,6 +286,7 @@ class Feeder:  # Heater:
             self.feed_filament(eventtime, 1.0, 0.0) #send 0 length to stop feed.
             if not self.bInited:
                 self.bInited = True
+                self._loginfo("feeder %s init feed finished, set bInited:%d" % (self.name, self.bInited))
         next_time = min(eventtime + self.feed_delay, self.next_feed_time)
         next_time = max(next_time, eventtime + 0.1) # at least 0.1s.
         return next_time
