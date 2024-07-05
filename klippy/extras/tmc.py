@@ -95,7 +95,7 @@ class TMCErrorCheck:
         self.check_timer = None
         self.check_disabled = False
         self.check_start_time = 0
-        self.check_auto_disable = 600   # stop checks after 10 minutes
+        self.check_auto_disable = config.getfloat("check_disable_time", 120)   # stop checks after 10 minutes
         self.last_drv_status = self.last_drv_fields = None
         # Setup for GSTAT query
         reg_name = self.fields.lookup_register("drv_err")
