@@ -314,11 +314,17 @@ class ToolHead:
         # add by guoge, 20240705, add for backlash compensation
         self.xbacklash = config.getfloat('x_backlash', default=0.05, above=0.)
         self.ybacklash = config.getfloat('y_backlash', default=0.05, above=0.)
+        self.backlash_scale = config.getfloat('backlash_scale', default=5, above=0.)
+        self.max_backlash_path = max( self.xbacklash, self.ybacklash ) * self.backlash_scale #max len to finish backlash compensation
         self.backlash_pos = [0., 0., 0., 0.]
         self.xdir = 1 # 1: positive, 0: negative
-        self.ydir = 1
-        self.x_backlash_pos = 0.0
-        self.y_backlash_pos = 0.0
+        self.ydir = 1 # 1: positive, 0: negative
+        self.x_prev_pos = 0.0   # prev position
+        self.y_prev_pos = 0.0
+        self.x_backlash_extremum = 0.0  # backlash extremum position
+        self.y_backlash_extremum = 0.0
+        self.x_cur_backlash = 0.0  # current backlash value
+        self.y_cur_backlash = 0.0  # current backlash value
 
     # Print time and flush tracking
     def _advance_flush_time(self, flush_time):
@@ -493,8 +499,8 @@ class ToolHead:
         self.commanded_pos[:] = newpos
         self.kin.set_position(newpos, homing_axes)
         self.printer.send_event("toolhead:set_position")
-    #判断方向是否调转,当新位置不小于前一位置减去阈值时，返回False，否则返回True
-    def is_direction_change(self, prevdir, prevpos, newpos, threshold=0.02):
+    #判断运行方向和位置极值,当新位置不小于前一位置减去阈值时，维持原方向,返回值为方向和该方向的极值位置.
+    def cal_dir_extremum(self, prevdir, prevpos, newpos, threshold=0.02):
         if prevdir == 1: # prev move is positive
             if newpos > prevpos-threshold :
                 return (1, max(prevpos, newpos))
@@ -507,14 +513,33 @@ class ToolHead:
                 return (1, newpos)
     def move(self, newpos, speed):
         #add by guoge, 20240705, add backlash compensation
-        self.xdir, self.x_backlash_pos = self.is_direction_change(self.xdir, self.x_backlash_pos, newpos[0], self.xbacklash)
-        self.ydir, self.y_backlash_pos = self.is_direction_change(self.ydir, self.y_backlash_pos, newpos[1], self.ybacklash)
+        self.xdir, self.x_backlash_pos = self.cal_dir_extremum(self.xdir, self.x_backlash_extremum, newpos[0], self.xbacklash)
+        self.ydir, self.y_backlash_pos = self.cal_dir_extremum(self.ydir, self.y_backlash_extremum, newpos[1], self.ybacklash)
+
+        # is rollback? if dir==1, target should add backlash, else dir==0, backlash is 0
+        # if prev backlash is unmatched with current dir, rollback calis needed.
+        b_xrollback = ( self.xdir == 0 and self.x_cur_backlash>0 ) or ( self.xdir == 1 and self.x_cur_backlash<self.xbacklash )
+        b_yrollback = ( self.ydir == 0 and self.y_cur_backlash>0 ) or ( self.ydir == 1 and self.y_cur_backlash<self.ybacklash )
+        if( b_xrollback or b_yrollback ):
+            x = newpos[0] - self.x_prev_pos
+            y = newpos[1] - self.y_prev_pos
+            len = math.sqrt( x*x + y*y )
+            if( len<self.max_backlash_path ): #can't finish backlash compensation in one path
+                pass #compx = len / self.max_backlash_path * self.xbacklash
+            elif len>self.max_backlash_path * 2: #the path is too long, need to split to two paths
+                newpos[0] = self.x_prev_pos + x / len * self.max_backlash_path
+                # split to two paths
+                
 
         #add by guoge, 20240705, add backlash compensation at positive movement
         if self.xdir == 1:
             newpos[0] += self.xbacklash
         if self.ydir == 1:
             newpos[1] += self.ybacklash
+
+        #record the current position for next move
+        self.x_prev_pos = newpos[0]
+        self.y_prev_pos = newpos[1]
 
         move = Move(self, self.commanded_pos, newpos, speed)
         if not move.move_d:
