@@ -21,6 +21,7 @@ class ManualStepper:
         self.velocity = config.getfloat('velocity', 5., above=0.)
         self.accel = self.homing_accel = config.getfloat('accel', 0., minval=0.)
         self.next_cmd_time = 0.
+        self.is_manual_stepper = True
         # Setup iterative solver
         ffi_main, ffi_lib = chelper.get_ffi()
         self.trapq = ffi_main.gc(ffi_lib.trapq_alloc(), ffi_lib.trapq_free)
@@ -113,12 +114,13 @@ class ManualStepper:
     def set_position(self, newpos, homing_axes=()):
         self.do_set_position(newpos[0])
     def get_last_move_time(self):
-        self.sync_print_time()
+        # self.sync_print_time() #remove this line to fix the bug of manual stepper, 20240710, avoid dwell in homing.
         return self.next_cmd_time
     def dwell(self, delay):
         self.next_cmd_time += max(0., delay)
     def drip_move(self, newpos, speed, drip_completion):
-        self.do_move(newpos[0], speed, self.homing_accel)
+        # logging.info("Run ManualStepper.drip_move() ->  call ManualStepper.do_move(), target pos:%s", newpos)
+        self.do_move(newpos[0], speed, self.homing_accel, False) # 20240710, avoid dwell in homing. sync will dwell a long time
     def get_kinematics(self):
         return self
     def get_steppers(self):

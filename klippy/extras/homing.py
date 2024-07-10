@@ -120,7 +120,9 @@ class HomingMove:
         logging.info("240604 Homing move home_wait() end @ %.4f" % (reactor.monotonic()) )
 
         # Determine stepper halt positions
-        self.toolhead.flush_step_generation()
+        if not hasattr(self.toolhead, 'is_manual_stepper') : # flush will delay manual_stepper homing end. add by guoge 20240710
+            self.toolhead.flush_step_generation()
+
         for sp in self.stepper_positions:
             tt = trigger_times.get(sp.endstop_name, move_end_print_time)
             sp.note_home_end(tt)
