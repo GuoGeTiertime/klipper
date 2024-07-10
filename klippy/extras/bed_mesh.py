@@ -814,7 +814,7 @@ class BedMeshCalibrate:
         row = []
         prev_pos = positions[0]
         for pos in positions:
-            if not isclose(pos[1], prev_pos[1], abs_tol=.1):
+            if not isclose(pos[1], prev_pos[1], abs_tol=.5):
                 # y has changed, append row and start new
                 probed_matrix.append(row)
                 row = []

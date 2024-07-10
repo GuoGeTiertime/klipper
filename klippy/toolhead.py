@@ -513,33 +513,50 @@ class ToolHead:
                 return (1, newpos)
     def move(self, newpos, speed):
         #add by guoge, 20240705, add backlash compensation
-        self.xdir, self.x_backlash_pos = self.cal_dir_extremum(self.xdir, self.x_backlash_extremum, newpos[0], self.xbacklash)
-        self.ydir, self.y_backlash_pos = self.cal_dir_extremum(self.ydir, self.y_backlash_extremum, newpos[1], self.ybacklash)
+        if self.special_queuing_state != "Drip":
+            self.xdir, self.x_backlash_extremum = self.cal_dir_extremum(self.xdir, self.x_backlash_extremum, newpos[0], self.xbacklash)
+            self.ydir, self.y_backlash_extremum = self.cal_dir_extremum(self.ydir, self.y_backlash_extremum, newpos[1], self.ybacklash)
+            # is rollback? if dir==1, target should add backlash, else dir==0, backlash is 0
+            # if prev backlash is unmatched with current dir, rollback calis needed.
+            b_xrollback = ( self.xdir == 0 and self.x_cur_backlash>0 ) or ( self.xdir == 1 and self.x_cur_backlash<self.xbacklash )
+            b_yrollback = ( self.ydir == 0 and self.y_cur_backlash>0 ) or ( self.ydir == 1 and self.y_cur_backlash<self.ybacklash )
+            if( b_xrollback or b_yrollback ): # dir chhanged, need to rollback.
+                # x = newpos[0] - self.x_prev_pos
+                # y = newpos[1] - self.y_prev_pos
+                # len = math.sqrt( x*x + y*y )
+                d = [newpos[i] - self.commanded_pos[i] for i in (0, 1, 2, 3)] # d = newpos - self.commanded_pos
+                len = math.sqrt( d[0]*d[0] + d[1]*d[1] )
+                if len>self.max_backlash_path*2: #the path is too long, need to split to two paths
+                    splitpos = [(self.commanded_pos[i] + d[i] * self.max_backlash_path / len) for i in (0, 1, 2, 3)]
+                    if self.xdir == 1:
+                        splitpos[0] += self.xbacklash
+                    if self.ydir == 1:
+                        splitpos[1] += self.ybacklash
+                    # logging.info(" --- backlash compensation splitpos:%s, cmdPos:%s, targetPos:%s", splitpos, self.commanded_pos, newpos)
+                    # logging.info(" max_backlash_path:%.3f, xbacklash:%.3f, ybacklash:%.3f, len:%.3f", self.max_backlash_path, self.xbacklash, self.ybacklash, len)
+                    move = Move(self, self.commanded_pos, splitpos, speed)
+                    if move.is_kinematic_move:
+                        self.kin.check_move(move)
+                    if move.axes_d[3]:
+                        self.extruder.check_move(move)
+                    self.commanded_pos[:] = move.end_pos
+                    self.lookahead.add_move(move)
+                # elif( len<self.max_backlash_path ): #can't finish backlash compensation in one path
+                #     pass #compx = len / self.max_backlash_path * self.xbacklash
 
-        # is rollback? if dir==1, target should add backlash, else dir==0, backlash is 0
-        # if prev backlash is unmatched with current dir, rollback calis needed.
-        b_xrollback = ( self.xdir == 0 and self.x_cur_backlash>0 ) or ( self.xdir == 1 and self.x_cur_backlash<self.xbacklash )
-        b_yrollback = ( self.ydir == 0 and self.y_cur_backlash>0 ) or ( self.ydir == 1 and self.y_cur_backlash<self.ybacklash )
-        if( b_xrollback or b_yrollback ):
-            x = newpos[0] - self.x_prev_pos
-            y = newpos[1] - self.y_prev_pos
-            len = math.sqrt( x*x + y*y )
-            if( len<self.max_backlash_path ): #can't finish backlash compensation in one path
-                pass #compx = len / self.max_backlash_path * self.xbacklash
-            elif len>self.max_backlash_path * 2: #the path is too long, need to split to two paths
-                newpos[0] = self.x_prev_pos + x / len * self.max_backlash_path
-                # split to two paths
-                
+            #record the current position for next move
+            self.x_prev_pos = newpos[0]
+            self.y_prev_pos = newpos[1]
 
-        #add by guoge, 20240705, add backlash compensation at positive movement
-        if self.xdir == 1:
-            newpos[0] += self.xbacklash
-        if self.ydir == 1:
-            newpos[1] += self.ybacklash
-
-        #record the current position for next move
-        self.x_prev_pos = newpos[0]
-        self.y_prev_pos = newpos[1]
+            #add by guoge, 20240705, add backlash compensation at positive movement
+            poslist = list(newpos)
+            if self.xdir == 1:
+                poslist[0] += self.xbacklash
+            if self.ydir == 1:
+                poslist[1] += self.ybacklash
+            newpos = tuple(poslist)
+            self.x_cur_backlash = self.xbacklash if self.xdir == 1 else 0
+            self.y_cur_backlash = self.ybacklash if self.ydir == 1 else 0
 
         move = Move(self, self.commanded_pos, newpos, speed)
         if not move.move_d:
