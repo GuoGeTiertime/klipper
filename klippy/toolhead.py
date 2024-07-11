@@ -656,10 +656,12 @@ class ToolHead:
     def get_status(self, eventtime):
         print_time = self.print_time
         estimated_print_time = self.mcu.estimated_print_time(eventtime)
+        system_time = self.reactor.monotonic()
         res = dict(self.kin.get_status(eventtime))
         res.update({ 'print_time': print_time,
                      'stalls': self.print_stall,
                      'estimated_print_time': estimated_print_time,
+                     'system_time': system_time,
                      'extruder': self.extruder.get_name(),
                      'position': self.Coord(*self.commanded_pos),
                      'max_velocity': self.max_velocity,
