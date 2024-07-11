@@ -312,15 +312,15 @@ class ToolHead:
             self.printer.load_object(config, module_name)
 
         # add by guoge, 20240705, add for backlash compensation
-        self.xbacklash = config.getfloat('x_backlash', default=0.05, above=0.)
-        self.ybacklash = config.getfloat('y_backlash', default=0.05, above=0.)
-        self.backlash_scale = config.getfloat('backlash_scale', default=5, above=0.)
-        self.max_backlash_path = max( self.xbacklash, self.ybacklash ) * self.backlash_scale #max len to finish backlash compensation
-        self.backlash_pos = [0., 0., 0., 0.]
+        self.xbacklash = config.getfloat('x_backlash', default=0.00, minval=0.)
+        self.ybacklash = config.getfloat('y_backlash', default=0.00, minval=0.)
+        self.xbacklash_threshold = config.getfloat('x_backlash_threshold', default=self.xbacklash*0.5, minval=0.)
+        self.ybacklash_threshold = config.getfloat('y_backlash_threshold', default=self.ybacklash*0.5, minval=0.)
+        self.backlash_lenscale = config.getfloat('backlash_lenscale', default=5.0, above=0.1)
+        self.max_backlash_path = max( self.xbacklash, self.ybacklash ) * self.backlash_lenscale #max len to finish backlash compensation
         self.xdir = 1 # 1: positive, 0: negative
         self.ydir = 1 # 1: positive, 0: negative
-        self.x_prev_pos = 0.0   # prev position
-        self.y_prev_pos = 0.0
+        self.backlash_prev_pos = self.commanded_pos[:]   # prev position without backlash compensation
         self.x_backlash_extremum = 0.0  # backlash extremum position
         self.y_backlash_extremum = 0.0
         self.x_cur_backlash = 0.0  # current backlash value
@@ -497,6 +497,7 @@ class ToolHead:
         ffi_lib.trapq_set_position(self.trapq, self.print_time,
                                    newpos[0], newpos[1], newpos[2])
         self.commanded_pos[:] = newpos
+        self.backlash_prev_pos = self.commanded_pos[:]
         self.kin.set_position(newpos, homing_axes)
         self.printer.send_event("toolhead:set_position")
     #判断运行方向和位置极值,当新位置不小于前一位置减去阈值时，维持原方向,返回值为方向和该方向的极值位置.
@@ -513,21 +514,19 @@ class ToolHead:
                 return (1, newpos)
     def move(self, newpos, speed):
         #add by guoge, 20240705, add backlash compensation
+        targetpos = newpos[:]
         if self.special_queuing_state != "Drip":
-            self.xdir, self.x_backlash_extremum = self.cal_dir_extremum(self.xdir, self.x_backlash_extremum, newpos[0], self.xbacklash)
-            self.ydir, self.y_backlash_extremum = self.cal_dir_extremum(self.ydir, self.y_backlash_extremum, newpos[1], self.ybacklash)
+            self.xdir, self.x_backlash_extremum = self.cal_dir_extremum(self.xdir, self.x_backlash_extremum, newpos[0], self.xbacklash_threshold)
+            self.ydir, self.y_backlash_extremum = self.cal_dir_extremum(self.ydir, self.y_backlash_extremum, newpos[1], self.ybacklash_threshold)
             # is rollback? if dir==1, target should add backlash, else dir==0, backlash is 0
             # if prev backlash is unmatched with current dir, rollback calis needed.
             b_xrollback = ( self.xdir == 0 and self.x_cur_backlash>0 ) or ( self.xdir == 1 and self.x_cur_backlash<self.xbacklash )
             b_yrollback = ( self.ydir == 0 and self.y_cur_backlash>0 ) or ( self.ydir == 1 and self.y_cur_backlash<self.ybacklash )
             if( b_xrollback or b_yrollback ): # dir chhanged, need to rollback.
-                # x = newpos[0] - self.x_prev_pos
-                # y = newpos[1] - self.y_prev_pos
-                # len = math.sqrt( x*x + y*y )
-                d = [newpos[i] - self.commanded_pos[i] for i in (0, 1, 2, 3)] # d = newpos - self.commanded_pos
+                d = [newpos[i] - self.backlash_prev_pos[i] for i in (0, 1, 2, 3)] # d = newpos - self.commanded_pos
                 len = math.sqrt( d[0]*d[0] + d[1]*d[1] )
                 if len>self.max_backlash_path*2: #the path is too long, need to split to two paths
-                    splitpos = [(self.commanded_pos[i] + d[i] * self.max_backlash_path / len) for i in (0, 1, 2, 3)]
+                    splitpos = [(self.backlash_prev_pos[i] + d[i] * self.max_backlash_path / len) for i in (0, 1, 2, 3)]
                     if self.xdir == 1:
                         splitpos[0] += self.xbacklash
                     if self.ydir == 1:
@@ -544,19 +543,17 @@ class ToolHead:
                 # elif( len<self.max_backlash_path ): #can't finish backlash compensation in one path
                 #     pass #compx = len / self.max_backlash_path * self.xbacklash
 
-            #record the current position for next move
-            self.x_prev_pos = newpos[0]
-            self.y_prev_pos = newpos[1]
 
             #add by guoge, 20240705, add backlash compensation at positive movement
             poslist = list(newpos)
-            if self.xdir == 1:
-                poslist[0] += self.xbacklash
-            if self.ydir == 1:
-                poslist[1] += self.ybacklash
-            newpos = tuple(poslist)
             self.x_cur_backlash = self.xbacklash if self.xdir == 1 else 0
             self.y_cur_backlash = self.ybacklash if self.ydir == 1 else 0
+            poslist[0] += self.x_cur_backlash
+            poslist[1] += self.y_cur_backlash
+            newpos = tuple(poslist)
+
+        #record the current position for next move
+        self.backlash_prev_pos = targetpos[:]
 
         move = Move(self, self.commanded_pos, newpos, speed)
         if not move.move_d:
