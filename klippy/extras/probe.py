@@ -392,6 +392,7 @@ class ProbeSessionHelper:
             z_positions = [p[2] for p in positions]
             if max(z_positions)-min(z_positions) > params['samples_tolerance']:
                 if retries >= params['samples_tolerance_retries']:
+                    self.multi_probe_pending = False
                     raise gcmd.error("Probe samples exceed samples_tolerance")
                 gcmd.respond_info("Probe samples exceed tolerance. Retrying...")
                 retries += 1
