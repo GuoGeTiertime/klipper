@@ -12,9 +12,10 @@
 import math
 
 def calc_skew_factor(ac, bd, ad):
-    side = math.sqrt(2*ac*ac + 2*bd*bd - 4*ad*ad) / 2.
-    return math.tan(math.pi/2 - math.acos(
-        (ac*ac - side*side - ad*ad) / (2*side*ad)))
+    # side = math.sqrt(2*ac*ac + 2*bd*bd - 4*ad*ad) / 2.
+    # return math.tan(math.pi/2 - math.acos(
+    #     (ac*ac - side*side - ad*ad) / (2*side*ad)))
+    return (ac-bd) / math.sqrt(ac*ac + bd*bd) * math.sqrt(2)
 
 def calc_shrink_factor(measured, expected):
     return expected / measured
