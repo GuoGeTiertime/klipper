@@ -3,7 +3,7 @@
 # Copyright (C) 2018-2024  Kevin O'Connor <kevin@koconnor.net>
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
-import os, sys, logging, io
+import os, sys, logging, io, re
 
 VALID_GCODE_EXTS = ['gcode', 'g', 'gco']
 
@@ -34,6 +34,11 @@ class VirtualSD:
         gcode_macro = self.printer.load_object(config, 'gcode_macro')
         self.on_error_gcode = gcode_macro.load_template(
             config, 'on_error_gcode', DEFAULT_ERROR_GCODE)
+        #first layer box
+        self.xmin_first_layer = 1000000.0
+        self.xmax_first_layer = -1000000.0
+        self.ymin_first_layer = 1000000.0
+        self.ymax_first_layer = -1000000.0
         # Register commands
         self.gcode = self.printer.lookup_object('gcode')
         for cmd in ['M20', 'M21', 'M23', 'M24', 'M25', 'M26', 'M27']:
@@ -187,6 +192,7 @@ class VirtualSD:
             f.seek(0, os.SEEK_END)
             fsize = f.tell()
             f.seek(0)
+            self._get_first_layer_box(f)
         except:
             logging.exception("virtual_sdcard file open")
             raise gcmd.error("Unable to open file")
@@ -196,6 +202,50 @@ class VirtualSD:
         self.file_position = 0
         self.file_size = fsize
         self.print_stats.set_current_file(filename)
+    def _get_first_layer_box(self, file):
+        import re
+        # 正则表达式模式，用于匹配 "X" 和 "Y" 后面的数字（包括负数和小数）
+        pattern_xy = re.compile(r'G1\s+.*X(-?\d+(\.\d+)?)\s+Y(-?\d+(\.\d+)?)')
+        pattern_layer = re.compile(r'^;LAYER_CHANGE')
+        pattern_g1 = re.compile(r'^G1 ')
+        # 初始化 X 和 Y 的最小值和最大值
+        x_min, x_max = float('inf'), float('-inf')
+        y_min, y_max = float('inf'), float('-inf')
+        self.xmin_first_layer = 1000000.0
+        self.xmax_first_layer = -1000000.0
+        self.ymin_first_layer = 1000000.0
+        self.ymax_first_layer = -1000000.0
+        linescount = 0
+        layercount = 0
+        for line in file:
+            linescount += 1
+            if(linescount > 100000): # 读取前 100000 行
+                return (self.xmin_first_layer, self.xmax_first_layer), (self.ymin_first_layer, self.ymax_first_layer)
+            if(pattern_layer.match(line)):
+                layercount += 1
+                if layercount > 1:
+                    break
+            match = pattern_xy.search(line)
+            if match:
+                x_value = float(match.group(1))
+                y_value = float(match.group(3))
+                x_min = min(x_min, x_value)
+                x_max = max(x_max, x_value)
+                y_min = min(y_min, y_value)
+                y_max = max(y_max, y_value)
+        self.xmin_first_layer = x_min
+        self.xmax_first_layer = x_max
+        self.ymin_first_layer = y_min
+        self.ymax_first_layer = y_max
+        logging.info("read gcode, X range: %s", (self.xmin_first_layer, self.xmax_first_layer))
+        logging.info("read gcode, Y range: %s", (self.ymin_first_layer, self.ymax_first_layer))
+        return (self.xmin_first_layer, self.xmax_first_layer), (self.ymin_first_layer, self.ymax_first_layer)
+        # 示例使用
+        # filename = 'coordinates.txt'
+        # (x_range, y_range) = read_coordinates(filename)
+        # print(f"X 取值范围: {x_range}")
+        # print(f"Y 取值范围: {y_range}")
+
     def cmd_M24(self, gcmd):
         # Start/resume SD print
         self.do_resume()
