@@ -16,6 +16,9 @@ def calc_skew_factor(ac, bd, ad):
     return math.tan(math.pi/2 - math.acos(
         (ac*ac - side*side - ad*ad) / (2*side*ad)))
 
+def calc_shrink_factor(measured, expected):
+    return expected / measured
+
 class PrinterSkew:
     def __init__(self, config):
         self.printer = config.get_printer()
@@ -24,6 +27,9 @@ class PrinterSkew:
         self.xy_factor = 0.
         self.xz_factor = 0.
         self.yz_factor = 0.
+        self.xx_factor = 1.0
+        self.yy_factor = 1.0
+        self.zz_factor = 1.0
         self.skew_profiles = {}
         self._load_storage(config)
         self.printer.register_event_handler("klippy:connect",
@@ -53,37 +59,61 @@ class PrinterSkew:
                 'xy_skew': profile.getfloat("xy_skew"),
                 'xz_skew': profile.getfloat("xz_skew"),
                 'yz_skew': profile.getfloat("yz_skew"),
+                'xx_shrink': profile.getfloat("xx_shrink"),
+                'yy_shrink': profile.getfloat("yy_shrink"),
+                'zz_shrink': profile.getfloat("zz_shrink"),
             }
     def calc_skew(self, pos):
         skewed_x = pos[0] - pos[1] * self.xy_factor \
             - pos[2] * (self.xz_factor - (self.xy_factor * self.yz_factor))
         skewed_y = pos[1] - pos[2] * self.yz_factor
         return [skewed_x, skewed_y, pos[2], pos[3]]
+    def calc_shrink(self, pos):
+        x = pos[0] * self.xx_factor
+        y = pos[1] * self.yy_factor
+        z = pos[2] * self.zz_factor
+        return [x, y, z, pos[3]]
     def calc_unskew(self, pos):
         skewed_x = pos[0] + pos[1] * self.xy_factor \
             + pos[2] * self.xz_factor
         skewed_y = pos[1] + pos[2] * self.yz_factor
         return [skewed_x, skewed_y, pos[2], pos[3]]
+    def calc_unshrink(self, pos):
+        x = pos[0] / self.xx_factor
+        y = pos[1] / self.yy_factor
+        z = pos[2] / self.zz_factor
+        return [x, y, z, pos[3]]
     def get_position(self):
-        return self.calc_unskew(self.next_transform.get_position())
+        pos = self.next_transform.get_position()
+        pos = self.calc_unshrink(pos)
+        return self.calc_unskew(pos)
     def move(self, newpos, speed):
         corrected_pos = self.calc_skew(newpos)
+        corrected_pos = self.calc_shrink(corrected_pos)
         self.next_transform.move(corrected_pos, speed)
-    def _update_skew(self, xy_factor, xz_factor, yz_factor):
+    def _update_skew_shrink(self, xy_factor, xz_factor, yz_factor, xx_factor, yy_factor, zz_factor):
         self.xy_factor = xy_factor
         self.xz_factor = xz_factor
         self.yz_factor = yz_factor
+        self.xx_factor = xx_factor if abs(xx_factor-1.0) < 0.05 else 1.
+        self.yy_factor = yy_factor if abs(yy_factor-1.0) < 0.05 else 1.
+        self.zz_factor = zz_factor if abs(zz_factor-1.0) < 0.05 else 1.
         gcode_move = self.printer.lookup_object('gcode_move')
         gcode_move.reset_last_position()
     cmd_GET_CURRENT_SKEW_help = "Report current printer skew"
     def cmd_GET_CURRENT_SKEW(self, gcmd):
-        out = "Current Printer Skew:"
+        out = "Current Printer Skew / Shrink:"
         planes = ["XY", "XZ", "YZ"]
         factors = [self.xy_factor, self.xz_factor, self.yz_factor]
         for plane, fac in zip(planes, factors):
             out += '\n' + plane
             out += " Skew: %.6f radians, %.2f degrees" % (
                 fac, math.degrees(fac))
+        axes = ["X", "Y", "Z"]
+        factors = [self.xx_factor, self.yy_factor, self.zz_factor]
+        for axis, fac in zip(axes, factors):
+            out += '\n' + axis
+            out += " Shrink: %.6f" % fac
         gcmd.respond_info(out)
     cmd_CALC_MEASURED_SKEW_help = "Calculate skew from measured print"
     def cmd_CALC_MEASURED_SKEW(self, gcmd):
@@ -96,7 +126,7 @@ class PrinterSkew:
     cmd_SET_SKEW_help = "Set skew based on lengths of measured object"
     def cmd_SET_SKEW(self, gcmd):
         if gcmd.get_int("CLEAR", 0):
-            self._update_skew(0., 0., 0.)
+            self._update_skew_shrink(0., 0., 0., 1., 1., 1.)
             return
         planes = ["XY", "XZ", "YZ"]
         for plane in planes:
@@ -113,6 +143,21 @@ class PrinterSkew:
                         "plane [%s]\n%s" % (plane, gcmd.get_commandline()))
                 factor = plane.lower() + '_factor'
                 setattr(self, factor, calc_skew_factor(*lengths))
+        axes = ["XX", "YY", "ZZ"]
+        for axis in axes:
+            lengths = gcmd.get(axis, None)
+            if lengths is not None:
+                try:
+                    lengths = lengths.strip().split(",", 2)
+                    lengths = [float(l.strip()) for l in lengths]
+                    if len(lengths) != 2:
+                        raise Exception
+                except Exception:
+                    raise gcmd.error(
+                        "shrink_correction: improperly formatted entry for "
+                        "axis [%s]\n%s" % (axis, gcmd.get_commandline()))
+                factor = axis.lower() + '_factor'
+                setattr(self, factor, calc_shrink_factor(*lengths))
     cmd_SKEW_PROFILE_help = "Profile management for skew_correction"
     def cmd_SKEW_PROFILE(self, gcmd):
         if gcmd.get('LOAD', None) is not None:
@@ -123,7 +168,7 @@ class PrinterSkew:
                     "skew_correction:  Load failed, unknown profile [%s]"
                     % (name))
                 return
-            self._update_skew(prof['xy_skew'], prof['xz_skew'], prof['yz_skew'])
+            self._update_skew_shrink(prof['xy_skew'], prof['xz_skew'], prof['yz_skew'], prof['xx_shrink'], prof['yy_shrink'], prof['zz_shrink'])
         elif gcmd.get('SAVE', None) is not None:
             name = gcmd.get('SAVE')
             configfile = self.printer.lookup_object('configfile')
@@ -131,11 +176,17 @@ class PrinterSkew:
             configfile.set(cfg_name, 'xy_skew', self.xy_factor)
             configfile.set(cfg_name, 'xz_skew', self.xz_factor)
             configfile.set(cfg_name, 'yz_skew', self.yz_factor)
+            configfile.set(cfg_name, 'xx_shrink', self.xx_factor)
+            configfile.set(cfg_name, 'yy_shrink', self.yy_factor)
+            configfile.set(cfg_name, 'zz_shrink', self.zz_factor)
             # Copy to local storage
             self.skew_profiles[name] = {
                 'xy_skew': self.xy_factor,
                 'xz_skew': self.xz_factor,
-                'yz_skew': self.yz_factor
+                'yz_skew': self.yz_factor,
+                'xx_shrink': self.xx_factor,
+                'yy_shrink': self.yy_factor,
+                'zz_shrink': self.zz_factor
             }
             gcmd.respond_info(
                 "Skew Correction state has been saved to profile [%s]\n"
