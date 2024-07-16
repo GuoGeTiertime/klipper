@@ -188,6 +188,7 @@ class VirtualSD:
             if fname not in flist:
                 fname = files_by_lower[fname.lower()]
             fname = os.path.join(self.sdcard_dirname, fname)
+            self._get_first_layer_box(fname)
             f = io.open(fname, 'r', newline='')
             f.seek(0, os.SEEK_END)
             fsize = f.tell()
@@ -202,8 +203,7 @@ class VirtualSD:
         self.file_position = 0
         self.file_size = fsize
         self.print_stats.set_current_file(filename)
-    def _get_first_layer_box(self, file):
-        import re
+    def _get_first_layer_box(self, filename):
         # 正则表达式模式，用于匹配 "X" 和 "Y" 后面的数字（包括负数和小数）
         pattern_xy = re.compile(r'G1\s+.*X(-?\d+(\.\d+)?)\s+Y(-?\d+(\.\d+)?)')
         pattern_layer = re.compile(r'^;LAYER_CHANGE')
@@ -217,22 +217,23 @@ class VirtualSD:
         self.ymax_first_layer = -1000000.0
         linescount = 0
         layercount = 0
-        for line in file:
-            linescount += 1
-            if(linescount > 100000): # 读取前 100000 行
-                return (self.xmin_first_layer, self.xmax_first_layer), (self.ymin_first_layer, self.ymax_first_layer)
-            if(pattern_layer.match(line)):
-                layercount += 1
-                if layercount > 1:
-                    break
-            match = pattern_xy.search(line)
-            if match:
-                x_value = float(match.group(1))
-                y_value = float(match.group(3))
-                x_min = min(x_min, x_value)
-                x_max = max(x_max, x_value)
-                y_min = min(y_min, y_value)
-                y_max = max(y_max, y_value)
+        with open(filename, 'r') as file:
+            for line in file:
+                linescount += 1
+                if(linescount > 100000): # 读取前 100000 行
+                    return (self.xmin_first_layer, self.xmax_first_layer), (self.ymin_first_layer, self.ymax_first_layer)
+                if(pattern_layer.match(line)):
+                    layercount += 1
+                    if layercount > 1:
+                        break
+                match = pattern_xy.search(line)
+                if match:
+                    x_value = float(match.group(1))
+                    y_value = float(match.group(3))
+                    x_min = min(x_min, x_value)
+                    x_max = max(x_max, x_value)
+                    y_min = min(y_min, y_value)
+                    y_max = max(y_max, y_value)
         self.xmin_first_layer = x_min
         self.xmax_first_layer = x_max
         self.ymin_first_layer = y_min
