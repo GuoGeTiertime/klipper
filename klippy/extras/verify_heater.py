@@ -31,6 +31,7 @@ class HeaterCheck:
         self.last_target = self.goal_temp = self.error = 0.
         self.goal_systime = self.printer.get_reactor().NEVER
         self.check_timer = None
+        self.zero_cnt = 0
     def handle_connect(self):
         if self.printer.get_start_args().get('debugoutput') is not None:
             # Disable verify_heater if outputting to a debug file
@@ -46,6 +47,13 @@ class HeaterCheck:
             reactor.update_timer(self.check_timer, reactor.NEVER)
     def check_event(self, eventtime):
         temp, target = self.heater.get_temp(eventtime)
+        if temp == 0.:
+            self.zero_cnt += 1
+            logging.error("Heater %s temperature is zero, cnt: %d @ %.3f" % (self.heater_name, self.zero_cnt, eventtime) )
+            if self.zero_cnt < 10: # ignore first 10 zero readings
+                temp = target
+        else:
+            self.zero_cnt = 0
         if temp >= target - self.hysteresis or target <= 0.:
             # Temperature near target - reset checks
             if self.approaching_target and target:
@@ -68,7 +76,7 @@ class HeaterCheck:
                 self.goal_systime = eventtime + self.check_gain_time
             elif self.error >= self.max_error:
                 logging.info( "***** Error, heater %s over max_error, temp:%.2f, target: %.2f, error:%.2f, preverr:%.2f, max:%.2f, add tiertime 20231130.",
-                             temp, target, self.error, prev_error, self.max_error)
+                             self.heater_name, temp, target, self.error, prev_error, self.max_error)
                 # Failure due to inability to maintain target temperature
                 return self.heater_fault()
         elif temp >= self.goal_temp:
