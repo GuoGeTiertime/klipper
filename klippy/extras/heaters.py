@@ -206,6 +206,7 @@ class ControlPID:
         self.prev_temp_time = 0.
         self.prev_temp_deriv = 0.
         self.prev_temp_integ = 0.
+        self.reach_over = config.getfloat("reach_over", 0.0) #modify the reach temperature conditions
     def temperature_update(self, read_time, temp, target_temp):
         time_diff = read_time - self.prev_temp_time
         # Calculate change of temperature
@@ -233,8 +234,12 @@ class ControlPID:
             self.prev_temp_integ = temp_integ
     def check_busy(self, eventtime, smoothed_temp, target_temp):
         temp_diff = target_temp - smoothed_temp
-        return (abs(temp_diff) > PID_SETTLE_DELTA )
-                # or abs(self.prev_temp_deriv) > PID_SETTLE_SLOPE)
+        # return (abs(temp_diff) > PID_SETTLE_DELTA )
+        #         # or abs(self.prev_temp_deriv) > PID_SETTLE_SLOPE)
+        is_busy = abs(temp_diff) > PID_SETTLE_DELTA 
+        if self.reach_over != 0.0 and is_busy:
+            is_busy = smoothed_temp < (target_temp + self.reach_over)
+        return is_busy
 
 
 ######################################################################
