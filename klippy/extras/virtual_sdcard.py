@@ -188,12 +188,11 @@ class VirtualSD:
             if fname not in flist:
                 fname = files_by_lower[fname.lower()]
             fname = os.path.join(self.sdcard_dirname, fname)
-            self._get_first_layer_box(fname)
+            # self._get_first_layer_box(fname)
             f = io.open(fname, 'r', newline='')
             f.seek(0, os.SEEK_END)
             fsize = f.tell()
             f.seek(0)
-            self._get_first_layer_box(f)
         except:
             logging.exception("virtual_sdcard file open")
             raise gcmd.error("Unable to open file")
