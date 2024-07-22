@@ -66,6 +66,9 @@ class HeaterCheck:
             return eventtime + 1.
         prev_error = self.error
         self.error += (target - self.hysteresis) - temp
+        #add 20240722, log temperature if error is over 10% of max error
+        if self.error > self.max_error*0.2 :
+            logging.info( " ---- heater error *****, curtemp:%.2f, target:%.2f, err:%.2f @%.3f" % (temp, target, self.error, eventtime))
         if not self.approaching_target:
             if target != self.last_target:
                 # Target changed - reset checks
