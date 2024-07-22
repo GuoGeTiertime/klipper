@@ -116,6 +116,8 @@ class Feeder:  # Heater:
 
         self.switch_invert = False # switch signal invert, for init feeding.
 
+        self.isloginfo = 0  # 0: no log, 1:gcode response, 2: write log file, 3: response and write log file 
+
         # self.mcu_pwm.setup_max_duration(MAX_HEAT_TIME)
         # Load additional modules
         # self.printer.load_object(config, "verify_feeder %s" % (self.name,))
@@ -127,11 +129,22 @@ class Feeder:  # Heater:
         self.gcode.register_mux_command("FEED_IN", "FEEDER",
                                    self.name, self.cmd_FEED_IN,
                                    desc=self.cmd_FEED_IN_help)
+        self.gcode.register_mux_command("FEED_FILA", "FEEDER",
+                            self.name, self.cmd_FEED_FILA,
+                            desc=self.cmd_FEED_FILA_help)
+
         
         # test command: SET_FEEDER_DISTANCE FEEDER=feeder0 TARGET=1.23
 
-    def _loginfo(self, msg):
-        self.gcode.respond_info(msg, False)
+    def _loginfo(self, msg, logflag=None):
+        if logflag is None:
+            logflag = self.isloginfo
+        if logflag == 1:
+            self.gcode.respond_info(msg, False) # only respond to gcode.
+        elif logflag == 2:
+           logging.info(msg) # only write log file.
+        elif logflag == 3:
+            self.gcode.respond_info(msg, True) # respond to gcode and write log file.
 
     def _cal_step_cycle_time(self, speed):
         freq = speed * self.scale_speed2freq
@@ -150,7 +163,7 @@ class Feeder:  # Heater:
     # feed filament len at speed
     def feed_filament(self, print_time, speed, len): # set feed len with speed. value is the length to feed.
         if not self.bfeeder_on and not self.is_feeding:
-            return
+            return 0.0
 
         # estimate the print time for output dir and pulse.
         curtime = self.reactor.monotonic()
@@ -158,7 +171,7 @@ class Feeder:  # Heater:
 
         if print_time < self.next_feed_time: 
         # if print_time < self.last_feed_time + MIN_DIRPULSE_TIME: # at least 0.1s interval.
-            return
+            return 0.0
 
         # verify max feed len, if over, stop feed after set pwm with value 0.
         max_len = self.max_feed_len if self.bInited else self.init_feed_len
@@ -209,7 +222,8 @@ class Feeder:  # Heater:
         # log info for debug
         self._loginfo("feeder %s feed_filament: %.3fmm @ %.3fmm/s, freq:%.3fkHz, period:%.3fms, feed time:%.3f, curlen:%.2f, total lenght:%.2f" % 
                       (self.name, len, speed, 0.001/cycle_time, cycle_time*1000, feed_time, self.cur_feed_len, self.total_feed_len))
-            
+        return len
+
     def set_dir(self, print_time, value):
         print_time = max(print_time, self.last_dirtime + MIN_DIRPULSE_TIME)
         self.last_dirtime = print_time
@@ -392,6 +406,17 @@ class Feeder:  # Heater:
             enable = 0  
             self._loginfo("feeder %s fila not inserted, can't feed filament" % self.name)
         self.enable_stepper(enable)
+
+    # eg: FEED_FILA FEEDER=feeder1 SPEED=20.0 LEN=5.0
+    cmd_FEED_FILA_help = "Begin feed filament, send to the nozzle."
+    def cmd_FEED_FILA(self, gcmd):
+        speed = gcmd.get_float('SPEED', self.feed_speed, minval=1.0)
+        len = gcmd.get_float('LEN', self.switch_feed_len)
+        len_feeded = self.feed_filament(self.reactor.monotonic(), speed, len)
+        self._loginfo("feeder %s feed fila: %.3fmm(target:%.3f) @ %.3fmm/s" % (self.name, len_feeded, len, speed))
+        self.isloginfo = gcmd.get_int('LOG', self.isloginfo)
+        msg = "Set log flag:%d" % (self.isloginfo,)
+        self._loginfo(msg, 1) #only response at command line.
 
 
 ######################################################################
