@@ -745,7 +745,7 @@ class ToolHead:
                "square_corner_velocity: %.6f" % (
                    self.max_velocity, self.max_accel,
                    self.min_cruise_ratio, self.square_corner_velocity))
-        self.printer.set_rollover_info("toolhead", "toolhead: %s" % (msg,))
+        self.printer.set_rollover_info("toolhead", "toolhead: %s" % (msg,), log=False)
         if (max_velocity is None and max_accel is None
             and square_corner_velocity is None and min_cruise_ratio is None):
             gcmd.respond_info(msg, log=False)
