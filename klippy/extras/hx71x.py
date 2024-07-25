@@ -202,6 +202,7 @@ class HX71X:
         self.total_weight_min = 0.0
         self.total_weight_max = 0.0
         self.prev_weight = 0.0
+        self.collision_cnt = {}
 
         self.isloginfo = 0  # 0: no log, 1:gcode response, 2: write log file, 3: response and write log file 
 
@@ -242,6 +243,7 @@ class HX71X:
             self.weight_min[oid] = 0.0
             self.weight_max[oid] = 0.0
             self.read_time[oid] = 0.0
+            self.collision_cnt[oid] = 0
 
         # update period
         self.report_time = config.getfloat('hx71x_report_time', 1, minval=MIN_REPORT_TIME)
@@ -260,6 +262,7 @@ class HX71X:
 
         # set collision warning value for endstop or z motor collision
         self.collision_err = config.getfloat('collision_err', 0.0)
+        self.collision_err_cnt = config.getfloat('collision_err_cnt', 10)
 
         #test weight sensor is ok or stepper motor is ok
         self.test_min = config.getfloat('test_min', 100.0)
@@ -453,11 +456,16 @@ class HX71X:
             self._loginfo("Senser:%s(oid:%d) read hx711 @ %.3f , weight:%.2f, cnt:%d, tare:%.2f, value:%d" % 
                          (self.name, oid, last_read_time, self.weight[oid], self._sample_cnt[oid], self._sample_tare[oid], value))
             
-        # collision warning test
+        # collision warning test, cnt > 10 (every time +3) ,then shutdown the printer.
         if self.collision_err > 0 and abs(self.weight[oid]) > self.collision_err:
-            msg = "Weight senser:%s(oid:%d) collision warning, weight:%.2f(%d-%X). Shutdown the printer!" % (self.name, oid, self.weight[oid], value, value)
-            self._loginfo(msg, 3) #log info at command line and log file
-            self.gcode.run_script_from_command("M112")  # emergency stop
+            self.collision_cnt[oid] += 3
+            if self.collision_cnt[oid] > self.collision_err_cnt:
+                msg = "Weight senser:%s(oid:%d) collision warning, weight:%.2f(%d-%X), cnt:%d. Shutdown the printer!" % (self.name, oid, self.weight[oid], value, value, self.collision_cnt[oid])
+                self._loginfo(msg, 3) #log info at command line and log file
+                self.gcode.run_script_from_command("M112")  # emergency stop
+        else:
+            self.collision_cnt[oid] = max(0, self.collision_cnt[oid]-1)
+
 
         # update total weight when all seners are read.
         self._cnt_in_cycle += 1
