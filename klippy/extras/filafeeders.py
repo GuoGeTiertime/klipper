@@ -30,18 +30,25 @@ class Feeder:  # Heater:
         self.bfeeder_on = False    # feeder on/off
         self.bInited = False    # feeder inited, has send the filament to the nozzle.
 
+        # runout helper, use the filament_switch_sensor.py's RunoutHelper class.
         self.runout_helper = filament_switch_sensor.RunoutHelper(config)
+
+        # fila length runout check, need extruder object and runout_length
+        self.extruder_name = config.get('extruder', None)
+
+        self.runout_length = config.getfloat('runout_length', 100, above=1)
+        self.runout_pos = 0.0   # runout position, the extruder's position when the runout happened.    
 
         buttons = self.printer.load_object(config, 'buttons')
         fila_pin = config.get('fila_pin')
         buttons.register_buttons([fila_pin], self._check_filament)
-        self._fila_state = True # released.
+        self._fila_state = True # fila is inserted.
 
         switch_pin = config.get('switch_pin')
         if switch_pin is not None:
             logging.info("Add feeder %s with switch:%s", self.name, switch_pin)
             buttons.register_buttons([switch_pin], self._switch_handler)
-            self._switch_state = False # released.
+            self._switch_state = False # released. feed switch is pressed or not, True is feeding. False is need to feed.
             self.switch_feed_len = config.getfloat('switch_feed_len', 5, minval=0.1) # feed length when switch is pressed.
             self.feed_delay = config.getfloat('feed_delay', 0.5, minval=0.1) # check switch per delay time
             self._switch_update_timer = self.reactor.register_timer(self._switch_update_event)
@@ -117,6 +124,17 @@ class Feeder:  # Heater:
         self.switch_invert = False # switch signal invert, for init feeding.
 
         self.isloginfo = 0  # 0: no log, 1:gcode response, 2: write log file, 3: response and write log file 
+        
+        # load runout/fail/insert gcode
+        # insert: insert fila into feeder
+        # runout:no fila in feeder
+        # jam_break: fila break or nozzle jam, not feed when the extruder is working.
+        # slip: can't feed the fila to the nozzle, feeder slip or tube broken.
+        gcode_macro = self.printer.load_object(config, 'gcode_macro')
+        self.insert_gcode = gcode_macro.load_template(config, 'insert_gcode', '')
+        self.runout_gcode = gcode_macro.load_template(config, 'runout_gcode', '')
+        self.jam_break_gcode = gcode_macro.load_template(config, 'jam_break_gcode', '')
+        self.slip_gcode = gcode_macro.load_template(config, 'slip_gcode', '')
 
         # self.mcu_pwm.setup_max_duration(MAX_HEAT_TIME)
         # Load additional modules
@@ -132,9 +150,21 @@ class Feeder:  # Heater:
         self.gcode.register_mux_command("FEED_FILA", "FEEDER",
                             self.name, self.cmd_FEED_FILA,
                             desc=self.cmd_FEED_FILA_help)
+        self.gcode.register_mux_command("FEED_STATUS", "FEEDER",
+                            self.name, self.cmd_FEED_STATUS,
+                            desc=self.cmd_FEED_STATUS_help)
 
-        
+        self.printer.register_event_handler('klippy:ready', self._handle_ready)
+
         # test command: SET_FEEDER_DISTANCE FEEDER=feeder0 TARGET=1.23
+
+    def _handle_ready(self):
+        self.extruder = self.printer.lookup_object(self.extruder_name, None)
+        # self.estimated_print_time = (
+        #         self.printer.lookup_object('mcu').estimated_print_time)
+        # self._update_filament_runout_pos()
+        # self._extruder_pos_update_timer = self.reactor.register_timer(
+        #         self._extruder_pos_update_event)
 
     def _loginfo(self, msg, logflag=None):
         if logflag is None:
@@ -145,6 +175,18 @@ class Feeder:  # Heater:
            logging.info(msg) # only write log file.
         elif logflag == 3:
             self.gcode.respond_info(msg, True) # respond to gcode and write log file.
+    
+    def _get_extruder_pos(self, eventtime=None):
+        if self.extruder is None:
+            return 0.0
+        if eventtime is None:
+            eventtime = self.reactor.monotonic()
+        print_time = self.step.get_mcu().estimated_print_time(eventtime)
+        return self.extruder.find_past_position(print_time)
+    def _update_runout_pos(self, eventtime=None):
+        if eventtime is None:
+            eventtime = self.reactor.monotonic()
+        self.runout_pos = self._get_extruder_pos(eventtime) + self.runout_length
 
     def _cal_step_cycle_time(self, speed):
         freq = speed * self.scale_speed2freq
@@ -176,14 +218,15 @@ class Feeder:  # Heater:
         # verify max feed len, if over, stop feed after set pwm with value 0.
         max_len = self.max_feed_len if self.bInited else self.init_feed_len
         if self.cur_feed_len > max_len:
-            self._loginfo("feeder %s cur feed len:%.3f over max len:%.1f(inited:%s), stoped!" % (self.name, self.cur_feed_len, max_len, str(self.bInited)))
+            self._loginfo("feeder %s cur feed len:%.3f over max len:%.1f(inited:%s), stoped!" % (self.name, self.cur_feed_len, max_len, str(self.bInited)), 3)
             # raise self.printer.command_error("Feeder %s reach the max feed lenght. feed len:%.3fmm over max:%.3fmm" % (self.name, self.cur_feed_len, self.max_feed_len))
             len = 0.0
             self.enable_stepper(False)
             if self.bInited :
-               self.runout_helper.note_filament_present(False)
+               if self.isprinting(): # exec slip gcode when printing.
+                   self._exec_gcode(self.slip_gcode)
             else:
-                self._loginfo("Can't feed filament to nozzle, fila feeder initialize failed, please check the feeder, filament and extruder.")
+                self._loginfo("Can't feed filament to nozzle, fila feeder initialize failed, please check the feeder, filament and extruder.", 3)
 
         if not self.bfeeder_on or abs(len) < self.min_feed_len:
             len = 0.0
@@ -200,6 +243,8 @@ class Feeder:  # Heater:
             feed_time = abs(len/speed)
             # set the feed stepper's pulse freq, 0.5 is the duty.
             self.set_pulse(print_time, 0.5, cycle_time)
+            # update the runout pos at every feed.
+            self._update_runout_pos(curtime)
         else:
             speed = 0.0
             cycle_time = 1.0
@@ -259,10 +304,23 @@ class Feeder:  # Heater:
         # toolhead.register_lookahead_callback(
         #     lambda print_time: self.step.set_pwm(print_time, value, cycle_time))
 
+    # Determine "printing" status
+    def isprinting(self):
+        eventtime = self.reactor.monotonic()
+        idle_timeout = self.printer.lookup_object("idle_timeout")
+        return idle_timeout.get_status(eventtime)["state"] == "Printing"
+
     def handle_connect_switch(self):
         self.reactor.update_timer(self._switch_update_timer, self.reactor.NOW)
         return
     
+    def _exec_gcode(self, script_template):        
+        try:
+            self.gcode.run_script( script_template.render() )
+        except Exception:
+            self._loginfo("Feeder script running error", 3)
+        # script_template.run_gcode_from_command()
+
     # checked if fila is in the feeder
     def _check_filament(self, eventtime, state):
         if self._fila_state == state:
@@ -271,14 +329,15 @@ class Feeder:  # Heater:
         self._fila_state = state
         if self._fila_state: # fila is inserted into the feeder
             self._loginfo("feeder: %s fila inserted, begin sending, reset inited flag to False" % self.name)
+            # self._exec_gcode(self.insert_gcode) 
             self._switch_handler(eventtime, self._switch_state)
             self.enable_stepper(True)
             self.bInited = False    # reset the inited flag forcelly.
         else:
             self.enable_stepper(False)
-            self._loginfo("feeder: %s fila removed, stop feeding, add code the pause or stop print job" % self.name)
-
-        self.runout_helper.note_filament_present(self._fila_state)
+            self._loginfo("feeder: %s fila is removed, stop feeding" % self.name)
+            if self.isprinting(): # exec runout gcode when printing.
+                self._exec_gcode(self.runout_gcode) 
 
     # update feeder when the feeder's switch is pressed or released.
     def _switch_handler(self, eventtime, state):
@@ -300,9 +359,17 @@ class Feeder:  # Heater:
             self.feed_filament(eventtime, 1.0, 0.0) #send 0 length to stop feed.
             if not self.bInited:
                 self.bInited = True
-                self._loginfo("feeder %s init feed finished, set bInited:%d" % (self.name, self.bInited))
+                self._loginfo("feeder %s init feed finished, set bInited:%d" % (self.name, self.bInited), 3)
+
         next_time = min(eventtime + self.feed_delay, self.next_feed_time)
         next_time = max(next_time, eventtime + 0.1) # at least 0.1s.
+
+        # check nozzle jam or feed failed when the extruder is working.
+        if self.isprinting() and self.bInited:
+            extruderpos = self._get_extruder_pos(eventtime)
+            if extruderpos > self.runout_pos:
+                self._exec_gcode(self.jam_break_gcode)
+
         return next_time
 
     def distance_callback(self, read_time, distance):
@@ -369,19 +436,11 @@ class Feeder:  # Heater:
         return {
             'total_feed_len': self.total_feed_len,
             'cur_feed_len': self.cur_feed_len,
-            'last_feed_time': self.last_feed_time}
-    
-    def _runout_event_handler(self, eventtime):
-        # Pausing from inside an event requires that the pause portion
-        # of pause_resume execute immediately.
-        pause_prefix = ""
-        if self.runout_pause:
-            pause_resume = self.printer.lookup_object('pause_resume')
-            pause_resume.send_pause_command()
-            pause_prefix = "PAUSE\n"
-            self.printer.get_reactor().pause(eventtime + self.pause_delay)
-        self._exec_gcode(pause_prefix, self.runout_gcode)
-
+            'last_feed_time': self.last_feed_time,
+            'enable': self.bfeeder_on,
+            'inited': self.bInited,
+            'fila_state': self._fila_state,
+            'switch_state': self._switch_state,}
 
     cmd_SET_FEEDER_DISTANCE_help = "Sets a feeder hold distance"
     def cmd_SET_FEEDER_DISTANCE(self, gcmd):
@@ -404,11 +463,11 @@ class Feeder:  # Heater:
         self.bInited = not init
         if not self._fila_state:
             enable = 0  
-            self._loginfo("feeder %s fila not inserted, can't feed filament" % self.name)
+            self._loginfo("feeder %s fila not inserted, can't feed filament" % (self.name,), logflag=3)
         self.enable_stepper(enable)
 
     # eg: FEED_FILA FEEDER=feeder1 SPEED=20.0 LEN=5.0
-    cmd_FEED_FILA_help = "Begin feed filament, send to the nozzle."
+    cmd_FEED_FILA_help = "Feed LEN mm filament at SPEED."
     def cmd_FEED_FILA(self, gcmd):
         speed = gcmd.get_float('SPEED', self.feed_speed, minval=1.0)
         len = gcmd.get_float('LEN', self.switch_feed_len)
@@ -418,6 +477,11 @@ class Feeder:  # Heater:
         msg = "Set log flag:%d" % (self.isloginfo,)
         self._loginfo(msg, 1) #only response at command line.
 
+    cmd_FEED_STATUS_help = "Show current status of the feeder."
+    def cmd_FEED_STATUS(self, gcmd):
+        status = self.get_status(self.reactor.monotonic())
+        msg = "feeder %s status: %s" % (self.name, status)
+        self._loginfo(msg, 1) #only response at command line.
 
 ######################################################################
 # Bang-bang control algo
@@ -552,7 +616,7 @@ class FilaFeeders:  # PrinterHeaters:
         try:
             pin_params = ppins.parse_pin(fila_pin)
         except:
-            logging.error("Hx711 sensor_pin %s not found, maybe the mcu is disconnected", fila_pin)
+            logging.error("fila_pin %s not found, maybe the mcu is disconnected", fila_pin)
             # 遍历所有options, avoid the unused options error
             for option in config.get_prefix_options(''):
                 option = option.lower()
