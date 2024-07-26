@@ -571,6 +571,17 @@ class MCU:
                     or self._serialport.startswith("/tmp/klipper_host_")):
                 self._baud = config.getint('baud', 250000, minval=2400)
         
+            # add for serial port auto detect, 20240726
+            isExist = os.path.exists(self._serialport)
+            # try serial1~4 for alternative serial port.
+            for i in range(1, 5):
+                portname = config.get("serial%d" % (i,), None)
+                if isExist or portname is None:
+                    continue
+                isExist = os.path.exists(portname)
+                if isExist:
+                    self._serialport = portname
+                    
         # Check if serial port exists, ignore if not
         self.isSerialExist = True
         if self._serialport is not None:
