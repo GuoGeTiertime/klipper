@@ -12,6 +12,7 @@ class PrintStats:
         self.reset()
         self.pause_flag = ""
         self.cancel_flag = ""
+        self.operate_flag = ""
         # Register commands
         self.gcode = printer.lookup_object('gcode')
         self.gcode.register_command(
@@ -21,6 +22,8 @@ class PrintStats:
                             desc=self.cmd_SET_PAUSE_FLAG_help)
         self.gcode.register_command("SET_CANCEL_FLAG", self.cmd_SET_CANCEL_FLAG,
                                     desc=self.cmd_SET_CANCEL_FLAG_help)
+        self.gcode.register_command("SET_OPERATE_FLAG", self.cmd_SET_OPERATE_FLAG,
+                                    desc=self.cmd_SET_OPERATE_FLAG_help)
     def _update_filament_usage(self, eventtime):
         gc_status = self.gcode_move.get_status(eventtime)
         cur_epos = gc_status['position'].e
@@ -94,6 +97,9 @@ class PrintStats:
     cmd_SET_CANCEL_FLAG_help = ("Set cancel flag for the current print")
     def cmd_SET_CANCEL_FLAG(self, gcmd):
         self.cancel_flag = gcmd.get('FLAG', "user cancel")
+    cmd_SET_OPERATE_FLAG_help = ("Set operate flag")
+    def cmd_SET_OPERATE_FLAG(self, gcmd):
+        self.operate_flag = gcmd.get('FLAG', "")
 
     def reset(self):
         self.filename = self.error_message = ""
@@ -127,6 +133,7 @@ class PrintStats:
             'message': self.error_message,
             'pause_flag': self.pause_flag,
             'cancel_flag': self.cancel_flag,
+            'operate_flag': self.operate_flag,
             'info': {'total_layer': self.info_total_layer,
                      'current_layer': self.info_current_layer}
         }
