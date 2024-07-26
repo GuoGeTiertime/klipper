@@ -30,9 +30,6 @@ class Feeder:  # Heater:
         self.bfeeder_on = False    # feeder on/off
         self.bInited = False    # feeder inited, has send the filament to the nozzle.
 
-        # runout helper, use the filament_switch_sensor.py's RunoutHelper class.
-        self.runout_helper = filament_switch_sensor.RunoutHelper(config)
-
         # fila length runout check, need extruder object and runout_length
         self.extruder_name = config.get('extruder', None)
 
@@ -109,8 +106,6 @@ class Feeder:  # Heater:
         self.dir.setup_max_duration(0.)
         self.stepenable = ppins.setup_pin('digital_out', enable_pin)
         self.stepenable.setup_max_duration(0.)
-        self.last_dirtime = 0.0
-        self.last_pulsetime = 0.0
 
         # setup stepper microstep and rotate distance.
         self.microstep = config.getint('microstep', 16, minval=1, maxval=256)
@@ -159,12 +154,13 @@ class Feeder:  # Heater:
         # test command: SET_FEEDER_DISTANCE FEEDER=feeder0 TARGET=1.23
 
     def _handle_ready(self):
+        self.toolhead = self.printer.lookup_object('toolhead')
         self.extruder = self.printer.lookup_object(self.extruder_name, None)
         # self.estimated_print_time = (
         #         self.printer.lookup_object('mcu').estimated_print_time)
         # self._update_filament_runout_pos()
         # self._extruder_pos_update_timer = self.reactor.register_timer(
-        #         self._extruder_pos_update_event)
+        #             self._extruder_pos_update_event)
 
     def _loginfo(self, msg, logflag=None):
         if logflag is None:
@@ -188,6 +184,25 @@ class Feeder:  # Heater:
             eventtime = self.reactor.monotonic()
         self.runout_pos = self._get_extruder_pos(eventtime) + self.runout_length
 
+    # exec gcode template after runout/insert/break/jam/slip event.
+    def _exec_gcode(self, script_template, now=False):
+        if now:
+            script_template.run_gcode_from_command()
+        else:
+            try:
+                self.gcode.run_script( script_template.render() )
+            except Exception:
+                self._loginfo("Feeder script running error", 3)
+
+    def _insert_handler(self, eventtime):
+        self._exec_gcode(self.insert_gcode, now=True)
+    def _runout_handler(self, eventtime):
+        self._exec_gcode(self.runout_gcode)
+    def _jam_break_handler(self, eventtime):
+        self._exec_gcode(self.jam_break_gcode)
+    def _slip_handler(self, eventtime):
+        self._exec_gcode(self.slip_gcode)
+
     def _cal_step_cycle_time(self, speed):
         freq = speed * self.scale_speed2freq
         return 1.0 / freq if freq > 0 else 0.1
@@ -200,7 +215,7 @@ class Feeder:  # Heater:
         cycle_ticks = mcu.seconds_to_clock(cycle_time)
         cmd = "set_digital_out_pwm_cycle oid=%d cycle_ticks=%d" % (self.step._oid, cycle_ticks)
         mcu._serial.send(cmd)  # set the cycle time of step pin.
-        self._loginfo("send command:" + cmd)
+        self._loginfo("send step_cycle_tim command:" + cmd)
 
     # feed filament len at speed
     def feed_filament(self, print_time, speed, len): # set feed len with speed. value is the length to feed.
@@ -224,7 +239,7 @@ class Feeder:  # Heater:
             self.enable_stepper(False)
             if self.bInited :
                if self.isprinting(): # exec slip gcode when printing.
-                   self._exec_gcode(self.slip_gcode)
+                   self.reactor.register_callback(self._slip_handler)    
             else:
                 self._loginfo("Can't feed filament to nozzle, fila feeder initialize failed, please check the feeder, filament and extruder.", 3)
 
@@ -263,46 +278,37 @@ class Feeder:  # Heater:
         self.last_feed_time = print_time
         self.next_feed_time = print_time + feed_time  # set the next feed time as now + feed time.
 
-
         # log info for debug
         self._loginfo("feeder %s feed_filament: %.3fmm @ %.3fmm/s, freq:%.3fkHz, period:%.3fms, feed time:%.3f, curlen:%.2f, total lenght:%.2f" % 
                       (self.name, len, speed, 0.001/cycle_time, cycle_time*1000, feed_time, self.cur_feed_len, self.total_feed_len))
         return len
 
     def set_dir(self, print_time, value):
-        print_time = max(print_time, self.last_dirtime + MIN_DIRPULSE_TIME)
-        self.last_dirtime = print_time
-        self.dir.set_digital(print_time, value)
-        # toolhead = self.printer.lookup_object('toolhead')
-        # toolhead.register_lookahead_callback(
-        #     lambda print_time: self.dir.set_digital(print_time, value))
+        # print_time = max(print_time, self.last_dirtime + MIN_DIRPULSE_TIME)
+        # self.last_dirtime = print_time
+        # self.dir.set_digital(print_time, value)
+        # use lookahead_callback() is safe than set_digital() directly.
+        self.toolhead.register_lookahead_callback(
+            lambda print_time: self.dir.set_digital(print_time, value))
 
     def enable_stepper(self, bOn):
         self.bfeeder_on = not not bOn
-        curtime = self.reactor.monotonic()
-        print_time = self.step.get_mcu().estimated_print_time(curtime) + PINOUT_DELAY
-        self.stepenable.set_digital(print_time, 1 if bOn else 0)
-        # toolhead = self.printer.lookup_object('toolhead')
-        # toolhead.register_lookahead_callback(
-        #     lambda print_time: self.stepenable.set_digital(print_time, 1 if bOn else 0) )
+        # curtime = self.reactor.monotonic()
+        # print_time = self.step.get_mcu().estimated_print_time(curtime) + PINOUT_DELAY
+        # self.stepenable.set_digital(print_time, 1 if bOn else 0)
+        # use lookahead_callback() is safe than set_digital() directly.
+        self.toolhead.register_lookahead_callback(
+            lambda print_time: self.stepenable.set_digital(print_time, 1 if bOn else 0) )
         self._loginfo("feeder %s is %s" % (self.name, "enabled" if bOn else "disabled") )
-        # toolhead = self.printer.lookup_object('toolhead')
-        # toolhead.register_lookahead_callback(
-        #     lambda print_time: self.stepenable.set_digital(print_time, value))
-
-    # debug, not used. show set_pwm()'s call times and value
-    # def _set_pulse(self, print_time, value, cycle_time):
-    #     self.step.set_pwm(print_time, value, cycle_time)
-    #     # self._loginfo("feeder %s set cycle time: %.6fs @ %.3f" % (self.name, cycle_time, print_time))
         
     def set_pulse(self, print_time, value, cycle_time):
-        print_time = max(print_time, self.last_pulsetime + MIN_DIRPULSE_TIME)
-        self.last_pulsetime = print_time
+        # print_time = max(print_time, self.last_pulsetime + MIN_DIRPULSE_TIME)
+        # self.last_pulsetime = print_time
         self._set_step_cycle_time(cycle_time)
-        self.step.set_pwm(print_time, value) #, cycle_time)
-        # toolhead = self.printer.lookup_object('toolhead')
-        # toolhead.register_lookahead_callback(
-        #     lambda print_time: self.step.set_pwm(print_time, value, cycle_time))
+        # self.step.set_pwm(print_time, value) #, cycle_time)
+        # use lookahead_callback() is safe than set_pwm() directly.
+        self.toolhead.register_lookahead_callback(
+            lambda print_time: self.step.set_pwm(print_time, value))
 
     # Determine "printing" status
     def isprinting(self):
@@ -314,13 +320,6 @@ class Feeder:  # Heater:
         self.reactor.update_timer(self._switch_update_timer, self.reactor.NOW)
         return
     
-    def _exec_gcode(self, script_template):        
-        try:
-            self.gcode.run_script( script_template.render() )
-        except Exception:
-            self._loginfo("Feeder script running error", 3)
-        # script_template.run_gcode_from_command()
-
     # checked if fila is in the feeder
     def _check_filament(self, eventtime, state):
         if self._fila_state == state:
@@ -329,15 +328,15 @@ class Feeder:  # Heater:
         self._fila_state = state
         if self._fila_state: # fila is inserted into the feeder
             self._loginfo("feeder: %s fila inserted, begin sending, reset inited flag to False" % self.name)
-            # self._exec_gcode(self.insert_gcode) 
-            self._switch_handler(eventtime, self._switch_state)
-            self.enable_stepper(True)
-            self.bInited = False    # reset the inited flag forcelly.
+            self.reactor.register_callback(self._insert_handler)
+            # self._switch_handler(eventtime, self._switch_state)
+            # self.enable_stepper(True)
+            # self.bInited = False    # reset the inited flag forcelly.
         else:
             self.enable_stepper(False)
             self._loginfo("feeder: %s fila is removed, stop feeding" % self.name)
             if self.isprinting(): # exec runout gcode when printing.
-                self._exec_gcode(self.runout_gcode) 
+                self.reactor.register_callback(self._runout_handler)
 
     # update feeder when the feeder's switch is pressed or released.
     def _switch_handler(self, eventtime, state):
@@ -352,6 +351,12 @@ class Feeder:  # Heater:
             self._loginfo("feeder %s switch released" % self.name)
 
     def _switch_update_event(self, eventtime):
+        # check nozzle jam or feed failed when the extruder is working.
+        if self.isprinting() and self.bInited:
+            extruderpos = self._get_extruder_pos(eventtime)
+            if extruderpos > self.runout_pos:
+                self._loginfo("feeder %s nozzle jam or feed failed, stop feeding" % self.name, 3)
+                self.reactor.register_callback(self._jam_break_handler)
         if self._switch_state ^ self.switch_invert: # switch pressed, continue feed filament.
             speed = self.feed_speed if self.bInited else self.feed_speed_init
             self.feed_filament(eventtime, speed, self.switch_feed_len)
@@ -362,13 +367,7 @@ class Feeder:  # Heater:
                 self._loginfo("feeder %s init feed finished, set bInited:%d" % (self.name, self.bInited), 3)
 
         next_time = min(eventtime + self.feed_delay, self.next_feed_time)
-        next_time = max(next_time, eventtime + 0.1) # at least 0.1s.
-
-        # check nozzle jam or feed failed when the extruder is working.
-        if self.isprinting() and self.bInited:
-            extruderpos = self._get_extruder_pos(eventtime)
-            if extruderpos > self.runout_pos:
-                self._exec_gcode(self.jam_break_gcode)
+        next_time = max(next_time, eventtime + 0.2) # at least 0.2s.
 
         return next_time
 
@@ -708,18 +707,16 @@ class FilaFeeders:  # PrinterHeaters:
         # Helper to wait on feeder.check_busy() and report M135 Feeder distance
         if self.printer.get_start_args().get('debugoutput') is not None:
             return
-        toolhead = self.printer.lookup_object("toolhead")
         gcode = self.printer.lookup_object("gcode")
         reactor = self.printer.get_reactor()
         eventtime = reactor.monotonic()
         while not self.printer.is_shutdown() and feeder.check_busy(eventtime):
-            print_time = toolhead.get_last_move_time()
+            print_time = self.toolhead.get_last_move_time()
             gcode.respond_raw(self._get_dis(eventtime))
             eventtime = reactor.pause(eventtime + 1.)
 
     def set_distance(self, feeder, dis, wait=False):
-        # toolhead = self.printer.lookup_object('toolhead')
-        # toolhead.register_lookahead_callback((lambda pt: None))
+        # self.toolhead.register_lookahead_callback((lambda pt: None))
         feeder.set_distance(dis)
         if wait and dis:
             self._wait_for_distance(feeder)
@@ -740,14 +737,13 @@ class FilaFeeders:  # PrinterHeaters:
             sensor = self.feeders[sensor_name]
         else:
             sensor = self.printer.lookup_object(sensor_name)
-        toolhead = self.printer.lookup_object("toolhead")
         reactor = self.printer.get_reactor()
         eventtime = reactor.monotonic()
         while not self.printer.is_shutdown():
             dis, target = sensor.get_distance(eventtime)
             if dis >= min_dis and dis <= max_dis:
                 return
-            print_time = toolhead.get_last_move_time()
+            print_time = self.toolhead.get_last_move_time()
             gcmd.respond_raw(self._get_dis(eventtime))
             eventtime = reactor.pause(eventtime + 1.)
 
