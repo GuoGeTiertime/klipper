@@ -29,6 +29,7 @@ class Feeder:  # Heater:
         self.lock = threading.Lock()
         self.bfeeder_on = False    # feeder on/off
         self.bInited = False    # feeder inited, has send the filament to the nozzle.
+        self.bWithdraw = False  # withdraw the filament.
 
         # fila length runout check, need extruder object and runout_length
         self.extruder_name = config.get('extruder', None)
@@ -115,8 +116,6 @@ class Feeder:  # Heater:
 
         self.feed_speed = config.getfloat('feed_speed', 10.0, minval=1, maxval=100.0) # unit: mm/s, default 10mm/s.
         self.feed_speed_init = config.getfloat('feed_speed_init', self.feed_speed * 2.0, minval=1, maxval=200.0) 
-
-        self.switch_invert = False # switch signal invert, for init feeding.
 
         self.isloginfo = 0  # 0: no log, 1:gcode response, 2: write log file, 3: response and write log file 
         
@@ -246,6 +245,9 @@ class Feeder:  # Heater:
         if not self.bfeeder_on or abs(len) < self.min_feed_len:
             len = 0.0
 
+        if self.bWithdraw:
+            len = -len
+
         # set dir pin
         self.set_dir(print_time, 1 if len > 0 else 0)
 
@@ -345,8 +347,8 @@ class Feeder:  # Heater:
 
     # update feeder when the feeder's switch is pressed or released.
     def _switch_handler(self, eventtime, state):
-        self._switch_state = state
-        if state ^ self.switch_invert: # switch on, pressed
+        self._switch_state = not not state
+        if state ^ self.bWithdraw: # switch on, pressed
             speed = self.feed_speed if self.bInited else self.feed_speed_init
             self.feed_filament(eventtime, speed, self.switch_feed_len)
             self._loginfo("feeder %s switch pressed" % self.name)
@@ -357,12 +359,14 @@ class Feeder:  # Heater:
 
     def _switch_update_event(self, eventtime):
         # check nozzle jam or feed failed when the extruder is working.
-        if self.isprinting() and self.bInited:
+        if self.isprinting() and self.bInited and not self.bWithdraw:
             extruderpos = self._get_extruder_pos(eventtime)
             if extruderpos > self.runout_pos:
                 self._loginfo("feeder %s nozzle jam or feed failed, stop feeding" % self.name, 3)
                 self.reactor.register_callback(self._jam_break_handler)
-        if self._switch_state ^ self.switch_invert: # switch pressed, continue feed filament.
+
+        triggered = self._switch_state ^ self.bWithdraw
+        if triggered: # switch pressed, continue feed filament.
             speed = self.feed_speed if self.bInited else self.feed_speed_init
             self.feed_filament(eventtime, speed, self.switch_feed_len)
         elif self.is_feeding: # switch released, stop feed filament.
@@ -459,9 +463,9 @@ class Feeder:  # Heater:
     cmd_FEED_IN_help = "Begin feed filament, send to the nozzle."
     def cmd_FEED_IN(self, gcmd):
         self.max_feed_len = gcmd.get_float('MAX_LEN', self.max_feed_len, minval=1.0)
-        self.switch_invert = gcmd.get_int('INVERT', 0)
         self.feed_speed = gcmd.get_float('SPEED', self.feed_speed, minval=1.0)
         self.switch_feed_len = gcmd.get_float('FEED_LEN', self.switch_feed_len)
+        self.bWithdraw = not not gcmd.get_int('WITHDRAW', 0)
         init = gcmd.get_int('INIT', 0)
         enable = gcmd.get_int('ENABLE', 1)
         self.bInited = not init
