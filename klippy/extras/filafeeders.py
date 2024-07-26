@@ -241,7 +241,7 @@ class Feeder:  # Heater:
                if self.isprinting(): # exec slip gcode when printing.
                    self.reactor.register_callback(self._slip_handler)    
             else:
-                self._loginfo("Can't feed filament to nozzle, fila feeder initialize failed, please check the feeder, filament and extruder.", 3)
+                self._loginfo("Feeder %s initialize failed, check the feeder, fila, tube" % (self.name,), 3)
 
         if not self.bfeeder_on or abs(len) < self.min_feed_len:
             len = 0.0
@@ -283,32 +283,37 @@ class Feeder:  # Heater:
                       (self.name, len, speed, 0.001/cycle_time, cycle_time*1000, feed_time, self.cur_feed_len, self.total_feed_len))
         return len
 
-    def set_dir(self, print_time, value):
-        # print_time = max(print_time, self.last_dirtime + MIN_DIRPULSE_TIME)
-        # self.last_dirtime = print_time
-        # self.dir.set_digital(print_time, value)
-        # use lookahead_callback() is safe than set_digital() directly.
-        self.toolhead.register_lookahead_callback(
-            lambda print_time: self.dir.set_digital(print_time, value))
+    def set_dir(self, print_time, value, blookahead=False):
+        # use lookahead_callback() is safe than set_digital() directly. ???
+        if blookahead:
+            self.toolhead.register_lookahead_callback(
+                lambda print_time: self.dir.set_digital(print_time, value))
+        else:
+            # print_time = max(print_time, self.last_dirtime + MIN_DIRPULSE_TIME)
+            # self.last_dirtime = print_time
+            self.dir.set_digital(print_time, value)
 
-    def enable_stepper(self, bOn):
+    def enable_stepper(self, bOn, blookahead=False):
         self.bfeeder_on = not not bOn
-        # curtime = self.reactor.monotonic()
-        # print_time = self.step.get_mcu().estimated_print_time(curtime) + PINOUT_DELAY
-        # self.stepenable.set_digital(print_time, 1 if bOn else 0)
-        # use lookahead_callback() is safe than set_digital() directly.
-        self.toolhead.register_lookahead_callback(
-            lambda print_time: self.stepenable.set_digital(print_time, 1 if bOn else 0) )
+        if blookahead:
+            self.toolhead.register_lookahead_callback(
+                lambda print_time: self.stepenable.set_digital(print_time, 1 if bOn else 0))
+        else:
+            curtime = self.reactor.monotonic()
+            print_time = self.step.get_mcu().estimated_print_time(curtime) + PINOUT_DELAY
+            self.stepenable.set_digital(print_time, 1 if bOn else 0)
         self._loginfo("feeder %s is %s" % (self.name, "enabled" if bOn else "disabled") )
         
-    def set_pulse(self, print_time, value, cycle_time):
-        # print_time = max(print_time, self.last_pulsetime + MIN_DIRPULSE_TIME)
-        # self.last_pulsetime = print_time
+    def set_pulse(self, print_time, value, cycle_time, blookahead=False):
         self._set_step_cycle_time(cycle_time)
-        # self.step.set_pwm(print_time, value) #, cycle_time)
-        # use lookahead_callback() is safe than set_pwm() directly.
-        self.toolhead.register_lookahead_callback(
-            lambda print_time: self.step.set_pwm(print_time, value))
+        # use lookahead_callback() is safe than set_pwm() directly. ???
+        if blookahead:
+            self.toolhead.register_lookahead_callback(
+                lambda print_time: self.step.set_pwm(print_time, value, cycle_time))
+        else:
+            # print_time = max(print_time, self.last_pulsetime + MIN_DIRPULSE_TIME)
+            # self.last_pulsetime = print_time
+            self.step.set_pwm(print_time, value) #, cycle_time)
 
     # Determine "printing" status
     def isprinting(self):
