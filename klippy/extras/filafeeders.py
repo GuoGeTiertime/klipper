@@ -363,6 +363,7 @@ class Feeder:  # Heater:
             extruderpos = self._get_extruder_pos(eventtime)
             if extruderpos > self.runout_pos:
                 self._loginfo("feeder %s nozzle jam or feed failed, stop feeding" % self.name, 3)
+                self.enable_stepper(False)
                 self.reactor.register_callback(self._jam_break_handler)
 
         triggered = self._switch_state ^ self.bWithdraw
