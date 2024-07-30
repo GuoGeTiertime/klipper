@@ -281,6 +281,17 @@ class PrinterHeaters:
     def add_sensor_factory(self, sensor_type, sensor_factory):
         self.sensor_factories[sensor_type] = sensor_factory
     def setup_heater(self, config, gcode_id=None):
+
+        if config.getboolean('optional', False): # add 20240731
+            # test mcu is exist by Parse pins
+            try:
+                self.printer.lookup_object('pins').parse_pin(config.get('heater_pin'))
+            except:
+                # 遍历所有options, avoid the unused options error
+                for option in config.get_prefix_options(''):
+                    config.get(option.lower())
+                return None
+
         heater_name = config.get_name().split()[-1]
         if heater_name in self.heaters:
             raise config.error("Heater %s already registered" % (heater_name,))
