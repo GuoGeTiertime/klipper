@@ -12,6 +12,22 @@ class PrinterOutputPin:
     def __init__(self, config):
         self.printer = config.get_printer()
         ppins = self.printer.lookup_object('pins')
+
+        self.isexist = True
+        optional = config.getboolean('optional', False)
+        if optional:
+            # test mcu is exist.
+            out_pin = config.get('pin')
+            try:
+                pin_params = ppins.parse_pin(out_pin)
+            except:
+                self.isexist = False
+                # 遍历所有options, avoid the unused options error
+                for option in config.get_prefix_options(''):
+                    option = option.lower()
+                    config.get(option)
+                return
+
         # Determine pin type
         self.is_pwm = config.getboolean('pwm', False)
         if self.is_pwm:
@@ -97,4 +113,5 @@ class PrinterOutputPin:
         return systime + self.resend_interval
 
 def load_config_prefix(config):
-    return PrinterOutputPin(config)
+    outpin = PrinterOutputPin(config)
+    return outpin if outpin.isexist else None
