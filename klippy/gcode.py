@@ -108,7 +108,7 @@ class GCodeDispatch:
         self.is_Stopping = False
         # Register commands needed before config file is loaded
         handlers = ['M110', 'M112', 'M115',
-                    'RESTART', 'FIRMWARE_RESTART', 'ECHO', 'STATUS', 'HELP']
+                    'RESTART', 'FIRMWARE_RESTART', 'ECHO', 'STATUS', 'HELP', 'QUERY_OBJ']
         for cmd in handlers:
             func = getattr(self, 'cmd_' + cmd)
             desc = getattr(self, 'cmd_' + cmd + '_help', None)
@@ -398,6 +398,22 @@ class GCodeDispatch:
             if cmd in self.gcode_help:
                 cmdhelp.append("%-10s: %s" % (cmd, self.gcode_help[cmd]))
         gcmd.respond_info("\n".join(cmdhelp), log=False)
+    cmd_QUERY_OBJ_help = "Report the status of objects in the printer, etc: QUERY_OBJ OBJ='probe'"
+    def cmd_QUERY_OBJ(self, gcmd):
+        objname = gcmd.get('OBJ', "printer")
+        obj = self.printer.lookup_object(objname, None)
+        if obj is None:
+            self.respond_info("Unknown object '%s'" % (objname,))
+        eventtime = self.printer.get_reactor().monotonic()
+        ret = 0
+        if hasattr(obj, 'stats'):
+            self.respond_info("obj '%s' stats: %s" % (objname, obj.stats(eventtime)))
+            ret += 1
+        if hasattr(obj, 'get_status'):
+            self.respond_info("obj '%s' get_status() return: %s" % (objname, obj.get_status(eventtime)))
+            ret += 1
+        if ret == 0:
+            self.respond_info("No status available for object '%s'" % (objname,))
 
 # Support reading gcode from a pseudo-tty interface
 class GCodeIO:
