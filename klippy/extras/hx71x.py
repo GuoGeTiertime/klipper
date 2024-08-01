@@ -264,6 +264,8 @@ class HX71X:
         self.collision_err = config.getfloat('collision_err', 0.0)
         self.collision_err_cnt = config.getfloat('collision_err_cnt', 10)
 
+        self.max_comm_err = config.getint('max_comm_err', 200)
+
         #test weight sensor is ok or stepper motor is ok
         self.test_min = config.getfloat('test_min', 100.0)
         self.test_max = config.getfloat('test_max', 1000.0)
@@ -271,6 +273,9 @@ class HX71X:
         gcode_macro = self.printer.load_object(config, 'gcode_macro')
         for i in range(4):  # max 4 test gcode
             self.test_gcode[i] =  gcode_macro.load_template(config, 'test_gcode_%d' % i, "")
+        self.collision_gcode = gcode_macro.load_template(config, 'collision_gcode', 'M118 Collision warning by weight sensor\nM112')
+        self.comm_err_gcode = gcode_macro.load_template(config, 'comm_err_gcode', 'M118 There are too many error in the weight sensor communication')
+
 
         # set gcode response time, default is 0. display the weight in gcode response.
         self.gcode_response_time = config.getfloat('gcode_response_time', 0.0)
@@ -408,6 +413,21 @@ class HX71X:
         elif logflag == 3:
             self.gcode.respond_info(msg, True) # respond to gcode and write log file.
 
+    # exec gcode template after collsion / communication error event.
+    def _exec_gcode(self, script_template, now=False):
+        if now:
+            script_template.run_gcode_from_command()
+        else:
+            try:
+                self.gcode.run_script( script_template.render() )
+            except Exception:
+                self._loginfo("hx71x %s script running error" % (self.name,), 3)
+
+    def _collision_handler(self, eventtime):
+        self._exec_gcode(self.collision_gcode, now=True)
+    def _comm_err_handler(self, eventtime):
+        self._exec_gcode(self.comm_err_gcode)
+
     def build_config(self):
         # self.read_hx71x_cmd = self.mcu.lookup_query_command(
         #     "read_hx71x oid=%c read_len=%u",
@@ -431,11 +451,19 @@ class HX71X:
 
         if value == 0 or abs(value-0x800000)<0x100:
             self._error_cnt[oid] += 1
-            if (self._error_cnt[oid] < 100) or ((self._error_cnt[oid] % 16)==0):
+            errcnt = self._error_cnt[oid]
+            if errcnt < 10 or (errcnt % 16)==0:
                 logging.info("  *** Error Senser:%s(oid:%d) can't read hx711 or data error @ %.3f, cnt:%d, value:%d(0x%X), errcnt:%d", 
-                         self.name, oid, last_read_time, self._sample_cnt[oid], value, value, self._error_cnt[oid])
+                         self.name, oid, last_read_time, self._sample_cnt[oid], value, value, errcnt)
+            if errcnt == self.max_comm_err -10:
+                logging.info("hx71x (oid:%d) communication errors(%d) is near max(%d)" % (oid, errcnt, self.max_comm_err))
+            elif errcnt == self.max_comm_err:
+                logging.info("hx71x (oid:%d) communication errors(%d) is reach max(%d), run communication error script" % (oid, errcnt, self.max_comm_err))
+                self.reactor.register_callback(self._comm_err_handler) # run script by callback function
             return
-                
+        else:
+            self._error_cnt[oid] = max(0, self._error_cnt[oid]-1)
+
         self.weight[oid] = value * self.scale  # weight scale
         self.read_time[oid] = last_read_time  # read time
         
@@ -462,7 +490,7 @@ class HX71X:
             if self.collision_cnt[oid] > self.collision_err_cnt:
                 msg = "Weight senser:%s(oid:%d) collision warning, weight:%.2f(%d-%X), cnt:%d. Shutdown the printer!" % (self.name, oid, self.weight[oid], value, value, self.collision_cnt[oid])
                 self._loginfo(msg, 3) #log info at command line and log file
-                self.gcode.run_script_from_command("M112")  # emergency stop
+                self.reactor.register_callback(self._collision_handler) # run script by callback function
         else:
             self.collision_cnt[oid] = max(0, self.collision_cnt[oid]-1)
 
