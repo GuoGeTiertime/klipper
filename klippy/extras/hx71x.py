@@ -275,7 +275,9 @@ class HX71X:
             self.test_gcode[i] =  gcode_macro.load_template(config, 'test_gcode_%d' % i, "")
         self.collision_gcode = gcode_macro.load_template(config, 'collision_gcode', 'M118 Collision warning by weight sensor\nM112')
         self.comm_err_gcode = gcode_macro.load_template(config, 'comm_err_gcode', 'M118 There are too many error in the weight sensor communication')
-
+        self.gcode_interval = config.getfloat('gcode_interval', 20.0)
+        self.last_collision_time = 0
+        self.last_comm_err_time = 0
 
         # set gcode response time, default is 0. display the weight in gcode response.
         self.gcode_response_time = config.getfloat('gcode_response_time', 0.0)
@@ -455,11 +457,14 @@ class HX71X:
             if errcnt < 10 or (errcnt % 16)==0:
                 logging.info("  *** Error Senser:%s(oid:%d) can't read hx711 or data error @ %.3f, cnt:%d, value:%d(0x%X), errcnt:%d", 
                          self.name, oid, last_read_time, self._sample_cnt[oid], value, value, errcnt)
-            if errcnt == self.max_comm_err -10:
+            if last_read_time < self.last_comm_err_time + self.gcode_interval :
+                self._error_cnt[oid] = 0  # clear err cnt in interval time.
+            elif errcnt == self.max_comm_err -10:
                 logging.info("hx71x (oid:%d) communication errors(%d) is near max(%d)" % (oid, errcnt, self.max_comm_err))
             elif errcnt == self.max_comm_err:
                 logging.info("hx71x (oid:%d) communication errors(%d) is reach max(%d), run communication error script" % (oid, errcnt, self.max_comm_err))
                 self.reactor.register_callback(self._comm_err_handler) # run script by callback function
+                self.last_comm_err_time = last_read_time
             return
         else:
             self._error_cnt[oid] = max(0, self._error_cnt[oid]-1)
@@ -485,12 +490,15 @@ class HX71X:
                          (self.name, oid, last_read_time, self.weight[oid], self._sample_cnt[oid], self._sample_tare[oid], value))
             
         # collision warning test, cnt > 10 (every time +3) ,then shutdown the printer.
-        if self.collision_err > 0 and abs(self.weight[oid]) > self.collision_err:
+        bActive = last_read_time > self.last_collision_time + self.gcode_interval # avoid run gcode too many times.
+        if bActive and self.collision_err > 0 and abs(self.weight[oid]) > self.collision_err:
             self.collision_cnt[oid] += 3
             if self.collision_cnt[oid] > self.collision_err_cnt:
                 msg = "Weight senser:%s(oid:%d) collision warning, weight:%.2f(%d-%X), cnt:%d. Shutdown the printer!" % (self.name, oid, self.weight[oid], value, value, self.collision_cnt[oid])
                 self._loginfo(msg, 3) #log info at command line and log file
                 self.reactor.register_callback(self._collision_handler) # run script by callback function
+                self.collision_cnt[oid] = 0
+                self.last_collision_time = last_read_time
         else:
             self.collision_cnt[oid] = max(0, self.collision_cnt[oid]-1)
 
