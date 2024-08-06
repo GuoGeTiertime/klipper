@@ -15,6 +15,7 @@ class PrintStats:
         self.operate_flag = ""
         self.printstep_msg = ""
         self.printstep_cnt = 0
+        self.prompt_msg = ""
         # Register commands
         self.gcode = printer.lookup_object('gcode')
         self.gcode.register_command(
@@ -28,6 +29,8 @@ class PrintStats:
                                     desc=self.cmd_SET_OPERATE_FLAG_help)
         self.gcode.register_command("SET_PRINT_STEP", self.cmd_SET_PRINT_STEP,
                                     desc=self.cmd_SET_PRINT_STEP_help)
+        self.gcode.register_command("SET_UI_PROMPT", self.cmd_SET_UI_PROMPT,
+                                    desc=self.cmd_SET_UI_PROMPT_help)
     def _update_filament_usage(self, eventtime):
         gc_status = self.gcode_move.get_status(eventtime)
         cur_epos = gc_status['position'].e
@@ -111,6 +114,9 @@ class PrintStats:
             self.printstep_msg = "%d. %s" % (self.printstep_cnt, gcmd.get('MSG', ""))
         else:
             self.printstep_msg = gcmd.get('MSG', "")
+    cmd_SET_UI_PROMPT_help = ("Show prompt on Screen")
+    def cmd_SET_UI_PROMPT(self, gcmd):
+            self.prompt_msg = gcmd.get('MSG', "")
 
     def reset(self):
         self.filename = self.error_message = ""
@@ -146,6 +152,7 @@ class PrintStats:
             'cancel_flag': self.cancel_flag,
             'operate_flag': self.operate_flag,
             'printstep_msg': self.printstep_msg,
+            'prompt_msg': self.prompt_msg,
             'info': {'total_layer': self.info_total_layer,
                      'current_layer': self.info_current_layer}
         }
