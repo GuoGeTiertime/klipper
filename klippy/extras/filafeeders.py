@@ -40,7 +40,8 @@ class Feeder:  # Heater:
         buttons = self.printer.load_object(config, 'buttons')
         fila_pin = config.get('fila_pin')
         buttons.register_buttons([fila_pin], self._check_filament)
-        self._fila_state = True # fila is inserted.
+        self._fila_state = False # fila is inserted.
+        self.starttime = None
 
         switch_pin = config.get('switch_pin')
         if switch_pin is not None:
@@ -155,6 +156,7 @@ class Feeder:  # Heater:
     def _handle_ready(self):
         self.toolhead = self.printer.lookup_object('toolhead')
         self.extruder = self.printer.lookup_object(self.extruder_name, None)
+        self.starttime = self.reactor.monotonic()
         # self.estimated_print_time = (
         #         self.printer.lookup_object('mcu').estimated_print_time)
         # self._update_filament_runout_pos()
@@ -329,10 +331,16 @@ class Feeder:  # Heater:
     
     # checked if fila is in the feeder
     def _check_filament(self, eventtime, state):
+        self._loginfo("update fila state by check_fila(), feeder %s fila state:%d" % (self.name, state))
         if self._fila_state == state:
             return
 
         self._fila_state = state
+
+        # Do nothing when first time update when system startup. 
+        if self.starttime is None or eventtime - self.starttime < 2.0:
+            return
+
         if self._fila_state: # fila is inserted into the feeder
             self._loginfo("feeder: %s fila inserted, begin sending, reset inited flag to False" % self.name)
             self.reactor.register_callback(self._insert_handler)
