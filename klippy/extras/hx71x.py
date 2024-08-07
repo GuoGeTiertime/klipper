@@ -131,6 +131,8 @@ class HX71X_endstop:
         #     return -1.
         # if res[0] != etrsync.REASON_ENDSTOP_HIT:
         #     return 0.
+        if self._hx71x.isCommErr:
+            raise self._hx71x.printer.command_error( "HX71X communication error during homing")
         if not self.bTouched:
             return 0
         
@@ -262,9 +264,9 @@ class HX71X:
 
         # set collision warning value for endstop or z motor collision
         self.collision_err = config.getfloat('collision_err', 0.0)
-        self.collision_err_cnt = config.getfloat('collision_err_cnt', 10)
+        self.collision_err_cnt = config.getfloat('collision_err_cnt', 10) #每次+3,实际3次左右.
 
-        self.max_comm_err = config.getint('max_comm_err', 200)
+        self.max_comm_err = config.getint('max_comm_err', 20) # 默认连续20次出错报警.
 
         #test weight sensor is ok or stepper motor is ok
         self.test_min = config.getfloat('test_min', 100.0)
@@ -275,9 +277,10 @@ class HX71X:
             self.test_gcode[i] =  gcode_macro.load_template(config, 'test_gcode_%d' % i, "")
         self.collision_gcode = gcode_macro.load_template(config, 'collision_gcode', 'M118 Collision warning by weight sensor\nM112')
         self.comm_err_gcode = gcode_macro.load_template(config, 'comm_err_gcode', 'M118 There are too many error in the weight sensor communication')
-        self.gcode_interval = config.getfloat('gcode_interval', 20.0)
+        self.gcode_interval = config.getfloat('gcode_interval', 20.0, minval=1.0, maxval=600.0)
         self.last_collision_time = 0
-        self.last_comm_err_time = 0
+        self.last_comm_err_time = -10000
+        self.isCommErr = False
 
         # set gcode response time, default is 0. display the weight in gcode response.
         self.gcode_response_time = config.getfloat('gcode_response_time', 0.0)
@@ -442,6 +445,13 @@ class HX71X:
                 (oid, ticks, self._sample_times, self.pulse_cnt))
             self.mcu.register_response(self._handle_hx71x_state, "hx71x_state", oid)
 
+    def _endstop_trigger(self, last_read_time):
+        if (self._endstop is not None) and self._endstop.bHoming:
+            # call endstop trigger function.
+            if self.is_endstop_on():
+                self._endstop.deformation = 0.1 * self.total_weight / self.endstop_deformation
+                self._endstop.trigger(last_read_time - self.endstop_trigger_delay)
+
     def _handle_hx71x_state(self, params):
         oid = params['oid']
         value = params['value']
@@ -459,15 +469,21 @@ class HX71X:
                          self.name, oid, last_read_time, self._sample_cnt[oid], value, value, errcnt)
             if last_read_time < self.last_comm_err_time + self.gcode_interval :
                 self._error_cnt[oid] = 0  # clear err cnt in interval time.
-            elif errcnt == self.max_comm_err -10:
+            elif errcnt == self.max_comm_err - 3:
                 logging.info("hx71x (oid:%d) communication errors(%d) is near max(%d)" % (oid, errcnt, self.max_comm_err))
             elif errcnt == self.max_comm_err:
                 logging.info("hx71x (oid:%d) communication errors(%d) is reach max(%d), run communication error script" % (oid, errcnt, self.max_comm_err))
                 self.reactor.register_callback(self._comm_err_handler) # run script by callback function
                 self.last_comm_err_time = last_read_time
+                self.isCommErr = True
+            if self.isCommErr:  # force set endstop on when communication error reach max.
+                self._endstop_trigger(last_read_time)
             return
         else:
             self._error_cnt[oid] = max(0, self._error_cnt[oid]-1)
+            # rest err flag after interval time.
+            if self.isCommErr and last_read_time > self.last_comm_err_time + self.gcode_interval:
+                self.isCommErr = False
 
         self.weight[oid] = value * self.scale  # weight scale
         self.read_time[oid] = last_read_time  # read time
@@ -552,14 +568,12 @@ class HX71X:
         #         self._loginfo(msg)
 
         # timer interval is short when homing
-        if (self._endstop is not None) and self._endstop.bHoming:
-            # call endstop trigger function.
-            if self.is_endstop_on():
-                self._endstop.deformation = 0.1 * self.total_weight / self.endstop_deformation
-                self._endstop.trigger(last_read_time - self.endstop_trigger_delay)
+        self._endstop_trigger(last_read_time)
 
     # compare the total weight with threshold, if total weight is bigger than it, return True.
     def is_endstop_on(self):
+        if self.isCommErr :  # force set endstop on.
+            return True
         if self.total_weight > self.endstop_threshold:
             # prev weight should less than threshold, or the weight is bigger than threshold2.
             if self.prev_weight<self.endstop_threshold:
