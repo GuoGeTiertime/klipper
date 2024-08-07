@@ -136,7 +136,7 @@ long HX711_Read(struct hx71x_s *dev)
     while ( gpio_in_read(dev->dt_in) )
     {
         hx71x_udelay(1);
-        if (nCnt++> 10 * 1000) //max 10ms.
+        if (nCnt++> 1 * 1000) //max 1ms.
             return 0;
     }
 
