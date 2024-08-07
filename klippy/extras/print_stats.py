@@ -16,6 +16,7 @@ class PrintStats:
         self.printstep_msg = ""
         self.printstep_cnt = 0
         self.prompt_msg = ""
+        self.prompt_idx = 0
         # Register commands
         self.gcode = printer.lookup_object('gcode')
         self.gcode.register_command(
@@ -116,7 +117,10 @@ class PrintStats:
             self.printstep_msg = gcmd.get('MSG', "")
     cmd_SET_UI_PROMPT_help = ("Show prompt on Screen")
     def cmd_SET_UI_PROMPT(self, gcmd):
+            self.prompt_idx += 1
             self.prompt_msg = gcmd.get('MSG', "")
+            if len(self.prompt_msg) > 0 and self.prompt_idx % 2 == 0:
+                self.prompt_msg += " "
 
     def reset(self):
         self.filename = self.error_message = ""
