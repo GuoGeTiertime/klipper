@@ -129,6 +129,7 @@ class PrinterSkew:
         if gcmd.get_int("CLEAR", 0):
             self._update_skew_shrink(0., 0., 0., 1., 1., 1.)
             return
+        bRecursion = gcmd.get_int("RECURSION", 0)
         planes = ["XY", "XZ", "YZ"]
         for plane in planes:
             lengths = gcmd.get(plane, None)
@@ -143,7 +144,10 @@ class PrinterSkew:
                         "skew_correction: improperly formatted entry for "
                         "plane [%s]\n%s" % (plane, gcmd.get_commandline()))
                 factor = plane.lower() + '_factor'
-                setattr(self, factor, calc_skew_factor(*lengths))
+                prev_factor = 0.0
+                if bRecursion:
+                    prev_factor = getattr(self, factor)
+                setattr(self, factor, prev_factor + calc_skew_factor(*lengths))
         axes = ["XX", "YY", "ZZ"]
         for axis in axes:
             lengths = gcmd.get(axis, None)
@@ -158,7 +162,10 @@ class PrinterSkew:
                         "shrink_correction: improperly formatted entry for "
                         "axis [%s]\n%s" % (axis, gcmd.get_commandline()))
                 factor = axis.lower() + '_factor'
-                setattr(self, factor, calc_shrink_factor(*lengths))
+                prev_factor = 1.0
+                if bRecursion:
+                    prev_factor = getattr(self, factor)
+                setattr(self, factor, prev_factor * calc_shrink_factor(*lengths))
     cmd_SKEW_PROFILE_help = "Profile management for skew_correction"
     def cmd_SKEW_PROFILE(self, gcmd):
         if gcmd.get('LOAD', None) is not None:
