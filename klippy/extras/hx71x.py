@@ -464,7 +464,7 @@ class HX71X:
         if value == 0 or abs(value-0x800000)<0x100:
             self._error_cnt[oid] += 1
             errcnt = self._error_cnt[oid]
-            if errcnt < 10 or (errcnt % 16)==0:
+            if errcnt < 4 or (errcnt % 4)==0:
                 logging.info("  *** Error Senser:%s(oid:%d) can't read hx711 or data error @ %.3f, cnt:%d, value:%d(0x%X), errcnt:%d", 
                          self.name, oid, last_read_time, self._sample_cnt[oid], value, value, errcnt)
             if last_read_time < self.last_comm_err_time + self.gcode_interval :
@@ -480,7 +480,7 @@ class HX71X:
                 self._endstop_trigger(last_read_time)
             return
         else:
-            self._error_cnt[oid] = max(0, self._error_cnt[oid]-1)
+            self._error_cnt[oid] = max(0, self._error_cnt[oid]-2)
             # rest err flag after interval time.
             if self.isCommErr and last_read_time > self.last_comm_err_time + self.gcode_interval:
                 self.isCommErr = False

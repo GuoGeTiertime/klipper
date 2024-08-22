@@ -299,9 +299,9 @@ class ProbeSessionHelper:
         #                                     self._handle_home_rails_begin)
         # self.printer.register_event_handler("homing:home_rails_end",
         #                                     self._handle_home_rails_end)
-        # # Register event handlers
-        # self.printer.register_event_handler("gcode:command_error",
-        #                                     self._handle_command_error)
+        # Register event handlers
+        self.printer.register_event_handler("gcode:command_error",
+                                            self._handle_command_error)
     def _handle_command_error(self):
         if self.multi_probe_pending:
             try:
@@ -392,7 +392,6 @@ class ProbeSessionHelper:
             z_positions = [p[2] for p in positions]
             if max(z_positions)-min(z_positions) > params['samples_tolerance']:
                 if retries >= params['samples_tolerance_retries']:
-                    self.multi_probe_pending = False
                     raise gcmd.error("Probe samples exceed samples_tolerance")
                 gcmd.respond_info("Probe samples exceed tolerance. Retrying...")
                 retries += 1
