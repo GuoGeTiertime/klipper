@@ -352,8 +352,11 @@ class VirtualSD:
             self.print_stats.note_pause()
         else:
             self.print_stats.note_complete()
-            self.gcode.run_script_from_command("AUTO_PREPARENEXT")
-            self.gcode.run_script_from_command("AUTO_STARTNEXT FLAG=4")
+            # print next job if autoprint is enabled
+            obj = self.printer.lookup_object('autoprint', None)
+            if obj is not None:
+                self.gcode.run_script_from_command("AUTO_PREPARENEXT")
+                self.gcode.run_script_from_command("AUTO_STARTNEXT FLAG=4")
         return self.reactor.NEVER
 
 def load_config(config):
