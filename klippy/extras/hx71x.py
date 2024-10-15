@@ -268,6 +268,14 @@ class HX71X:
 
         self.max_comm_err = config.getint('max_comm_err', 20) # 默认连续20次出错报警.
 
+        # 采样滤波参数,采样次数
+        self._filter_times = config.getint('filter_times', 10)
+        self._filter_delay_times = config.getint('filter_delay_times', 20)
+        self._filter_store_times = self._filter_times + self._filter_delay_times  #存储滤波数据的次数等于滤波次数+延迟次数
+        self._filter_values = []
+        self._filter_cur_Values = 0.0
+        # self._filter_prev_Values = 0.0
+
         #test weight sensor is ok or stepper motor is ok
         self.test_min = config.getfloat('test_min', 100.0)
         self.test_max = config.getfloat('test_max', 1000.0)
@@ -347,6 +355,7 @@ class HX71X:
         self.total_weight = self.total_weight_min = self.total_weight_max = 0.0
         self.measured_min = 9999999.0
         self.measured_max = -9999999.0
+        self._filter_values.clear()
 
     cmd_RESPONSE_WEIGHT_help = "Set the GCode respose time of the weight sensor, paramters: TIME, THRESHOLD, REPORT"
     def cmd_RESPONSE_WEIGHT(self, gcmd):
@@ -533,6 +542,8 @@ class HX71X:
         self.total_weight_min = min(self.total_weight_min, self.total_weight)
         self.total_weight_max = max(self.total_weight_max, self.total_weight)
 
+        self._push_filter_value(self.total_weight)
+
         # use total weight as temperature.
         self.last_temp = self.total_weight
         self.measured_min = min(self.measured_min, self.last_temp)
@@ -570,18 +581,41 @@ class HX71X:
         # timer interval is short when homing
         self._endstop_trigger(last_read_time)
 
+    def _push_filter_value(self, weight):
+        if len(self._filter_values) >= self._filter_store_times:
+            self._filter_values.pop(0)  # remove the first element.
+        self._filter_values.append(weight)
+
+    def _cal_filter_value(self):
+        # calculate the average value of filter values.
+        total = 0.0
+        n = min(len(self._filter_values), self._filter_times)
+        for i in range(n):
+            total += self._filter_values[i]
+        self._filter_cur_Values = total / n if n > 0 else 0.0
+
     # compare the total weight with threshold, if total weight is bigger than it, return True.
     def is_endstop_on(self):
         if self.isCommErr :  # force set endstop on.
             return True
-        if self.total_weight > self.endstop_threshold:
-            # prev weight should less than threshold, or the weight is bigger than threshold2.
-            if self.prev_weight<self.endstop_threshold:
+        
+        if self._filter_times > 0: # use filter value to compare.
+            self._cal_filter_value()
+            if (self.total_weight - self._filter_cur_Values) > self.endstop_threshold:
                 return True
             if self.total_weight > self.endstop_max:
-                self._loginfo("  ***** Error, weight is over endstop_max, weight:%.2f, max:%.2f, bHoming:%d" % (self.total_weight, self.endstop_max, self._endstop.bHoming))
+                self._loginfo("  ***** Error, weight is over endstop_max, weight:%.2f, max:%.2f" % (self.total_weight, self.endstop_max))
                 return True
-        return False
+            return False
+        else:   # use absolute weight to compare.
+            if self.total_weight > self.endstop_threshold:
+                # prev weight should less than threshold, or the weight is bigger than threshold2.
+                if self.prev_weight<self.endstop_threshold:
+                    return True
+                if self.total_weight > self.endstop_max:
+                    self._loginfo("  ***** Error, weight is over endstop_max, weight:%.2f, max:%.2f, bHoming:%d" % (self.total_weight, self.endstop_max, self._endstop.bHoming))
+                    return True
+            return False
 
     # def read_hx71x(self, read_len):
     #     return self.read_hx71x_cmd.send([self.oid, read_len])
