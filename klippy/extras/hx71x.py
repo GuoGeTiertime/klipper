@@ -510,9 +510,9 @@ class HX71X:
         self.weight_max[oid] = max(self.weight_max[oid], self.weight[oid])
 
         # debug log, print hx711 read value every 256 times.
-        if (self._sample_cnt[oid] < 5 or (self._sample_cnt[oid] % 256) == 0) :
-            self._loginfo("Senser:%s(oid:%d) read hx711 @ %.3f , weight:%.2f, cnt:%d, tare:%.2f, value:%d" % 
-                         (self.name, oid, last_read_time, self.weight[oid], self._sample_cnt[oid], self._sample_tare[oid], value))
+        # if (self._sample_cnt[oid] < 5 or (self._sample_cnt[oid] % 256) == 0) :
+        #     self._loginfo("Senser:%s(oid:%d) read hx711 @ %.3f , weight:%.2f, cnt:%d, tare:%.2f, value:%d" % 
+        #                  (self.name, oid, last_read_time, self.weight[oid], self._sample_cnt[oid], self._sample_tare[oid], value))
             
         # collision warning test, cnt > 10 (every time +3) ,then shutdown the printer.
         bActive = last_read_time > self.last_collision_time + self.gcode_interval # avoid run gcode too many times.
