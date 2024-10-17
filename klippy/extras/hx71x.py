@@ -375,6 +375,7 @@ class HX71X:
         self.collision_err = gcmd.get_float('COLLISION', self.collision_err, minval=0.0)
         weightThreshold = gcmd.get_float('THRESHOLD', 0.0)
         curThreshold = gcmd.get_float('CUR', 0.0)
+        motoroff_if_fail = gcmd.get_int('MOTOROFF', 1)
 
         curTime = self.mcu.estimated_print_time(self.reactor.monotonic())
         self._loginfo("Test HX71X sensor with a program(ID:%d, threshold:%.2f~%.2f, collision:%.2f) @ %.3fs" % (id, thMin, thMax,self.collision_err, curTime))
@@ -397,14 +398,20 @@ class HX71X:
         maxErr = max(abs(minDiff), abs(maxDiff))
 
         if weightThreshold > 0.0 and ( self.measured_max > weightThreshold or self.measured_min < -weightThreshold):
+            if motoroff_if_fail == 1:
+                self.gcode.run_script_from_command("M18")  # motor off
             msg = "Error, Weight sensor(HX71x) test failed, measured min: %.2f, max: %.2f, threshold: %.2f" % (self.measured_min, self.measured_max, weightThreshold)
             raise gcmd.error(msg)
 
         if curThreshold > 0.0 and abs(self.total_weight) > curThreshold:
+            if motoroff_if_fail == 1:
+                self.gcode.run_script_from_command("M18")  # motor off
             msg = "Error, Weight sensor(HX71x) test failed, cur weight: %.2f > cur threshold: %.2f" % (self.total_weight, curThreshold)
             raise gcmd.error(msg)
 
         if( maxErr < thMin or maxErr > thMax ):
+            if motoroff_if_fail == 1:
+                self.gcode.run_script_from_command("M18")  # motor off
             msg = "Error, Weight sensor(HX71x) test failed, min: %.3f, max: %.3f, (threshold: %.2f~%.2f)" % (minDiff, maxDiff, thMin, thMax)
             # self._loginfo(msg)
             raise gcmd.error(msg)
