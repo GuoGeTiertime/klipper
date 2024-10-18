@@ -48,6 +48,15 @@ class ShellCommand:
     def cmd_RUN_SHELL_COMMAND(self, params):
         gcode_params = params.get('PARAMS','')
         gcode_params = shlex.split(gcode_params)
+
+        # add by guoge 20241018, add script params. for curl command json script data.
+        # logging.info("Running Command {%s} with params {%s}" % (self.name, gcode_params))
+        script = params.get('SCRIPT','')
+        # logging.info("Running Command {%s} with script {%s}" % (self.name, script))
+        script = '{"script": "' + script + '"}'
+        gcode_params.append(script)
+        # logging.info("Running Command {%s} with params + script {%s}" % (self.name, gcode_params))
+        
         reactor = self.printer.get_reactor()
         try:
             proc = subprocess.Popen(
