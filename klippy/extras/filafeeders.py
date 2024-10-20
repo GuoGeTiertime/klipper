@@ -21,7 +21,7 @@ MIN_DIRPULSE_TIME = 0.1
 PINOUT_DELAY = 0.05 # 50ms, avoid Timer too close or Missed scheduling of next digital out event
 
 class Feeder:  # filament feeder:
-    def __init__(self, config, sensor, bVirualFeeder=False):
+    def __init__(self, config, sensor, bVirtualFeeder=False):
         self.printer = config.get_printer()
         self.reactor = self.printer.get_reactor()  # add by guoge 20231130.
         self.name = config.get_name().split()[-1]
@@ -36,14 +36,16 @@ class Feeder:  # filament feeder:
 
         self.runout_length = config.getfloat('runout_length', 100, above=1)
         self.runout_pos = 0.0   # runout position, the extruder's position when the runout happened.    
+        
+        self.feed_delay = config.getfloat('feed_delay', 0.5, minval=0.1) # check switch per delay time or check virtual feeder position.
 
-        self.bVirualFeeder = bVirualFeeder
+        self.bVirtualFeeder = bVirtualFeeder
 
         self._fila_state = False # fila is inserted.
         self._switch_state = False # released. feed switch is pressed or not, True is feeding. False is need to feed.
         self.starttime = None
 
-        if not self.bVirualFeeder:
+        if not self.bVirtualFeeder:
             buttons = self.printer.load_object(config, 'buttons')
             fila_pin = config.get('fila_pin')
             buttons.register_buttons([fila_pin], self._check_filament)
@@ -53,7 +55,6 @@ class Feeder:  # filament feeder:
                 logging.info("Add feeder %s with switch:%s", self.name, switch_pin)
                 buttons.register_buttons([switch_pin], self._switch_handler)
                 self.switch_feed_len = config.getfloat('switch_feed_len', 5, minval=0.1) # feed length when switch is pressed.
-                self.feed_delay = config.getfloat('feed_delay', 0.5, minval=0.1) # check switch per delay time
                 self._switch_update_timer = self.reactor.register_timer(self._switch_update_event)
                 self.printer.register_event_handler("klippy:connect", self.handle_connect_switch)
             elif sensor is not None:  # Setup distance sensor
@@ -104,6 +105,10 @@ class Feeder:  # filament feeder:
             full_steps = config.getint('full_steps_per_rotation', 200, minval=1) # default 200 steps per round.
             self.rotate_distance = config.getfloat('rotate_distance', 31.4, above=0.1) #defaul: the diameter is 10mm, so the rotate distance is 31.4mm.
             self.scale_speed2freq = self.microstep * full_steps / self.rotate_distance # the value freq for per mm/s.
+        
+        # add timer for virtual feeder.
+        if self.bVirtualFeeder:
+            self._virtual_update_timer = self.reactor.register_timer(self._virtual_update_event)
 
         # feed caching
         self.next_feed_time = 0.
@@ -167,6 +172,8 @@ class Feeder:  # filament feeder:
         # self._update_filament_runout_pos()
         # self._extruder_pos_update_timer = self.reactor.register_timer(
         #             self._extruder_pos_update_event)
+        if self.bVirtualFeeder:
+            self.reactor.update_timer(self._virtual_update_timer, self.reactor.NOW)
 
     def _loginfo(self, msg, logflag=None):
         if logflag is None:
@@ -225,7 +232,7 @@ class Feeder:  # filament feeder:
 
     # feed filament len at speed
     def feed_filament(self, print_time, speed, len): # set feed len with speed. value is the length to feed.
-        if self.bVirualFeeder:
+        if self.bVirtualFeeder:
             error = self.printer.command_error
             raise error("Feeder %s is virtual, can't feed filament" % self.name)
 
@@ -307,7 +314,7 @@ class Feeder:  # filament feeder:
             self.dir.set_digital(print_time, value)
 
     def enable_stepper(self, bOn, blookahead=False):
-        if self.bVirualFeeder:
+        if self.bVirtualFeeder:
             return
         
         self.bfeeder_on = not not bOn
@@ -419,6 +426,21 @@ class Feeder:  # filament feeder:
                 self.smoothed_dis = 20
         # logging.debug("feeder %s @ %.3f - distance: %f", self.name, read_time, distance)
     # External commands
+
+    # update feeder for jam or break or slip or runout event.
+    def _virtual_update_event(self, eventtime):
+        # check nozzle jam or feed failed when the extruder is working.
+        if self.isprinting():  # and self.bInited and not self.bWithdraw:
+            extruderpos = self._get_extruder_pos(eventtime)
+            if extruderpos > self.runout_pos:  # feeder length not change after extruder is moved for the runout_length.
+                self._loginfo("virtual feeder %s nozzle jam or feed failed, stop feeding" % self.name, 3)
+                self.reactor.register_callback(self._jam_break_handler)
+            self._loginfo("virtual feeder %s update event, ex pos:%.3f, runout pos:%.3f " % (self.name, extruderpos, self.runout_pos))
+        else: # update runout pos when the printer is not printing.
+            self._update_runout_pos(eventtime)
+
+        return eventtime + self.feed_delay
+
 
     def get_feed_delay(self):
         return self.feed_delay
@@ -652,7 +674,7 @@ class FilaFeeders:  # PrinterHeaters:
             for option in config.get_prefix_options(''):
                 option = option.lower()
                 config.get(option)
-            self.feeders[feeder_name] = feeder = Feeder(config, None, bVirualFeeder=True)
+            self.feeders[feeder_name] = feeder = Feeder(config, None, bVirtualFeeder=True)
             self.available_feeders.append(config.get_name())
             return feeder
 
@@ -794,12 +816,16 @@ class FilaFeeders:  # PrinterHeaters:
             param_cl = 'CL%d' % index
             param_fc = 'FC%d' % index
             param_fs = 'FS%d' % index
+            prev_total_len = feeder.total_feed_len
             feeder.total_feed_len = gcmd.get_float(param_t, 0.0)
             feeder.cur_feed_len = gcmd.get_float(param_cl, 0.0)
             feeder._fila_state = gcmd.get_int(param_fc, 0)
             feeder._switch_state = gcmd.get_int(param_fs, 0)
             msg = "feeder %s status: total feed len:%.3f, cur feed len:%.3f, fila state:%d, switch state:%d" % (name, feeder.total_feed_len, feeder.cur_feed_len, feeder._fila_state, feeder._switch_state)
             feeder._loginfo(msg, 1) #only response at command line.
+
+            if prev_total_len != feeder.total_feed_len:
+                feeder._update_runout_pos(feeder.reactor.monotonic())
 
 
 
