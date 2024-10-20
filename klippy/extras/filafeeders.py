@@ -432,7 +432,7 @@ class Feeder:  # filament feeder:
     # update feeder for jam or break or slip or runout event.
     def _virtual_update_event(self, eventtime):
         # check nozzle jam or feed failed when the extruder is working.
-        if self.isprinting():  # and self.bInited and not self.bWithdraw:
+        if self.isprinting() and self.bfeeder_on:  # and self.bInited and not self.bWithdraw:
             extruderpos = self._get_extruder_pos(eventtime)
             if extruderpos > self.runout_pos:  # feeder length not change after extruder is moved for the runout_length.
                 self._loginfo("virtual feeder %s nozzle jam or feed failed, stop feeding" % self.name, 3)
@@ -826,8 +826,12 @@ class FilaFeeders:  # PrinterHeaters:
             msg = "feeder %s status: total feed len:%.3f, cur feed len:%.3f, fila state:%d, switch state:%d" % (name, feeder.total_feed_len, feeder.cur_feed_len, feeder._fila_state, feeder._switch_state)
             feeder._loginfo(msg, 1) #only response at command line.
 
+            #update extruder runout pos when the feeder's total feed len changed.
             if prev_total_len != feeder.total_feed_len:
                 feeder._update_runout_pos(feeder.reactor.monotonic())
+
+            #update enable state of the feeder. only curfeeder is enabled.
+            feeder.bfeeder_on = index == curFeeder
 
 
 
