@@ -32,7 +32,7 @@ class Feeder:  # filament feeder:
         self.bWithdraw = False  # withdraw the filament.
 
         # fila length runout check, need extruder object and runout_length
-        self.extruder_name = config.get('extruder', None)
+        self.extruder_name = config.get('extruder', 'extruder')
 
         self.runout_length = config.getfloat('runout_length', 100, above=1)
         self.runout_pos = 0.0   # runout position, the extruder's position when the runout happened.    
@@ -166,6 +166,9 @@ class Feeder:  # filament feeder:
     def _handle_ready(self):
         self.toolhead = self.printer.lookup_object('toolhead')
         self.extruder = self.printer.lookup_object(self.extruder_name, None)
+        if self.extruder is None:
+            raise self.printer.command_error("Error, Feeder %s extruder not found" % self.name)
+
         self.starttime = self.reactor.monotonic()
         # self.estimated_print_time = (
         #         self.printer.lookup_object('mcu').estimated_print_time)
@@ -233,8 +236,7 @@ class Feeder:  # filament feeder:
     # feed filament len at speed
     def feed_filament(self, print_time, speed, len): # set feed len with speed. value is the length to feed.
         if self.bVirtualFeeder:
-            error = self.printer.command_error
-            raise error("Feeder %s is virtual, can't feed filament" % self.name)
+            raise self.printer.command_error("Feeder %s is the virtual feeder, can't feed filament" % self.name)
 
         if not self.bfeeder_on and not self.is_feeding:
             return 0.0
