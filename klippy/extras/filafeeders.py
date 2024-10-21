@@ -23,6 +23,7 @@ PINOUT_DELAY = 0.05 # 50ms, avoid Timer too close or Missed scheduling of next d
 class Feeder:  # filament feeder:
     def __init__(self, config, sensor, bVirtualFeeder=False):
         self.printer = config.get_printer()
+        self.print_status = None
         self.reactor = self.printer.get_reactor()  # add by guoge 20231130.
         self.name = config.get_name().split()[-1]
         self.sensor = sensor
@@ -146,6 +147,7 @@ class Feeder:  # filament feeder:
         # self.printer.load_object(config, "verify_feeder %s" % (self.name,))
         # self.printer.load_object(config, "pid_calibrate")
         self.gcode = self.printer.lookup_object("gcode")
+        self.gcode_move = self.printer.load_object(config, 'gcode_move')
         self.gcode.register_mux_command("SET_FEEDER_DISTANCE", "FEEDER",
                                    self.name, self.cmd_SET_FEEDER_DISTANCE,
                                    desc=self.cmd_SET_FEEDER_DISTANCE_help)
@@ -164,6 +166,7 @@ class Feeder:  # filament feeder:
         # test command: SET_FEEDER_DISTANCE FEEDER=feeder0 TARGET=1.23
 
     def _handle_ready(self):
+        self.print_status = self.printer.lookup_object('print_stats')
         self.toolhead = self.printer.lookup_object('toolhead')
         self.extruder = self.printer.lookup_object(self.extruder_name, None)
         if self.extruder is None:
@@ -193,12 +196,13 @@ class Feeder:  # filament feeder:
             return 0.0
         if eventtime is None:
             eventtime = self.reactor.monotonic()
-        print_time = self.step.get_mcu().estimated_print_time(eventtime)
+        print_time = self.extruder.extruder_stepper.stepper.get_mcu().estimated_print_time(eventtime)
         return self.extruder.find_past_position(print_time)
     def _update_runout_pos(self, eventtime=None):
         if eventtime is None:
             eventtime = self.reactor.monotonic()
-        self.runout_pos = self._get_extruder_pos(eventtime) + self.runout_length
+        # self.runout_pos = self._get_extruder_pos(eventtime) + self.runout_length
+        self.runout_pos = self.print_status.filament_used + self.runout_length
 
     # exec gcode template after runout/insert/break/jam/slip event.
     def _exec_gcode(self, script_template, now=False):
@@ -812,7 +816,7 @@ class FilaFeeders:  # PrinterHeaters:
     # FC0: fila1 check limit statu, FC1: fila2 check.  --- insert status.
     # FS0: fila1 switch state, FS1: fila2 switch. --- feeding status(0: reach the extruder, 1: need feeding)
     def cmd_UPDATE_FEEDER_STATUS(self, gcmd):  # sensor is equal to feeder
-        curFeeder = gcmd.get('F')
+        curFeeder = gcmd.get_int('F')
         for index, (name, feeder) in enumerate(self.feeders.items()):
             param_t = 'T%d' % index
             param_cl = 'CL%d' % index
@@ -823,16 +827,17 @@ class FilaFeeders:  # PrinterHeaters:
             feeder.cur_feed_len = gcmd.get_float(param_cl, 0.0)
             feeder._fila_state = gcmd.get_int(param_fc, 0)
             feeder._switch_state = gcmd.get_int(param_fs, 0)
-            msg = "feeder %s status: total feed len:%.3f, cur feed len:%.3f, fila state:%d, switch state:%d" % (name, feeder.total_feed_len, feeder.cur_feed_len, feeder._fila_state, feeder._switch_state)
-            feeder._loginfo(msg, 1) #only response at command line.
 
             #update extruder runout pos when the feeder's total feed len changed.
             if prev_total_len != feeder.total_feed_len:
                 feeder._update_runout_pos(feeder.reactor.monotonic())
+                feeder._loginfo("feeder runout pos: %.3f" % ( feeder.runout_pos), 1)
 
             #update enable state of the feeder. only curfeeder is enabled.
-            feeder.bfeeder_on = index == curFeeder
+            feeder.bfeeder_on = (index == curFeeder)
 
+            msg = "feeder %s status: enable:%d total feed len:%.3f, cur feed len:%.3f, fila state:%d, switch state:%d" % (name, feeder.bfeeder_on, feeder.total_feed_len, feeder.cur_feed_len, feeder._fila_state, feeder._switch_state)
+            feeder._loginfo(msg, 1) #only response at command line.
 
 
 def load_config(config):
