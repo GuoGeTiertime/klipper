@@ -192,17 +192,18 @@ class Feeder:  # filament feeder:
             self.gcode.respond_info(msg, True) # respond to gcode and write log file.
     
     def _get_extruder_pos(self, eventtime=None):
-        if self.extruder is None:
-            return 0.0
-        if eventtime is None:
-            eventtime = self.reactor.monotonic()
-        print_time = self.extruder.extruder_stepper.stepper.get_mcu().estimated_print_time(eventtime)
-        return self.extruder.find_past_position(print_time)
+        # if self.extruder is None:
+        #     return 0.0
+        # if eventtime is None:
+        #     eventtime = self.reactor.monotonic()
+        # print_time = self.extruder.extruder_stepper.stepper.get_mcu().estimated_print_time(eventtime)
+        # return self.extruder.find_past_position(print_time)
+        return self.print_status.filament_used if self.print_status else 0.0
     def _update_runout_pos(self, eventtime=None):
-        if eventtime is None:
-            eventtime = self.reactor.monotonic()
-        # self.runout_pos = self._get_extruder_pos(eventtime) + self.runout_length
-        self.runout_pos = self.print_status.filament_used + self.runout_length
+        # if eventtime is None:
+        #     eventtime = self.reactor.monotonic()
+        self.runout_pos = self._get_extruder_pos(eventtime) + self.runout_length
+        # self.runout_pos = self.print_status.filament_used + self.runout_length
 
     # exec gcode template after runout/insert/break/jam/slip event.
     def _exec_gcode(self, script_template, now=False):
@@ -439,6 +440,7 @@ class Feeder:  # filament feeder:
         if self.isprinting() and self.bfeeder_on:  # and self.bInited and not self.bWithdraw:
             extruderpos = self._get_extruder_pos(eventtime)
             if extruderpos > self.runout_pos:  # feeder length not change after extruder is moved for the runout_length.
+                self._update_runout_pos(eventtime) # update runout pos when the printer is not printing.
                 self._loginfo("virtual feeder %s nozzle jam or feed failed, stop feeding" % self.name, 3)
                 self.reactor.register_callback(self._jam_break_handler)
             self._loginfo("virtual feeder %s update event, ex pos:%.3f, runout pos:%.3f " % (self.name, extruderpos, self.runout_pos))
