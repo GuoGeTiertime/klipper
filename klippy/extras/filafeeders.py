@@ -160,6 +160,9 @@ class Feeder:  # filament feeder:
         self.gcode.register_mux_command("FEED_STATUS", "FEEDER",
                             self.name, self.cmd_FEED_STATUS,
                             desc=self.cmd_FEED_STATUS_help)
+        self.gcode.register_mux_command("FEED_SETTING", "FEEDER",
+                            self.name, self.cmd_FEED_SETTING,
+                            desc=self.cmd_FEED_SETTING_help)
 
         self.printer.register_event_handler('klippy:ready', self._handle_ready)
 
@@ -540,6 +543,13 @@ class Feeder:  # filament feeder:
     def cmd_FEED_STATUS(self, gcmd):
         status = self.get_status(self.reactor.monotonic())
         msg = "feeder %s status: %s" % (self.name, status)
+        self._loginfo(msg, 1) #only response at command line.
+
+    cmd_FEED_SETTING_help = "Set feeder's runout length, feed delay, etc."
+    def cmd_FEED_SETTING(self, gcmd):
+        self.runout_length = gcmd.get_float('RUNOUT_LENGTH', self.runout_length, minval=1.0)
+        self.feed_delay = gcmd.get_float('FEED_DELAY', self.feed_delay, minval=0.1) # check switch per delay time or check virtual feeder position.
+        msg = "feeder %s setting: runout_len:%.1f, feed_delay:%.1f" % (self.name, self.runout_length, self.feed_delay)
         self._loginfo(msg, 1) #only response at command line.
 
 ######################################################################
