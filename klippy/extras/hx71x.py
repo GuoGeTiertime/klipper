@@ -403,7 +403,7 @@ class HX71X:
             msg = "Error, Weight sensor(HX71x) test failed, measured min: %.2f, max: %.2f, threshold: %.2f" % (self.measured_min, self.measured_max, weightThreshold)
             raise gcmd.error(msg)
 
-        if curThreshold > 0.0 and abs(self.total_weight) > curThreshold:
+        if curThreshold > 0.0 and (abs(self.total_weight) > curThreshold):
             if motoroff_if_fail == 1:
                 self.gcode.run_script_from_command("M18")  # motor off
             msg = "Error, Weight sensor(HX71x) test failed, cur weight: %.2f > cur threshold: %.2f" % (self.total_weight, curThreshold)
