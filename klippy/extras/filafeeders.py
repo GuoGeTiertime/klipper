@@ -38,6 +38,7 @@ class Feeder:  # filament feeder:
         self.runout_length = config.getfloat('runout_length', 100, above=1)
         self.runout_pos = 0.0   # runout position, the extruder's position when the runout happened.    
         
+        self.switch_feed_len = 5.0  # feed length when switch is pressed.
         self.feed_delay = config.getfloat('feed_delay', 0.5, minval=0.1) # check switch per delay time or check virtual feeder position.
 
         self.bVirtualFeeder = bVirtualFeeder
@@ -549,8 +550,16 @@ class Feeder:  # filament feeder:
     def cmd_FEED_SETTING(self, gcmd):
         self.runout_length = gcmd.get_float('RUNOUT_LENGTH', self.runout_length, minval=1.0)
         self.feed_delay = gcmd.get_float('FEED_DELAY', self.feed_delay, minval=0.1) # check switch per delay time or check virtual feeder position.
-        msg = "feeder %s setting: runout_len:%.1f, feed_delay:%.1f" % (self.name, self.runout_length, self.feed_delay)
+        self.feed_speed = gcmd.get_float('SPEED', self.feed_speed, minval=1.0)
+        msg = "feeder %s setting: runout_length:%.1f, feed_delay:%.1f, feed_speed:%.1f" % (self.name, self.runout_length, self.feed_delay, self.feed_speed)
+        self.max_feed_len = gcmd.get_float('MAX_LEN', self.max_feed_len, minval=1.0)
+        self.init_feed_len = gcmd.get_float('INIT_LEN', self.init_feed_len, minval=1.0)
+        self.switch_feed_len = gcmd.get_float('FEED_LEN', self.switch_feed_len)
+        msg += "\nfeeder %s setting: max_len:%.1f, init_len:%.1f, feed_len:%.1f" % (self.name, self.max_feed_len, self.init_feed_len, self.switch_feed_len)
         self._loginfo(msg, 1) #only response at command line.
+
+        #update the runout pos when the setting is changed.
+        self._update_runout_pos(self.reactor.monotonic())
 
 ######################################################################
 # Bang-bang control algo
