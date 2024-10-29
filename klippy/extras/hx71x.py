@@ -396,17 +396,20 @@ class HX71X:
         minDiff = min(self.weight_min.values())
         maxDiff = max(self.weight_max.values())            
         maxErr = max(abs(minDiff), abs(maxDiff))
+        nowWeight = abs(self.total_weight)
+        nowWeight_min = self.measured_min
+        nowWeight_max = self.measured_max
 
-        if weightThreshold > 0.0 and ( self.measured_max > weightThreshold or self.measured_min < -weightThreshold):
+        if weightThreshold > 0.0 and ( nowWeight_max > weightThreshold or nowWeight_min < -weightThreshold):
             if motoroff_if_fail == 1:
                 self.gcode.run_script_from_command("M18")  # motor off
-            msg = "Error, Weight sensor(HX71x) test failed, measured min: %.2f, max: %.2f, threshold: %.2f" % (self.measured_min, self.measured_max, weightThreshold)
+            msg = "Error, Weight sensor(HX71x) test failed, measured min: %.2f, max: %.2f, threshold: %.2f" % (nowWeight_min, nowWeight_max, weightThreshold)
             raise gcmd.error(msg)
 
-        if curThreshold > 0.0 and (abs(self.total_weight) > curThreshold):
+        if (curThreshold > 0.0 and (nowWeight > curThreshold)):
             if motoroff_if_fail == 1:
                 self.gcode.run_script_from_command("M18")  # motor off
-            msg = "Error, Weight sensor(HX71x) test failed, cur weight: %.2f > cur threshold: %.2f" % (self.total_weight, curThreshold)
+            msg = "Error, Weight sensor(HX71x) test failed, cur weight: %.2f > cur threshold: %.2f" % (nowWeight, curThreshold)
             raise gcmd.error(msg)
 
         if( maxErr < thMin or maxErr > thMax ):
