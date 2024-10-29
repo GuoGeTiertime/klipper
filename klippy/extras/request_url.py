@@ -71,32 +71,10 @@ class RequestURL:
             # 发起GET请求以查询远程Klipper实例状态
             conn = http.client.HTTPConnection(self.host, port=self.port, timeout=self.timeout)
             self._loginfo(f"Http connect to: {self.host, self.port, self.timeout}")
-            body = json.dumps(self.body)
-            # conn.request( method=self.method, url=self.url, body=self.body, headers=self.headers)
-            bodystr = json.dumps({"script": "BEEP P=1000"})
-            headstr = json.dumps({"Content-Type": "application/json"})
-            # conn.request('POST', url=self.url, body=bodystr, headers=self.headers)
-            # conn.request('POST', url=self.url, body=bodystr, headers=headstr)
-            
-            headers = { "Content-Type": "application/json" }
-            tstr = str(type(headers))
-            self._loginfo(f"request headers1: {headers}, type: {tstr}")
-            self._loginfo("type of request headers1: %s" % (str(type(headers)),))
-            self._loginfo(f"parameter of request headers: {self.headers}")
-            # headers = json.loads(self.headers)
-            # self.headers = '{ "Content-Type": "application/json" }'
-            # self.headers = '{"Content-Type": "application/json"}'
-            # self._loginfo(f"parameter of request headers replace by string: {self.headers}")
-            headers = ast.literal_eval(self.headers)
-            self._loginfo("type of SELF. headers: %s" % (str(type(self.headers)),))
-            self._loginfo("type of request headers2: %s" % (str(type(headers)),))
-            self._loginfo(f"request headers2: {headers}, type: {type(headers)}")
-            # 构建请求体
-            payload = json.dumps({"script": "BEEP P=1000"})
-            conn.request("POST", self.url, body=payload, headers=headers)
-            # conn.request("POST", self.url, body=payload, headers=self.headers)
+            conn.request("POST", self.url, body=self.body, headers=json.loads(self.headers))
 
             self._loginfo("request OK")
+
             if self.method == 'POST':
                 return None
             
