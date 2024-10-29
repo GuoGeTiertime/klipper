@@ -67,7 +67,7 @@ class RequestURL:
         self.reactor.update_timer(self._request_timer, self.reactor.NOW)
 
     def _request(self):
-        # try:
+        try:
             # 发起GET请求以查询远程Klipper实例状态
             conn = http.client.HTTPConnection(self.host, port=self.port, timeout=self.timeout)
             self._loginfo(f"Http connect to: {self.host, self.port, self.timeout}")
@@ -75,23 +75,20 @@ class RequestURL:
 
             self._loginfo("request OK")
 
-            if self.method == 'POST':
-                return None
-            
             response = conn.getresponse()
-            self._loginfo(f"request response: {response.status}")
+            self._loginfo(f"request response status: {response.status}")
+            self._loginfo("getresponse OK")
             
             # 读取响应数据并解析JSON
             data = response.read().decode("utf-8")
             json_data = json.loads(data)
-            print(json_data)
             conn.close()
             self._loginfo(f"request response: {json.dumps(json_data)}")
             return json_data
 
-        # except:
-        #     self._loginfo(f"Failed to call request: {self.host, self.port, self.url}")
-        #     return None
+        except:
+            self._loginfo(f"Failed to call request: {self.host, self.port, self.url, self.body, self.headers}", 3)
+            return None
 
 def load_config(config):
     return RequestURL(config)
