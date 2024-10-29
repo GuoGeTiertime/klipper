@@ -3,10 +3,12 @@
 # Copyright (C) 2024 guoge
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
-import urllib.request
-# import requests
+# import urllib.request
+# import requests klipper没有此lib
 import json
 import logging
+import http.client
+import ast
 
 class RequestURL:
     def __init__(self, config):
@@ -15,10 +17,14 @@ class RequestURL:
         self.name = config.get_name().split()[-1]
         
         # 从配置中读取远程Klipper实例的URL
-        self.remote_url = config.get('remote_url', None)
-        if not self.remote_url:
-            raise self.config_error("Missing 'remote_url' in configuration")
-        logging.info(f"Remote Klipper URL set to: {self.remote_url}")
+        self.host = config.get('host', 'localhost')
+        self.port = config.getint('port', 7126)
+        self.timeout = config.getfloat('timeout', 0.5)
+        self.url = config.get('url', None)
+        self.method = config.get('method', 'GET')
+        self.body = config.get('body', None)
+        self.headers = config.get('headers', None)
+
         self.repeat = config.getfloat('repeat', 0)  # 重复调用的时间，等于零就调用一次
 
         # 添加timer,循环执行request.
@@ -29,7 +35,7 @@ class RequestURL:
         # 设置 G 代码命令
         self.gcode = self.printer.lookup_object('gcode')
         self.gcode.register_mux_command(
-            "HTTP_REQUEST", "URL", self.name,
+            "HTTP_REQUEST", "TYPE", self.name,
             self.cmd_HTTP_REQUEST,
             desc=self.cmd_HTTP_REQUEST_help
         )
@@ -45,9 +51,11 @@ class RequestURL:
             self.gcode.respond_info(msg, True) # respond to gcode and write log file.
 
     def _call_request(self, eventtime):
-        res = self._request()
+        # repeat<0, 不执行request
+        if self.repeat>=0 :
+            self._request()
         if self.repeat > 0:
-            return eventtime + self.repeat
+            return max(eventtime + self.repeat, self.reactor.monotonic())
         else:
             return self.reactor.NEVER
 
@@ -59,24 +67,53 @@ class RequestURL:
         self.reactor.update_timer(self._request_timer, self.reactor.NOW)
 
     def _request(self):
-        try:
+        # try:
             # 发起GET请求以查询远程Klipper实例状态
-            req = urllib.request.Request(self.remote_url)
-            self._loginfo("request OK", 3)
-            resp = urllib.request.urlopen(req)
-            status_data = resp.read().decode('utf-8')
-            self._loginfo("request response: " + status_data, 3)
-            print(status_data)
-            status_json = json.loads(status_data)
-            self._loginfo(f"request response: {json.dumps(status_json)}")
-            # return status_json
-            # x = requests.get('https://www.runoob.com/')
-            # # 返回网页内容
-            # print(x.text)
-            return None
-        except:
-            self._loginfo(f"Failed to call request: {self.remote_url}")
-            return None
+            conn = http.client.HTTPConnection(self.host, port=self.port, timeout=self.timeout)
+            self._loginfo(f"Http connect to: {self.host, self.port, self.timeout}")
+            body = json.dumps(self.body)
+            # conn.request( method=self.method, url=self.url, body=self.body, headers=self.headers)
+            bodystr = json.dumps({"script": "BEEP P=1000"})
+            headstr = json.dumps({"Content-Type": "application/json"})
+            # conn.request('POST', url=self.url, body=bodystr, headers=self.headers)
+            # conn.request('POST', url=self.url, body=bodystr, headers=headstr)
+            
+            headers = { "Content-Type": "application/json" }
+            tstr = str(type(headers))
+            self._loginfo(f"request headers1: {headers}, type: {tstr}")
+            self._loginfo("type of request headers1: %s" % (str(type(headers)),))
+            self._loginfo(f"parameter of request headers: {self.headers}")
+            # headers = json.loads(self.headers)
+            # self.headers = '{ "Content-Type": "application/json" }'
+            # self.headers = '{"Content-Type": "application/json"}'
+            # self._loginfo(f"parameter of request headers replace by string: {self.headers}")
+            headers = ast.literal_eval(self.headers)
+            self._loginfo("type of SELF. headers: %s" % (str(type(self.headers)),))
+            self._loginfo("type of request headers2: %s" % (str(type(headers)),))
+            self._loginfo(f"request headers2: {headers}, type: {type(headers)}")
+            # 构建请求体
+            payload = json.dumps({"script": "BEEP P=1000"})
+            conn.request("POST", self.url, body=payload, headers=headers)
+            # conn.request("POST", self.url, body=payload, headers=self.headers)
+
+            self._loginfo("request OK")
+            if self.method == 'POST':
+                return None
+            
+            response = conn.getresponse()
+            self._loginfo(f"request response: {response.status}")
+            
+            # 读取响应数据并解析JSON
+            data = response.read().decode("utf-8")
+            json_data = json.loads(data)
+            print(json_data)
+            conn.close()
+            self._loginfo(f"request response: {json.dumps(json_data)}")
+            return json_data
+
+        # except:
+        #     self._loginfo(f"Failed to call request: {self.host, self.port, self.url}")
+        #     return None
 
 def load_config(config):
     return RequestURL(config)
