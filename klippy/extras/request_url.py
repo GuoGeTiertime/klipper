@@ -8,7 +8,6 @@
 import json
 import logging
 import http.client
-import ast
 
 class RequestURL:
     def __init__(self, config):
@@ -59,11 +58,12 @@ class RequestURL:
         else:
             return self.reactor.NEVER
 
-    # eg: HTTP_REQUEST url=192.168.3.XX repeat=1.0
+    # eg: HTTP_REQUEST TYPE=name
     cmd_HTTP_REQUEST_help = "call http request to remote server"
     def cmd_HTTP_REQUEST(self, gcmd):
         self.repeat = gcmd.get_float('REPEAT', self.repeat)
         self.isloginfo = gcmd.get_int('LOG', self.isloginfo)
+        self.body = gcmd.get("BODY", self.body)
         self.reactor.update_timer(self._request_timer, self.reactor.NOW)
 
     def _request(self):
@@ -72,18 +72,18 @@ class RequestURL:
             conn = http.client.HTTPConnection(self.host, port=self.port, timeout=self.timeout)
             self._loginfo(f"Http connect to: {self.host, self.port, self.timeout}")
             conn.request("POST", self.url, body=self.body, headers=json.loads(self.headers))
-
             self._loginfo("request OK")
 
             response = conn.getresponse()
             self._loginfo(f"request response status: {response.status}")
-            self._loginfo("getresponse OK")
             
             # 读取响应数据并解析JSON
             data = response.read().decode("utf-8")
             json_data = json.loads(data)
-            conn.close()
             self._loginfo(f"request response: {json.dumps(json_data)}")
+            conn.close()
+            status_data = json_data['result']['status']
+            self._loginfo(f"status: {json.dumps(status_data)}")
             return json_data
 
         except:
