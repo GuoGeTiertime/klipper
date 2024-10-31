@@ -125,6 +125,9 @@ class RequestURL:
         self.method = gcmd.get("METHOD", self.method)
         self.url = gcmd.get("URL", self.url)
         self.body = gcmd.get("BODY", self.body)
+        gcode_script = gcmd.get("GCODE", None)
+        if gcode_script is not None:
+            self.body = '{"script": "%s"}' % gcode_script
         self.headers = gcmd.get("HEADERS", self.headers)
         self.repeat = gcmd.get_float('REPEAT', self.repeat)
         self.isloginfo = gcmd.get_int('LOG', self.isloginfo)
