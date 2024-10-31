@@ -48,7 +48,8 @@ class RequestURL:
         self.repeat = config.getfloat('repeat', 0)  # 重复调用的时间，等于零就调用一次
 
         # 添加timer,循环执行request.
-        self._request_status_timer = self.reactor.register_timer(self._call_request_status)
+        self._request_timer = self.reactor.register_timer(self._call_request)
+        self._update_status_timer = self.reactor.register_timer(self._call_request_status)
 
         # 设置 G 代码命令
         self.gcode = self.printer.lookup_object('gcode')
@@ -56,6 +57,11 @@ class RequestURL:
             "HTTP_UPDATE_STATUS", "TYPE", self.name,
             self.cmd_HTTP_UPDATE_STATUS,
             desc=self.cmd_HTTP_UPDATE_STATUS_help
+        )
+        self.gcode.register_mux_command(
+            "HTTP_REQUEST", "TYPE", self.name,
+            self.cmd_HTTP_REQUEST,
+            desc=self.cmd_HTTP_REQUEST_help
         )
 
         self.printer.register_event_handler("klippy:ready", self._handle_ready)
@@ -81,10 +87,21 @@ class RequestURL:
 
     def _call_request_status(self, eventtime):
         # repeat<0, 不执行request
-        if self.repeat>=0 :
-            data = self.HTTP_UPDATE_STATUS()
-            if len(self.update_object) > 0:
+        if self.repeat >= 0:
+            data = self.http_request()
+            if data and len(self.update_object) > 0:
                 self._update_object(data['result']['status'])
+        if self.repeat > 0:
+            return max(eventtime + self.repeat, self.reactor.monotonic())
+        else:
+            return self.reactor.NEVER
+
+    def _call_request(self, eventtime):
+        # repeat<0, 不执行request
+        if self.repeat >= 0:
+            data = self.http_request()
+            if data:
+                self._loginfo(f"HTTP_REQUEST response: {json.dumps(data)}")
         if self.repeat > 0:
             return max(eventtime + self.repeat, self.reactor.monotonic())
         else:
@@ -93,12 +110,29 @@ class RequestURL:
     # eg: HTTP_UPDATE_STATUS TYPE=name
     cmd_HTTP_UPDATE_STATUS_help = "call http request to remote server"
     def cmd_HTTP_UPDATE_STATUS(self, gcmd):
+        self.method = gcmd.get("METHOD", self.method)
+        self.url = gcmd.get("URL", self.url)
+        self.body = gcmd.get("BODY", self.body)
+        self.headers = gcmd.get("HEADERS", self.headers)
         self.repeat = gcmd.get_float('REPEAT', self.repeat)
         self.isloginfo = gcmd.get_int('LOG', self.isloginfo)
-        self.body = gcmd.get("BODY", self.body)
-        self.reactor.update_timer(self._request_status_timer, self.reactor.NOW)
+        # 调用_request_status_timer启动request
+        self.reactor.update_timer(self._update_status_timer, self.reactor.NOW)
 
-    def HTTP_UPDATE_STATUS(self):
+    # eg: HTTP_REQUEST TYPE=name
+    cmd_HTTP_REQUEST_help = "send a custom http request to remote server"
+    def cmd_HTTP_REQUEST(self, gcmd):
+        self.method = gcmd.get("METHOD", self.method)
+        self.url = gcmd.get("URL", self.url)
+        self.body = gcmd.get("BODY", self.body)
+        self.headers = gcmd.get("HEADERS", self.headers)
+        self.repeat = gcmd.get_float('REPEAT', self.repeat)
+        self.isloginfo = gcmd.get_int('LOG', self.isloginfo)
+        self._loginfo(f"HTTP_REQUEST: {self.method} {self.url} {self.body} {self.headers}")
+        # 调用t_request_timer启动request
+        self.reactor.update_timer(self._request_timer, self.reactor.NOW)
+
+    def http_request(self):
         try:
             # 发起GET请求以查询远程Klipper实例状态
             conn = http.client.HTTPConnection(self.host, port=self.port, timeout=self.timeout)
@@ -114,12 +148,10 @@ class RequestURL:
             json_data = json.loads(data)
             self._loginfo(f"request response: {json.dumps(json_data)}")
             conn.close()
-            # status_data = json_data['result']['status']
-            # self._loginfo(f"status: {json.dumps(status_data)}")
             return json_data
 
-        except:
-            self._loginfo(f"Failed to call request: {self.host, self.port, self.url, self.body, self.headers}", 3)
+        except Exception as e:
+            self._loginfo(f"Failed to call request: {self.host, self.port, self.url, self.body, self.headers}, error: {e}", 3)
             return None
     
     def get_nested_value(self, data, path):
