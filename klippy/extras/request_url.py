@@ -9,6 +9,7 @@ import json
 import logging
 import http.client
 from functools import reduce
+import asyncio
 
 class RequestURL:
     def __init__(self, config):
@@ -82,7 +83,7 @@ class RequestURL:
         # repeat<0, 不执行request
         if self.repeat>=0 :
             data = self.HTTP_UPDATE_STATUS()
-            if self.update_object[0] is not None:
+            if len(self.update_object) > 0:
                 self._update_object(data['result']['status'])
         if self.repeat > 0:
             return max(eventtime + self.repeat, self.reactor.monotonic())
@@ -102,7 +103,7 @@ class RequestURL:
             # 发起GET请求以查询远程Klipper实例状态
             conn = http.client.HTTPConnection(self.host, port=self.port, timeout=self.timeout)
             self._loginfo(f"Http connect to: {self.host, self.port, self.timeout}")
-            conn.request("POST", self.url, body=self.body, headers=json.loads(self.headers))
+            conn.request(self.method, self.url, body=self.body, headers=json.loads(self.headers))
             self._loginfo("request OK")
 
             response = conn.getresponse()
