@@ -90,7 +90,9 @@ class RequestURL:
         if self.repeat >= 0:
             data = self.http_request()
             if data and len(self.update_object) > 0:
-                self._update_object(data['result']['status'])
+                # 如果data中没有result字段，直接返回
+                if 'result' in data and 'status' in data['result']:
+                    self._update_object(data['result']['status'])
         if self.repeat > 0:
             return max(eventtime + self.repeat, self.reactor.monotonic())
         else:
