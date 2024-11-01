@@ -9,9 +9,6 @@ import json
 import logging
 import http.client
 from functools import reduce
-import asyncio
-import aiohttp
-import requests
 import threading,time
 
 class RequestURL:
@@ -21,7 +18,7 @@ class RequestURL:
         self.name = config.get_name().split()[-1]
         self.threading = None
         self.lock = threading.Lock()
-        self.nRequest = 0
+        self.nOperation = 0
 
         self.isloginfo = config.getint('log', 0)  # 0: no log, 1: log to gcode, 2: log to file, 3: log to gcode and file
         
@@ -87,21 +84,22 @@ class RequestURL:
 
     def _bg_thread(self, eventtime):
         while True:
+            # 轮询nOperation，执行request
             with self.lock:
-                type = self.nRequest
-                self.nRequest = 0
-            if type == 1:
+                operate = self.nOperation
+                self.nOperation = 0
+            if operate == 1: # update status after request
                 data = self.http_request()
                 if data and len(self.update_object) > 0:
                     # 如果data中没有result字段，直接返回
                     if 'result' in data and 'status' in data['result']:
                         self._update_object(data['result']['status'])
-            elif type == 2:
+            elif operate == 2: # only request
                 data = self.http_request()
                 if data:
                     self._loginfo(f"HTTP_REQUEST response: {json.dumps(data)}")
             # sleep 100ms
-            time.sleep(0.1)
+            time.sleep(0.1) # 降低负载,防止klipper负载和CPU占用过高
 
     def _loginfo(self, msg, logflag=None):
         if logflag is None:
@@ -113,33 +111,21 @@ class RequestURL:
         elif logflag == 3:
             self.gcode.respond_info(msg, True) # respond to gcode and write log file.
 
-    def _call_request_status(self, eventtime):
+    def _wake_thread(self, eventtime, nOperation):
         # repeat<0, 不执行request
-        if self.repeat >= 0:
+        if self.repeat >= 0: #wake thread by set nOperation
             with self.lock:
-                self.nRequest = 1
-            # data = self.http_request()
-            # if data and len(self.update_object) > 0:
-            #     # 如果data中没有result字段，直接返回
-            #     if 'result' in data and 'status' in data['result']:
-            #         self._update_object(data['result']['status'])
+                self.nOperation = nOperation
         if self.repeat > 0:
             return max(eventtime + self.repeat, self.reactor.monotonic())
         else:
             return self.reactor.NEVER
 
+    def _call_request_status(self, eventtime):
+        return self._wake_thread(eventtime, 1)
+
     def _call_request(self, eventtime):
-        # repeat<0, 不执行request
-        if self.repeat >= 0:
-            with self.lock:
-                self.nRequest = 2
-            # data = self.http_request()
-            # if data:
-            #     self._loginfo(f"HTTP_REQUEST response: {json.dumps(data)}")
-        if self.repeat > 0:
-            return max(eventtime + self.repeat, self.reactor.monotonic())
-        else:
-            return self.reactor.NEVER
+        return self._wake_thread(eventtime, 2)
 
     # eg: HTTP_UPDATE_STATUS TYPE=name
     cmd_HTTP_UPDATE_STATUS_help = "call http request to remote server"
@@ -170,8 +156,6 @@ class RequestURL:
         self.reactor.update_timer(self._request_timer, self.reactor.NOW)
 
     def http_request(self):
-        # data = asyncio.run(self._async_http_request())
-        # return data
         try:
             # 发起GET请求以查询远程Klipper实例状态
             conn = http.client.HTTPConnection(self.host, port=self.port, timeout=self.timeout)
@@ -192,20 +176,6 @@ class RequestURL:
         except Exception as e:
             self._loginfo(f"Failed to call request: {self.host, self.port, self.url, self.body, self.headers}, error: {e}", 3)
             return None
-        
-    # async def _async_http_request(self):
-    #     url = f'http://{self.host}:{self.port}{self.url}'
-    #     headers = json.loads(self.headers)
-    #     async with aiohttp.ClientSession() as session:
-    #         async with session.request(self.method, url, data=self.body, headers=headers) as response:
-    #             data = await response.json()
-    #             self._loginfo(f"async request response: {json.dumps(data)}")
-    #             return data
-    #     # response = requests.post('http://localhost:7125/printer/gcode/script', json={"script": "M118 Task Complete"})
-    #     # print(response.json())
-
-    #     # asyncio.run(async_task())
-
 
     def get_nested_value(self, data, path):
         try:
@@ -236,10 +206,3 @@ def load_config(config):
 
 def load_config_prefix(config):
     return RequestURL(config)
-
-# 在配置文件中添加对组件的加载
-# [remote_klipper_query]
-# remote_url: http://<REMOTE_KLIPPER_IP>:<REMOTE_KLIPPER_PORT>
-
-# 使用 M118 G代码命令触发状态检查
-# M118 QUERY_REMOTE_STATUS
