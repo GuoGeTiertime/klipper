@@ -10,12 +10,18 @@ import logging
 import http.client
 from functools import reduce
 import asyncio
+import aiohttp
+import requests
+import threading,time
 
 class RequestURL:
     def __init__(self, config):
         self.printer = config.get_printer()
         self.reactor = self.printer.get_reactor()
         self.name = config.get_name().split()[-1]
+        self.threading = None
+        self.lock = threading.Lock()
+        self.nRequest = 0
 
         self.isloginfo = config.getint('log', 0)  # 0: no log, 1: log to gcode, 2: log to file, 3: log to gcode and file
         
@@ -75,6 +81,28 @@ class RequestURL:
             self._loginfo( "update object:%s by Request %s" % (self.update_object_name[i], self.name ) )
         self._loginfo(f"RequestURL {self.name} ready, update object: {self.update_object_name}")
 
+        self.threading = threading.Thread(target=self._bg_thread, args=(self.reactor.monotonic(),))
+        self.threading.start()
+        self._loginfo(f"RequestURL {self.name} threading start")
+
+    def _bg_thread(self, eventtime):
+        while True:
+            with self.lock:
+                type = self.nRequest
+                self.nRequest = 0
+            if type == 1:
+                data = self.http_request()
+                if data and len(self.update_object) > 0:
+                    # 如果data中没有result字段，直接返回
+                    if 'result' in data and 'status' in data['result']:
+                        self._update_object(data['result']['status'])
+            elif type == 2:
+                data = self.http_request()
+                if data:
+                    self._loginfo(f"HTTP_REQUEST response: {json.dumps(data)}")
+            # sleep 100ms
+            time.sleep(0.1)
+
     def _loginfo(self, msg, logflag=None):
         if logflag is None:
             logflag = self.isloginfo
@@ -88,11 +116,13 @@ class RequestURL:
     def _call_request_status(self, eventtime):
         # repeat<0, 不执行request
         if self.repeat >= 0:
-            data = self.http_request()
-            if data and len(self.update_object) > 0:
-                # 如果data中没有result字段，直接返回
-                if 'result' in data and 'status' in data['result']:
-                    self._update_object(data['result']['status'])
+            with self.lock:
+                self.nRequest = 1
+            # data = self.http_request()
+            # if data and len(self.update_object) > 0:
+            #     # 如果data中没有result字段，直接返回
+            #     if 'result' in data and 'status' in data['result']:
+            #         self._update_object(data['result']['status'])
         if self.repeat > 0:
             return max(eventtime + self.repeat, self.reactor.monotonic())
         else:
@@ -101,9 +131,11 @@ class RequestURL:
     def _call_request(self, eventtime):
         # repeat<0, 不执行request
         if self.repeat >= 0:
-            data = self.http_request()
-            if data:
-                self._loginfo(f"HTTP_REQUEST response: {json.dumps(data)}")
+            with self.lock:
+                self.nRequest = 2
+            # data = self.http_request()
+            # if data:
+            #     self._loginfo(f"HTTP_REQUEST response: {json.dumps(data)}")
         if self.repeat > 0:
             return max(eventtime + self.repeat, self.reactor.monotonic())
         else:
@@ -138,6 +170,8 @@ class RequestURL:
         self.reactor.update_timer(self._request_timer, self.reactor.NOW)
 
     def http_request(self):
+        # data = asyncio.run(self._async_http_request())
+        # return data
         try:
             # 发起GET请求以查询远程Klipper实例状态
             conn = http.client.HTTPConnection(self.host, port=self.port, timeout=self.timeout)
@@ -158,7 +192,21 @@ class RequestURL:
         except Exception as e:
             self._loginfo(f"Failed to call request: {self.host, self.port, self.url, self.body, self.headers}, error: {e}", 3)
             return None
-    
+        
+    # async def _async_http_request(self):
+    #     url = f'http://{self.host}:{self.port}{self.url}'
+    #     headers = json.loads(self.headers)
+    #     async with aiohttp.ClientSession() as session:
+    #         async with session.request(self.method, url, data=self.body, headers=headers) as response:
+    #             data = await response.json()
+    #             self._loginfo(f"async request response: {json.dumps(data)}")
+    #             return data
+    #     # response = requests.post('http://localhost:7125/printer/gcode/script', json={"script": "M118 Task Complete"})
+    #     # print(response.json())
+
+    #     # asyncio.run(async_task())
+
+
     def get_nested_value(self, data, path):
         try:
             return reduce(lambda d, key: d[key], path.split("."), data)
