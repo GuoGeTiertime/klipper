@@ -169,7 +169,14 @@ class RequestURL:
             for j in range(len(self.update_object_vars[i])):
                 value = self.get_nested_value(data, self.remote_vars[i][j])
                 if value is not None:
-                    setattr(self.update_object[i], self.update_object_vars[i][j], value)
+                    #如果updataobject包含gcode macro,则需要使用gcode macro的方法更新变量
+                    if self.update_object_name[i].startswith('gcode_macro'):
+                        gm = self.update_object[i]
+                        v = dict(gm.variables)
+                        v[self.update_object_vars[i][j]] = value
+                        gm.variables = v
+                    else:
+                        setattr(self.update_object[i], self.update_object_vars[i][j], value)
                     self._loginfo(f"update {self.update_object_name[i]}: {self.update_object_vars[i][j]}={value}")
                 else:
                     self._loginfo(f"Can't find {self.remote_vars[i][j]} in data")
