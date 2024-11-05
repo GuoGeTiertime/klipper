@@ -51,10 +51,11 @@ class ShellCommand:
 
         # add by guoge 20241018, add script params. for curl command json script data.
         # logging.info("Running Command {%s} with params {%s}" % (self.name, gcode_params))
-        script = params.get('SCRIPT','')
+        script = params.get('SCRIPT',None)
         # logging.info("Running Command {%s} with script {%s}" % (self.name, script))
-        script = '{"script": "' + script + '"}'
-        gcode_params.append(script)
+        if script is not None:
+            script = '{"script": "' + script + '"}'
+            gcode_params.append(script)
         # logging.info("Running Command {%s} with params + script {%s}" % (self.name, gcode_params))
         
         reactor = self.printer.get_reactor()
