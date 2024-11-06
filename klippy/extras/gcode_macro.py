@@ -139,6 +139,9 @@ class GCodeMacro:
         self.gcode.register_mux_command("SET_GCODE_VARIABLE", "MACRO",
                                         name, self.cmd_SET_GCODE_VARIABLE,
                                         desc=self.cmd_SET_GCODE_VARIABLE_help)
+        self.gcode.register_mux_command("SHOW_MACRO", "MACRO",
+                                        name, self.cmd_SHOW_MACRO,
+                                        desc=self.cmd_SHOW_MACRO_help)
         self.in_script = False
         self.variables = {}
         prefix = 'variable_'
@@ -177,6 +180,12 @@ class GCodeMacro:
         v = dict(self.variables)
         v[variable] = literal
         self.variables = v
+    cmd_SHOW_MACRO_help = "Show the source code of a G-Code macro"
+    def cmd_SHOW_MACRO(self, gcmd):
+        # show the source code of the macro
+        self.gcode.respond_info(self.template.template.source)
+        v = dict(self.variables)
+        self.gcode.respond_info("Variables: %s" % (v,))
     def cmd(self, gcmd):
         if self.in_script:
             raise gcmd.error("Macro %s called recursively" % (self.alias,))
