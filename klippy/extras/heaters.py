@@ -25,6 +25,7 @@ class Heater:
         self.sensor = sensor
         self.min_temp = config.getfloat('min_temp', minval=KELVIN_TO_CELSIUS)
         self.max_temp = config.getfloat('max_temp', above=self.min_temp)
+        self.max_target = config.getfloat('max_target', default=self.max_temp)
         self.sensor.setup_minmax(self.min_temp, self.max_temp)
         self.sensor.setup_callback(self.temperature_callback)
         self.pwm_delay = self.sensor.get_report_time_delta()
@@ -118,7 +119,7 @@ class Heater:
                 "Requested temperature (%.1f) out of range (%.1f:%.1f)"
                 % (degrees, self.min_temp, self.max_temp))
         with self.lock:
-            self.target_temp = degrees
+            self.target_temp = min(degrees, self.max_target)
     def get_temp(self, eventtime):
         print_time = self.mcu_pwm.get_mcu().estimated_print_time(eventtime) - 5.
         with self.lock:
