@@ -117,6 +117,7 @@ class Feeder:  # filament feeder:
         self.last_feed_len = 0.
         self.cur_feed_len = 0.          # total feed length for a feed without interruption
         self.total_feed_len = 0.0
+        self.prev_total_feed_len = 0.0
         self.last_feed_time = 0.0
         self.last_feed_speed = 0.0
         self.is_feeding = False
@@ -440,6 +441,10 @@ class Feeder:  # filament feeder:
 
     # update feeder for jam or break or slip or runout event.
     def _virtual_update_event(self, eventtime):
+        # if the total feed length is changed, update the runout pos.
+        if self.prev_total_feed_len != self.total_feed_len :
+            self._update_runout_pos(eventtime)
+            self.prev_total_feed_len = self.total_feed_len
         # check nozzle jam or feed failed when the extruder is working.
         if self.isprinting() and self.bfeeder_on:  # and self.bInited and not self.bWithdraw:
             extruderpos = self._get_extruder_pos(eventtime)
@@ -503,7 +508,8 @@ class Feeder:  # filament feeder:
             'enable': self.bfeeder_on,
             'inited': self.bInited,
             'fila_state': self._fila_state,
-            'switch_state': self._switch_state,}
+            'switch_state': self._switch_state,
+            'runout_pos': self.runout_pos,}
 
     cmd_SET_FEEDER_DISTANCE_help = "Sets a feeder hold distance"
     def cmd_SET_FEEDER_DISTANCE(self, gcmd):
