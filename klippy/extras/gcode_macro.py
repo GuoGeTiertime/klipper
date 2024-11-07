@@ -47,6 +47,7 @@ class TemplateWrapper:
         self.gcode = self.printer.lookup_object('gcode')
         gcode_macro = self.printer.lookup_object('gcode_macro')
         self.create_template_context = gcode_macro.create_template_context
+        self.source = script
         try:
             self.template = env.from_string(script)
         except Exception as e:
@@ -183,9 +184,16 @@ class GCodeMacro:
     cmd_SHOW_MACRO_help = "Show the source code of a G-Code macro"
     def cmd_SHOW_MACRO(self, gcmd):
         # show the source code of the macro
-        self.gcode.respond_info(self.template.template.source)
+        self.gcode.respond_info(self.template.source)
         v = dict(self.variables)
         self.gcode.respond_info("Variables: %s" % (v,))
+        kwparams = dict(self.variables)
+        kwparams.update(self.template.create_template_context())
+        kwparams['params'] = gcmd.get_command_parameters()
+        kwparams['rawparams'] = gcmd.get_raw_command_parameters()
+        renderstring = self.template.render(kwparams)
+        self.gcode.respond_info("after render: %s" %(renderstring,))
+
     def cmd(self, gcmd):
         if self.in_script:
             raise gcmd.error("Macro %s called recursively" % (self.alias,))
