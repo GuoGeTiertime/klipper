@@ -197,6 +197,7 @@ class HX71X:
         self.measured_max = -99999999.
 
         self.weight = {}  # 0.0
+        self.prevValue = {}  # 0.0
         self.read_time = {}  # 0.0
         self.weight_min = {}  # 0.0
         self.weight_max = {}  # 0.0
@@ -242,6 +243,7 @@ class HX71X:
             self._error_cnt[oid] = 0
 
             self.weight[oid] = 0.0
+            self.prevValue[oid] = 0.0
             self.weight_min[oid] = 0.0
             self.weight_max[oid] = 0.0
             self.read_time[oid] = 0.0
@@ -350,6 +352,7 @@ class HX71X:
         for oid in self.oids:
             self._sample_tare[oid] += self.weight[oid]
             self.weight[oid] = 0.0
+            self.prevValue[oid] = 0.0
             self.weight_min[oid] = self.weight_max[oid] = 0.0
 
         self.total_weight = self.total_weight_min = self.total_weight_max = 0.0
@@ -480,7 +483,8 @@ class HX71X:
         next_clock = self.mcu.clock32_to_clock64(params['next_clock']) # next_clock is later than the real sample time.
         last_read_time = self.mcu.clock_to_print_time(next_clock)
 
-        if value == 0 or abs(value-0x800000)<0x100:
+        bWrongValue = abs(value-0x800000)<0x100 and abs(value - self.prevValue[oid]) < abs(100.0/self.scale)
+        if value == 0 or bWrongValue:
             self._error_cnt[oid] += 1
             errcnt = self._error_cnt[oid]
             if errcnt < 4 or (errcnt % 4)==0:
@@ -504,6 +508,7 @@ class HX71X:
             if self.isCommErr and last_read_time > self.last_comm_err_time + self.gcode_interval:
                 self.isCommErr = False
 
+        self.prevValue[oid] = value
         self.weight[oid] = value * self.scale  # weight scale
         self.read_time[oid] = last_read_time  # read time
         
