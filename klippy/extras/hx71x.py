@@ -483,7 +483,7 @@ class HX71X:
         next_clock = self.mcu.clock32_to_clock64(params['next_clock']) # next_clock is later than the real sample time.
         last_read_time = self.mcu.clock_to_print_time(next_clock)
 
-        bWrongValue = abs(value-0x800000)<0x100 and abs(value - self.prevValue[oid]) < abs(100.0/self.scale)
+        bWrongValue = abs(value-0x800000)<0x10 and abs(value - self.prevValue[oid]) > abs(100.0/self.scale)
         if value == 0 or bWrongValue:
             self._error_cnt[oid] += 1
             errcnt = self._error_cnt[oid]
