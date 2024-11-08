@@ -122,6 +122,8 @@ void command_query_hx71x(uint32_t * args)
 
     //s_delayCnt = (CONFIG_CLOCK_FREQ / 1000000) * 0.06 + 1; //假设每个循环cnt要3个时钟周期. 大概延时0.2us.
     s_delayCnt = cnt / 100;     //用第三个参数的百位为作为延时计数.
+    if( s_delayCnt==0 )
+        s_delayCnt = 5; //默认使用5个循环,兼容以前的设备设定
 
     uint32_t t1 = timer_read_time();
     uint32_t t2 = timer_read_time();
