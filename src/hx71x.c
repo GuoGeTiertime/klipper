@@ -20,6 +20,10 @@
 //hx71x唤醒信号
 static struct task_wake s_Hx71x_Wake;
 
+static uint32_t s_delayCnt = 32; 
+static uint32_t s_delayCnt2 = 0;
+static uint32_t s_delayclk= 0;
+
 struct hx71x_s {
     struct timer hx71x_timer;       //定时器,启动
     uint32_t sample_ticks;          //采样时钟间隔.
@@ -51,6 +55,16 @@ long HX711_Read(struct hx71x_s *dev);
 void HX711_Get_WeightTare(struct hx71x_s *dev);
 long HX711_Get_Weight(struct hx71x_s *dev);
 
+//delay for wait data ready.
+static inline void
+hx71x_delay_waitdata(uint32_t var)
+{
+    uint32_t end = var;
+    for( int i=0; i<s_delayCnt; i++ )
+        end += i;
+    s_delayCnt2 = end;
+}
+
 void command_config_hx71x(uint32_t *args)
 {
     struct hx71x_s *hx71x = oid_alloc(args[0], command_config_hx71x
@@ -65,6 +79,14 @@ void command_config_hx71x(uint32_t *args)
     hx71x->sample_ticks = 100000000;
     hx71x->sample_times = 0;
     hx71x->sample_cnt = 0;
+
+    s_delayCnt = (CONFIG_CLOCK_FREQ / 1000000) * 0.06; //假设每个循环cnt要3个时钟周期. 大概延时0.2us.
+
+    uint32_t t1 = timer_read_time();
+    uint32_t t2 = timer_read_time();
+    hx71x_delay_waitdata(3);
+    uint32_t t3 = timer_read_time();
+    s_delayclk = t3 - t2 - (t2-t1);
 }
 DECL_COMMAND(command_config_hx71x,
     "config_hx71x oid=%c sck_pin=%u dout_pin=%u");
@@ -123,6 +145,7 @@ hx71x_udelay(uint32_t usecs)
     while (!timer_is_before(end, timer_read_time()));
 }
 
+
 //read data form HX711
 long HX711_Read(struct hx71x_s *dev)
 {
@@ -135,8 +158,8 @@ long HX711_Read(struct hx71x_s *dev)
     int nCnt = 0;
     while ( gpio_in_read(dev->dt_in) )
     {
-        hx71x_udelay(1);
-        if (nCnt++> 1 * 1000) //max 1ms.
+        hx71x_udelay(10);   //10us
+        if (nCnt++> 100) //max 1ms.
             return 0;
     }
 
@@ -145,12 +168,14 @@ long HX711_Read(struct hx71x_s *dev)
     for (int i = 0; i < 24; i++)
     {
         gpio_out_write(dev->sck_out, 1);
-        hx71x_udelay(1);
+        // hx71x_udelay(1);
+        hx71x_delay_waitdata(0);
 
         count = count << 1;
 
         gpio_out_write(dev->sck_out, 0);
-        hx71x_udelay(1);
+        // hx71x_udelay(1);
+        hx71x_delay_waitdata(0);
 
         if( gpio_in_read(dev->dt_in) )
             count++;
@@ -166,9 +191,11 @@ long HX711_Read(struct hx71x_s *dev)
     for (int i = 0; i < n; i++)
     {
         gpio_out_write(dev->sck_out, 1);
-        hx71x_udelay(1);
+        // hx71x_udelay(1);
+        hx71x_delay_waitdata(0);
         gpio_out_write(dev->sck_out, 0);
-        hx71x_udelay(1);
+        // hx71x_udelay(1);
+        hx71x_delay_waitdata(0);
     }
 
     //完成采样,计数+1.
@@ -210,7 +237,8 @@ hx71x_query_task(void)
 
         //读取并发送返回数据
         long weight = HX711_Get_Weight(dev);
-        sendf("hx71x_state oid=%c value=%u cnt=%u next_clock=%u", oid, weight, dev->sample_cnt, next_waketime);
+//        sendf("hx71x_state oid=%c value=%u cnt=%u next_clock=%u", oid, weight, dev->sample_cnt, next_waketime);
+        sendf("hx71x_state oid=%c value=%u cnt=%u next_clock=%u", oid, weight, s_delayclk, next_waketime);
     }
 }
 DECL_TASK(hx71x_query_task);
