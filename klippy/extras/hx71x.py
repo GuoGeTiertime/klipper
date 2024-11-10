@@ -202,8 +202,6 @@ class HX71X:
         self.weight_min = {}  # 0.0
         self.weight_max = {}  # 0.0
         self.total_weight = 0.0
-        self.total_weight_min = 0.0
-        self.total_weight_max = 0.0
         self.prev_weight = 0.0
         self.collision_cnt = {}
 
@@ -340,7 +338,7 @@ class HX71X:
     cmd_QUERY_WEIGHT_help = "Report on the status of a group of hx71x sensors, QUERY_WEIGHT SENSOR=xxxxx"
     def cmd_QUERY_WEIGHT(self, gcmd):
         out = []
-        out.append(" Total: %.3fg (%.3f~%.3f)" % (self.total_weight, self.total_weight_min, self.total_weight_max))
+        out.append(" Total: %.3fg (%.3f~%.3f)" % (self.total_weight, self.measured_min, self.measured_max))
         for oid in self.oids:
             out.append("\n oid%d: %.3fg(%.3f~%.3f) @%.3fs  CNT:%d" % 
                        (oid, self.weight[oid], self.weight_min[oid], self.weight_max[oid], self.read_time[oid], self._sample_cnt[oid]))
@@ -355,7 +353,7 @@ class HX71X:
             self.prevValue[oid] = 0.0
             self.weight_min[oid] = self.weight_max[oid] = 0.0
 
-        self.total_weight = self.total_weight_min = self.total_weight_max = 0.0
+        self.total_weight = 0.0
         self.measured_min = 9999999.0
         self.measured_max = -9999999.0
         self._filter_values.clear()
@@ -554,9 +552,6 @@ class HX71X:
         self.total_weight = 0.0
         for oid in self.oids:
             self.total_weight += self.weight[oid]
-        self.total_weight_min = min(self.total_weight_min, self.total_weight)
-        self.total_weight_max = max(self.total_weight_max, self.total_weight)
-
         self._push_filter_value(self.total_weight)
 
         # use total weight as temperature.
