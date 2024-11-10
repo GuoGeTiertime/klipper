@@ -154,8 +154,8 @@ class HX71X_endstop:
     
     def trigger(self, eventime):
         if( eventime - self.activetime < MIN_TRIGGER_DELAY_TIME):
-            curtime = self._hx71x.reactor.monotonic()
-            logging.info("Error, hx71x virtual endstop is triggered too early @ %.4f, active: %.4f, active:%.4f/curtime:%.4f", eventime, self.activetime, self.activecurtime, curtime)
+            # curtime = self._hx71x.reactor.monotonic()
+            # logging.info("Error, hx71x virtual endstop is triggered too early @ %.4f, active: %.4f, active:%.4f/curtime:%.4f", eventime, self.activetime, self.activecurtime, curtime)
             return
         if self._trigger_completion is not None :
             # msg = "hx71x virtual endstop is triggered @ %.4f with weight:%.2f" % (eventime, self._hx71x.total_weight)
@@ -308,15 +308,6 @@ class HX71X:
         # register a sensor type for HX71X
         pheaters = self.printer.load_object(config, 'heaters')
         pheaters.add_sensor_factory("HX71X", HX71X)
-        # self.sensor = pheaters.setup_sensor(config)
-        # self.min_temp = config.getfloat('min_temp', KELVIN_TO_CELSIUS,
-        #                                 minval=KELVIN_TO_CELSIUS)
-        # self.max_temp = config.getfloat('max_temp', 99999999.9,
-        #                                 above=self.min_temp)
-        # self.sensor.setup_minmax(self.min_temp, self.max_temp)
-        # self.setup_callback(self.temperature_callback)
-        # self._callback = self.temperature_callback
-        # pheaters.register_sensor(config, self)
 
         # callback function, call the function to update heater's temperature data.
         self._callback = None
@@ -454,10 +445,6 @@ class HX71X:
         self._exec_gcode(self.comm_err_gcode)
 
     def build_config(self):
-        # self.read_hx71x_cmd = self.mcu.lookup_query_command(
-        #     "read_hx71x oid=%c read_len=%u",
-        #     "read_hx71x_response oid=%c response=%*s", oid=self.oid,
-        #     cq=self.cmd_queue)
         ticks = self.mcu.seconds_to_clock(self.report_time)
 
         for oid in self.oids:
@@ -656,41 +643,9 @@ class HX71X:
             self.mcu._serial.send("query_hx71x oid=%d ticks=%d times=%d pulse_cnt=%d" % (oid, ticks, self._sample_times, self.pulse_cnt))
         return
 
-    # def _sample_hx71x(self, eventtime):
-    #     params = self.read_hx71x(4)
-
-    #     response = bytearray(params['response'])
-    #     w = int.from_bytes(response, byteorder='little', signed=True)
-    #     self.weight = w * self.scale # weight scale
-
-    #     self._sample_cnt += 1
-        
-    #     if self._sample_cnt < 5 :
-    #         self._sample_tare = self.weight
-    #     else:
-    #         self.weight -= self._sample_tare
-
-    #     # logging.info("Senser:%s,  read hx711 @ %.3f , weight:%.2f", self.name, eventtime, self.weight)
-
-    #     # use weight as temperature.
-    #     self.last_temp = self.weight
-    #     if self._callback is not None:
-    #         self._callback(eventtime, self.last_temp) #callback to update the temperature of heaters.
-
-    #     # timer interval is short when homing
-    #     if (self._endstop is not None) and self._endstop.bHoming :
-    #         if self.weight > (self.endstop_base + self.endstop_threshold) :
-    #             self._endstop.trigger(eventtime)
-    #         return eventtime + self.endstop_report_time
-    #     else :
-    #         return eventtime + self.report_time
-
     def get_status(self, eventtime):
         state = {
             'weight': round(self.total_weight, 2),
-            # 'temperature': round(self.last_temp, 2),
-            # 'measured_min_temp': round(self.measured_min, 2),
-            # 'measured_max_temp': round(self.measured_max, 2)
             'weight_min': round(self.measured_min, 2),
             'weight_max': round(self.measured_max, 2)
         }
