@@ -555,9 +555,8 @@ class HX71X:
         self._push_filter_value(self.total_weight)
 
         # use total weight as temperature.
-        self.last_temp = self.total_weight
-        self.measured_min = min(self.measured_min, self.last_temp)
-        self.measured_max = max(self.measured_max, self.last_temp)
+        self.measured_min = min(self.measured_min, self.total_weight)
+        self.measured_max = max(self.measured_max, self.total_weight)
 
         # report weight periodically or the change of weight is bigger than threshold.
         bResponse = False
@@ -580,7 +579,7 @@ class HX71X:
 
         # call callback function to update the temperature of heaters.
         if self._callback is not None:
-            self._callback(last_read_time, self.last_temp)  # callback to update the temperature of heaters.
+            self._callback(last_read_time, self.total_weight)  # callback to update the temperature of heaters.
 
         # debug log, print weight when over endstop threshold every 16 times.
         # if (self._endstop is not None) and (self._sample_cnt_total[oid] % 16) == 0:
@@ -689,9 +688,11 @@ class HX71X:
     def get_status(self, eventtime):
         state = {
             'weight': round(self.total_weight, 2),
-            'temperature': round(self.last_temp, 2),
-            'measured_min_temp': round(self.measured_min, 2),
-            'measured_max_temp': round(self.measured_max, 2)
+            # 'temperature': round(self.last_temp, 2),
+            # 'measured_min_temp': round(self.measured_min, 2),
+            # 'measured_max_temp': round(self.measured_max, 2)
+            'weight_min': round(self.measured_min, 2),
+            'weight_max': round(self.measured_max, 2)
         }
 
         idx = 0
@@ -726,11 +727,11 @@ class HX71X:
 
     def get_temp(self, eventtime):
         # logging.info("call HX71X.get_temp() of %s ,eventtime: %.2f ", self.name, eventtime)
-        return self.last_temp, 0.
+        return self.total_weight, 0.
     
     def stats(self, eventtime):
         # logging.info("call HX71X.stats() of %s, eventtime: %.2f, temp:%.2f ", self.name, eventtime, self.last_temp)
-        return False, '%s: temp=%.1f' % (self.name, self.last_temp)
+        return False, '%s: temp=%.1f' % (self.name, self.total_weight)
 
     def setup_minmax(self, min_temp, max_temp):
         self.min_temp = min_temp
