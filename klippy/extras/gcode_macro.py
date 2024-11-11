@@ -190,7 +190,8 @@ class GCodeMacro:
         kwparams = dict(self.variables)
         kwparams.update(self.template.create_template_context())
         kwparams['params'] = gcmd.get_command_parameters()
-        kwparams['rawparams'] = gcmd.get_raw_command_parameters()
+        raw = gcmd.get_raw_command_parameters()
+        kwparams['rawparams'] = " ".join(raw.split()[1:]) # remove the first word, which is the command
         renderstring = self.template.render(kwparams)
         # 去除空行
         result = "\n".join(filter(lambda line: line.strip(), renderstring.split("\n")))
