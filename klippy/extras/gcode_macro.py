@@ -192,7 +192,9 @@ class GCodeMacro:
         kwparams['params'] = gcmd.get_command_parameters()
         kwparams['rawparams'] = gcmd.get_raw_command_parameters()
         renderstring = self.template.render(kwparams)
-        self.gcode.respond_info("after render: %s" %(renderstring,))
+        # 去除空行
+        result = "\n".join(filter(lambda line: line.strip(), renderstring.split("\n")))
+        self.gcode.respond_info("after render:\n %s" %(result,))
 
     def cmd(self, gcmd):
         if self.in_script:
