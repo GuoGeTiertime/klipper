@@ -696,7 +696,7 @@ class FilaFeeders:  # PrinterHeaters:
             raise config.error("Feeder %s already registered" % (feeder_name,))
         
         # test mcu is exist.
-        fila_pin = config.get('fila_pin')
+        fila_pin = config.get('fila_pin', None)
         # Parse pins
         ppins = self.printer.lookup_object('pins')
         try:
