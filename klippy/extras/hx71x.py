@@ -203,7 +203,7 @@ class HX71X:
         self.weight_max = {}  # 0.0
         self.total_weight = 0.0
         self.prev_weight = 0.0
-        self.collision_cnt = {}
+        self.collision_cnt = 0 #{}
 
         self.isloginfo = 0  # 0: no log, 1:gcode response, 2: write log file, 3: response and write log file
 
@@ -247,7 +247,7 @@ class HX71X:
             self.weight_min[oid] = 0.0
             self.weight_max[oid] = 0.0
             self.read_time[oid] = 0.0
-            self.collision_cnt[oid] = 0
+            # self.collision_cnt[oid] = 0
 
         # update period
         self.report_time = config.getfloat('hx71x_report_time', 1, minval=MIN_REPORT_TIME)
@@ -520,17 +520,17 @@ class HX71X:
         #                  (self.name, oid, last_read_time, self.weight[oid], self._sample_cnt[oid], self._sample_tare[oid], value))
             
         # collision warning test, cnt > 10 (every time +3) ,then shutdown the printer.
-        bActive = last_read_time > self.last_collision_time + self.gcode_interval # avoid run gcode too many times.
-        if bActive and self.collision_err > 0 and abs(self.weight[oid]) > self.collision_err:
-            self.collision_cnt[oid] += 3
-            if self.collision_cnt[oid] > self.collision_err_cnt:
-                msg = "Weight senser:%s(oid:%d) collision warning, weight:%.2f(%d-%X), cnt:%d. Shutdown the printer!" % (self.name, oid, self.weight[oid], value, value, self.collision_cnt[oid])
-                self._loginfo(msg, 3) #log info at command line and log file
-                self.reactor.register_callback(self._collision_handler) # run script by callback function
-                self.collision_cnt[oid] = 0
-                self.last_collision_time = last_read_time
-        else:
-            self.collision_cnt[oid] = max(0, self.collision_cnt[oid]-1)
+        # bActive = last_read_time > self.last_collision_time + self.gcode_interval # avoid run gcode too many times.
+        # if bActive and self.collision_err > 0 and abs(self.weight[oid]) > self.collision_err:
+        #     self.collision_cnt[oid] += 3
+        #     if self.collision_cnt[oid] > self.collision_err_cnt:
+        #         msg = "Weight senser:%s(oid:%d) collision warning, weight:%.2f(%d-%X), cnt:%d. Shutdown the printer!" % (self.name, oid, self.weight[oid], value, value, self.collision_cnt[oid])
+        #         self._loginfo(msg, 3) #log info at command line and log file
+        #         self.reactor.register_callback(self._collision_handler) # run script by callback function
+        #         self.collision_cnt[oid] = 0
+        #         self.last_collision_time = last_read_time
+        # else:
+        #     self.collision_cnt[oid] = max(0, self.collision_cnt[oid]-1)
 
 
         # update total weight when all seners are read.
@@ -549,6 +549,19 @@ class HX71X:
         # use total weight as temperature.
         self.measured_min = min(self.measured_min, self.total_weight)
         self.measured_max = max(self.measured_max, self.total_weight)
+
+        # use total weight to test collision, cnt > 10 (every time +3) ,then shutdown the printer.
+        bActive = last_read_time > self.last_collision_time + self.gcode_interval # avoid run gcode too many times.
+        if bActive and self.collision_err > 0 and abs(self.total_weight) > self.collision_err:
+            self.collision_cnt += 3
+            if self.collision_cnt > self.collision_err_cnt:
+                msg = "Weight senser:%s collision warning, weight:%.2f, cnt:%d. Shutdown the printer!" % (self.name, self.total_weight, self.collision_cnt)
+                self._loginfo(msg, 3) #log info at command line and log file
+                self.reactor.register_callback(self._collision_handler) # run script by callback function
+                self.collision_cnt= 0
+                self.last_collision_time = last_read_time
+        else:
+            self.collision_cnt = max(0, self.collision_cnt-1)
 
         # report weight periodically or the change of weight is bigger than threshold.
         bResponse = False
