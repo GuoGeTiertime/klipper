@@ -335,7 +335,13 @@ class HX71X:
         for oid in self.oids:
             out.append("\n oid%d: %.3fg(%.3f~%.3f) @%.3fs  CNT:%d" % 
                        (oid, self.weight[oid], self.weight_min[oid], self.weight_max[oid], self.read_time[oid], self._sample_cnt[oid]))
-        out = " ".join(out)
+        # out = " ".join(out)
+        # gcmd.respond_info("Sensor: " + self.name + out)
+        # out = []
+        out.append("\n Origin Value --- ")
+        for oid in self.oids:
+            out.append(" oid%d :%d(0x%X) " % (oid, self.prevValue[oid], self.prevValue[oid]))
+        out = "Origin Value: " + " ".join(out)
         gcmd.respond_info("Sensor: " + self.name + out)
 
     cmd_TARE_WEIGHT_help = "Tare the weight sensor, TARE_WEIGHT SENSOR=xxxxx"
