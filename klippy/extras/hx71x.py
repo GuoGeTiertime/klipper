@@ -278,6 +278,9 @@ class HX71X:
         self._filter_cur_Values = 0.0
         # self._filter_prev_Values = 0.0
 
+        # 超过阈值判断,用于log数据,分析, 当总重量大于overload后,输出在log中.
+        self._OverLoad = self.getfloat('overload', 10000.0)
+
         #test weight sensor is ok or stepper motor is ok
         self.test_min = config.getfloat('test_min', 100.0)
         self.test_max = config.getfloat('test_max', 1000.0)
@@ -555,6 +558,11 @@ class HX71X:
         # use total weight as temperature.
         self.measured_min = min(self.measured_min, self.total_weight)
         self.measured_max = max(self.measured_max, self.total_weight)
+
+        # add for debug very large weight.
+        if abs(self.total_weight) > self._OverLoad:
+            msg = "HX71X overload, total Weight: %.2f > %.1f, cnt: %d" % (self.total_weight, self._OverLoad, self._sample_cnt[oid])
+            self._loginfo(msg)
 
         # use total weight to test collision, cnt > 10 (every time +3) ,then shutdown the printer.
         bActive = last_read_time > self.last_collision_time + self.gcode_interval # avoid run gcode too many times.
