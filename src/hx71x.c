@@ -153,7 +153,7 @@ uint32_t HX711_Read(struct hx71x_s *dev)
         gpio_out_write(sck[i], 0);
         v[i] = 0; //clear data
     }
-    hx71x_udelay(1);
+    // hx71x_udelay(1);
 
     //wait all dout to low.
     uint32_t nCnt = 0;
@@ -176,6 +176,7 @@ uint32_t HX711_Read(struct hx71x_s *dev)
     //read 24bit data and mode pulse.
     for (uint32_t j=0; j<dev->pulse_cnt; j++)
     {
+        irq_disable();
         foreach_sensor(i, s)
             gpio_out_write(sck[i], 1);
         // hx71x_udelay(1);
@@ -183,6 +184,8 @@ uint32_t HX711_Read(struct hx71x_s *dev)
 
         foreach_sensor(i, s)
             gpio_out_write(sck[i], 0);
+        irq_enable();
+
         // hx71x_udelay(1);
         hx71x_delay_waitdata(s_delayclk, loop);
 
