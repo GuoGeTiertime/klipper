@@ -32,7 +32,7 @@ class weight_sensor:
         self.maxWeight = max(self.maxWeight, self.weight)
 
     def strCurPrev(self):
-        return "cur:%d(0x%X) prev:%d(0x%X)" % (self.curValue, self.curValue, self.prevValue, self.prevValue)
+        return "weight:%.1fg cur:%d(0x%X) prev:%d(0x%X)" % (self.weight, self.curValue, self.curValue, self.prevValue, self.prevValue)
 
 ######################################################################
 # Compatible Sensors:
@@ -226,7 +226,8 @@ class HX71X:
 
         # Determine pin from config
         configcmd = "config_hx71x oid=%d" % self.oid
-        for i in range(2): # max 6 hx71x unit number.
+        prevSck = None
+        for i in range(6): # max 6 hx71x unit number.
             # Add pin for one hx711 unit.
             sck = config.get('hx71x_sck_pin_'+str(i), None)
             dout = config.get('hx71x_dout_pin_'+str(i), None)
@@ -236,17 +237,18 @@ class HX71X:
             
             letteri = chr(ord('a') + i) # a, b, c, d, e, f
             if sck is None or dout is None:
-                configcmd += " s%c=0 d%c=0" % (letteri, letteri)
+                configcmd += " s%c_pin=%s d%c_pin=%s" % (letteri, prevSck['pin'], letteri, prevSck['pin'])
             else:
                 sck_params = ppins.lookup_pin(sck)
                 dout_params = ppins.lookup_pin(dout)
-                configcmd += " s%c=%s d%c=%s" % (letteri, sck_params['pin'], letteri, dout_params['pin'])
+                prevSck = sck_params
+                configcmd += " s%c_pin=%s d%c_pin=%s" % (letteri, sck_params['pin'], letteri, dout_params['pin'])
                 self.sensors.append(weight_sensor(self.scale))
-
+      
         # Add config commands
         logging.info("%s hx71x config command: %s", self.name, configcmd) #log for debug.
         self.mcu.add_config_cmd(configcmd)
-      
+
         # update period, HX71X pulse tiems, delay loop times.
         self.report_time = config.getfloat('hx71x_report_time', 1, minval=MIN_REPORT_TIME)
         self.pulse_cnt = config.getint('hx71x_pluse_cnt', 25)
@@ -298,7 +300,8 @@ class HX71X:
         self.printer.add_object("hx71x " + self.name, self)
 
         # config callback function, start to read hx71x sensor.
-        self.mcu.register_config_callback(self.build_config)
+        self.printer.register_event_handler("klippy:ready", self._handle_ready)
+
 
         # register a sensor type for HX71X
         # pheaters = self.printer.load_object(config, 'heaters')
@@ -321,12 +324,19 @@ class HX71X:
                                         self.cmd_TEST_WEIGHT,
                                         desc=self.cmd_TEST_WEIGHT_help)
 
+    def _handle_ready(self):
+        self.updateNow()
+        # ticks = self.mcu.seconds_to_clock(self.report_time)
+        # self.mcu.add_config_cmd( "query_hx71x oid=%d ticks=%d times=%d pulse_cnt=%d delayloop=%d" 
+        #                         % (self.oid, ticks, self._sample_times, self.pulse_cnt, self.delayloop) )
+        self.mcu.register_response(self._handle_hx71x_state, "hx71x_state", self.oid)
+
     cmd_QUERY_WEIGHT_help = "Report on the status of a group of hx71x sensors, QUERY_WEIGHT SENSOR=xxxxx"
     def cmd_QUERY_WEIGHT(self, gcmd):
         out = []
         out.append(" Total: %.3fg (%.3f~%.3f)" % (self.all_sensor.weight, self.all_sensor.minWeight, self.all_sensor.maxWeight))
         for i in range(len(self.sensors)):
-            out.append("\n -- S:%d " + self.sensors[i].strCurPrev()) 
+            out.append(("\n -- S:%d " % i) + self.sensors[i].strCurPrev()) 
         out = " ".join(out)
         gcmd.respond_info("Sensor: " + self.name + out)
 
@@ -377,12 +387,6 @@ class HX71X:
     def _comm_err_handler(self, eventtime):
         self._exec_gcode(self.comm_err_gcode)
 
-    def build_config(self):
-        ticks = self.mcu.seconds_to_clock(self.report_time)
-        self.mcu.add_config_cmd( "query_hx71x oid=%d ticks=%d times=%d pulse_cnt=%d delayloop=%d" 
-                                % (self.oid, ticks, self._sample_times, self.pulse_cnt, self.delayloop) )
-        self.mcu.register_response(self._handle_hx71x_state, "hx71x_state", self.oid)
-
     def _endstop_trigger(self, last_read_time):
         if (self._endstop is not None) and self._endstop.bHoming:
             # call endstop trigger function.
@@ -404,7 +408,7 @@ class HX71X:
                 readvalue[i] = params['v'+str(i)]
                 # check the value is zero or wrong value.
                 bZeroValue = readvalue[i] == 0
-                bWrongValue = abs(readvalue[i]-0x800000)<0x10 and abs(readvalue[i] - self.prevValues[i]) > abs(100.0/self.scale)
+                bWrongValue = abs(readvalue[i]-0x800000)<0x10 and abs(readvalue[i] - self.sensors[i].prevValue) > abs(100.0/self.scale)
                 if bZeroValue or bWrongValue:
                     bErrorValue = True
 
@@ -483,14 +487,15 @@ class HX71X:
         if abs(self.all_sensor.weight) > self.collision_err:
             self.collision_cnt += 3
             if self.collision_cnt > self.collision_err_cnt:
+                self._logWeight(readtime, True) #force log weight info.
+                msg = "Weight senser:%s collision warning, weight:%.2f, collision count:%d, sample cnt:%d. Shutdown the printer!" % (self.name, self.all_sensor.weight, self.collision_cnt, self._sample_cnt)
+                self._loginfo(msg, 3) #log info at command line and log file
                 self.collision_cnt= 0
                 self.last_collision_time = readtime
-                msg = "Weight senser:%s collision warning, weight:%.2f, collision count:%d. Shutdown the printer!" % (self.name, self.all_sensor.weight, self.collision_cnt)
-                self._loginfo(msg, 3) #log info at command line and log file
                 self.reactor.register_callback(self._collision_handler) # run script by callback function
 
-    def _logWeight(self, readtime):
-        if self.isloginfo == 0:
+    def _logWeight(self, readtime, bForce=False):
+        if self.isloginfo == 0 and not bForce:
             return
         # report weight periodically or the change of weight is bigger than threshold.
         bResponse = False
@@ -501,7 +506,7 @@ class HX71X:
                 bResponse = True
         # if self._endstop.bHoming: #add by guoge 20240424, 检测probe时,重力传感器的响应速度和变化幅度.
         #     bResponse = True
-        if bResponse:
+        if bResponse or bForce:
             self.last_response_weight = self.all_sensor.weight
             self.last_response_time = readtime
             out = []
@@ -510,7 +515,7 @@ class HX71X:
                 w = self.sensors[i].weight
                 v = self.sensors[i].curValue
                 out.append(" %d: %.2f(%d/0x%X) " % (i, w, v, v))
-            self._loginfo(" ".join(out))
+            self._loginfo(" ".join(out), 3 if bForce else None)
 
     def _push_filter_value(self, weight):
         if len(self._filter_values) >= self._filter_store_times:

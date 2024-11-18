@@ -17,7 +17,7 @@
 #define HX71X_SAMPLE_START  0x01
 #define HX71X_SAMPLE_NOW    0x02
 
-#define MAX_SENSOR      2  //max 6 sensor.
+#define MAX_SENSOR      6  //max 6 sensor.
 
 //hx71x唤醒信号
 static struct task_wake s_Hx71x_Wake;
@@ -100,7 +100,7 @@ void command_config_hx71x(uint32_t *args)
     hx71x->sample_cnt = 0;
 }
 DECL_COMMAND(command_config_hx71x,
-    "config_hx71x oid=%c sa=%u da=%u sb=%u db=%u");// sc=%u dc=%u sd=%u dd=%u se=%u de=%u sf=%u df=%u");
+    "config_hx71x oid=%c sa_pin=%u da_pin=%u sb_pin=%u db_pin=%u sc_pin=%u dc_pin=%u sd_pin=%u dd_pin=%u se_pin=%u de_pin=%u sf_pin=%u df_pin=%u");
 
 
 struct hx71x_s * hx71x_oid_lookup(uint8_t oid)
