@@ -12,19 +12,17 @@ MIN_REPORT_TIME = 0.001 #max HX71X frequency is 320Hz(HX717),
 
 class weight_sensor:
     def __init__(self, scale):
-        self.prevValue = 0
-        self.curValue = 0
-        self.scale = scale
-        self.tareValue = 0
-        self.weight = 0
-        self.minWeight = 0
-        self.maxWeight = 0
+        self.prevValue = 0      #前一次读数
+        self.curValue = 0       #当前读数
+        self.scale = scale      #单位换算系数
+        self.tareValue = 0      #去皮值
+        self.weight = 0         #重量
+        self.minWeight = 0      #最小重量
+        self.maxWeight = 0      #最大重量
 
     def _tare(self):
         self.tareValue = self.curValue
-        self.weight = 0
-        self.minWeight = 0
-        self.maxWeight = 0
+        self.weight = self.minWeight = self.maxWeight = 0
 
     def update(self, value):
         self.prevValue = self.curValue
@@ -194,7 +192,6 @@ class HX71X_endstop:
                 curtime = self._hx71x.reactor.monotonic()
                 logging.info("trigger hx71x virtual endstop @ eventtime: %.4f, curtime: %.4f", eventime, curtime)
 
-                
     def query_endstop(self, eventime):
         return self._hx71x.is_endstop_on()
 
@@ -208,25 +205,20 @@ class HX71X:
         self.oid = self.mcu.create_oid()
         self._endstop = None
         self.lock = threading.Lock()
+        self.isloginfo = 0  # 0: no log, 1:gcode response, 2: write log file, 3: response and write log file
 
         # add sampel record variable for hx71x sensor, 
         # use list store the value of multi hx711 unit.
         self._sample_cnt = 0
         self._sample_times = 1000000000
-        self._sample_tare = 0
         self._error_cnt = 0
+        self.collision_cnt = 0
         # unit scale
         self.scale = config.getfloat('hx71x_scale', 0.001)
 
         # record the weight of each hx711 unit and total weight.
-        self.sensors = []
         self.all_sensor = weight_sensor(self.scale)
-        self.read_time = 0.0
-        self.collision_cnt = 0
-
-        self.isloginfo = 0  # 0: no log, 1:gcode response, 2: write log file, 3: response and write log file
-
-        self.testError = 0 # test error flag
+        self.sensors = []
 
         # register chip for add endstop by setup_pin
         ppins = config.get_printer().lookup_object("pins")
@@ -234,29 +226,31 @@ class HX71X:
 
         # Determine pin from config
         configcmd = "config_hx71x oid=%d" % self.oid
- 
-        for i in range(6): # max 6 hx71x unit number.
+        for i in range(2): # max 6 hx71x unit number.
             # Add pin for one hx711 unit.
             sck = config.get('hx71x_sck_pin_'+str(i), None)
             dout = config.get('hx71x_dout_pin_'+str(i), None)
             if sck is None and i == 0:  # only one hx711 unit.
                 sck = config.get('hx71x_sck_pin', None)
                 dout = config.get('hx71x_dout_pin', None)
-                
+            
+            letteri = chr(ord('a') + i) # a, b, c, d, e, f
             if sck is None or dout is None:
-                configcmd += " s%d=0 d%d=0" % (i, i)
+                configcmd += " s%c=0 d%c=0" % (letteri, letteri)
             else:
-                configcmd += " s%d=%s d%d=%s" % (i, sck['pin'], i, dout['pin'])
+                sck_params = ppins.lookup_pin(sck)
+                dout_params = ppins.lookup_pin(dout)
+                configcmd += " s%c=%s d%c=%s" % (letteri, sck_params['pin'], letteri, dout_params['pin'])
                 self.sensors.append(weight_sensor(self.scale))
 
-        # Add config commands, 
+        # Add config commands
+        logging.info("%s hx71x config command: %s", self.name, configcmd) #log for debug.
         self.mcu.add_config_cmd(configcmd)
       
-        # update period
+        # update period, HX71X pulse tiems, delay loop times.
         self.report_time = config.getfloat('hx71x_report_time', 1, minval=MIN_REPORT_TIME)
         self.pulse_cnt = config.getint('hx71x_pluse_cnt', 25)
         self.delayloop = config.getint('hx71x_delayloop', 1)
-
 
         # set base value and triger threshold for endstop
         self.endstop_base = config.getfloat('endstop_base', 0.0)
@@ -281,15 +275,10 @@ class HX71X:
         # self._filter_prev_Values = 0.0
 
         # 超过阈值判断,用于log数据,分析, 当总重量大于overload后,输出在log中.
-        self._OverLoad = self.getfloat('overload', 10000.0)
+        self._OverLoad = config.getfloat('overload', 10000.0)
 
-        #test weight sensor is ok or stepper motor is ok
-        self.test_min = config.getfloat('test_min', 100.0)
-        self.test_max = config.getfloat('test_max', 1000.0)
-        self.test_gcode = {}
+        #paramters for collision and communication error.
         gcode_macro = self.printer.load_object(config, 'gcode_macro')
-        for i in range(4):  # max 4 test gcode
-            self.test_gcode[i] =  gcode_macro.load_template(config, 'test_gcode_%d' % i, "")
         self.collision_gcode = gcode_macro.load_template(config, 'collision_gcode', 'M118 Collision warning by weight sensor\nM112')
         self.comm_err_gcode = gcode_macro.load_template(config, 'comm_err_gcode', 'M118 There are too many error in the weight sensor communication')
         self.gcode_interval = config.getfloat('gcode_interval', 20.0, minval=1.0, maxval=600.0)
@@ -297,7 +286,7 @@ class HX71X:
         self.last_comm_err_time = -10000
         self.isCommErr = False
 
-        # set gcode response time, default is 0. display the weight in gcode response.
+        # log weight in gcoce response time, threshold, and log flag.
         self.response_time = config.getfloat('log_time', 0.0)
         self.last_response_time = 0.0  # self.reactor.monotonic()
 
@@ -487,17 +476,18 @@ class HX71X:
 
     def _collision_check(self, readtime):
         # use total weight to test collision, cnt > 10 (every time +3) ,then shutdown the printer.
-        bActive = readtime > self.last_collision_time + self.gcode_interval # avoid run gcode too many times.
-        if bActive and abs(self.all_sensor.weight) > self.collision_err:
+        if readtime < self.last_collision_time + self.gcode_interval: # avoid run gcode too many times.
+            self.collision_cnt = max(0, self.collision_cnt-1)
+            return
+        
+        if abs(self.all_sensor.weight) > self.collision_err:
             self.collision_cnt += 3
             if self.collision_cnt > self.collision_err_cnt:
-                msg = "Weight senser:%s collision warning, weight:%.2f, cnt:%d. Shutdown the printer!" % (self.name, self.all_sensor.weight, self.collision_cnt)
-                self._loginfo(msg, 3) #log info at command line and log file
-                self.reactor.register_callback(self._collision_handler) # run script by callback function
                 self.collision_cnt= 0
                 self.last_collision_time = readtime
-        else:
-            self.collision_cnt = max(0, self.collision_cnt-1)
+                msg = "Weight senser:%s collision warning, weight:%.2f, collision count:%d. Shutdown the printer!" % (self.name, self.all_sensor.weight, self.collision_cnt)
+                self._loginfo(msg, 3) #log info at command line and log file
+                self.reactor.register_callback(self._collision_handler) # run script by callback function
 
     def _logWeight(self, readtime):
         if self.isloginfo == 0:
@@ -592,8 +582,7 @@ class HX71X:
         state = {
             'weight': round(self.all_sensor.weight, 2),
             'weight_min': round(self.all_sensor.minWeight, 2),
-            'weight_max': round(self.all_sensor.maxWeight, 2),
-            'test_error': self.testError
+            'weight_max': round(self.all_sensor.maxWeight, 2)
         }
         # add every sensor data for debug.
         minDiff = 0

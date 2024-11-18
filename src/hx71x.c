@@ -17,12 +17,11 @@
 #define HX71X_SAMPLE_START  0x01
 #define HX71X_SAMPLE_NOW    0x02
 
-#define MAX_SENSOR      6  //max 6 sensor.
+#define MAX_SENSOR      2  //max 6 sensor.
 
 //hx71x唤醒信号
 static struct task_wake s_Hx71x_Wake;
 
-static uint32_t s_delayCnt = 2; 
 static uint32_t s_delayCnt2 = 0;
 static uint32_t s_delayclk= 123;
 
@@ -52,9 +51,7 @@ static uint_fast8_t hx71x_sample_event(struct timer* t)
     dev->flag |= HX71X_SAMPLE_NOW;
 	dev->hx71x_timer.waketime += dev->sample_ticks;
     //是否继续启动下一个定时.(继续采样或停止)
-    if( dev->sample_times>0 )
-        dev->sample_times--;
-	return dev->sample_times>0 ? SF_RESCHEDULE : SF_DONE;
+	return --dev->sample_times>0 ? SF_RESCHEDULE : SF_DONE;
 }
 
 uint32_t HX711_Read(struct hx71x_s *dev);
@@ -103,7 +100,7 @@ void command_config_hx71x(uint32_t *args)
     hx71x->sample_cnt = 0;
 }
 DECL_COMMAND(command_config_hx71x,
-    "config_hx71x oid=%c s0=%u d0=%u s1=%u d1=%u s2=%u d2=%u s3=%u d3=%u s4=%u d4=%u s5=%u d5=%u");
+    "config_hx71x oid=%c sa=%u da=%u sb=%u db=%u");// sc=%u dc=%u sd=%u dd=%u se=%u de=%u sf=%u df=%u");
 
 
 struct hx71x_s * hx71x_oid_lookup(uint8_t oid)
@@ -223,7 +220,8 @@ hx71x_query_task(void)
         uint32_t next_waketime = dev->hx71x_timer.waketime;
 
         //读取数据,计数+1
-        uint32_t nRead = HX711_Read(dev);
+        //uint32_t nRead = HX711_Read(dev);
+        HX711_Read(dev);
         dev->sample_cnt++;
 
         //发送返回数据
