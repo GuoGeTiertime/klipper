@@ -279,7 +279,7 @@ class HX71X:
         # self._filter_prev_Values = 0.0
 
         # 超过阈值判断,用于log数据,分析, 当总重量大于overload后,输出在log中.
-        self._OverLoad = self.getfloat('overload', 10000.0)
+        self._OverLoad = config.getfloat('overload', 10000.0)
 
         #test weight sensor is ok or stepper motor is ok
         self.test_min = config.getfloat('test_min', 100.0)
