@@ -38,6 +38,7 @@ struct hx71x_s {
     uint32_t value[MAX_SENSOR];
     uint32_t pulse_cnt;
     uint32_t delayloop;
+    uint32_t error_cnt;
 };
 
 //hx71x定时器回调函数, 设定唤醒信号(系统的task遍历中启动hx71x读取函数)
@@ -98,6 +99,7 @@ void command_config_hx71x(uint32_t *args)
     hx71x->sample_ticks = 100000000;
     hx71x->sample_times = 0;
     hx71x->sample_cnt = 0;
+    hx71x->error_cnt = 0;
 }
 DECL_COMMAND(command_config_hx71x,
     "config_hx71x oid=%c sa_pin=%u da_pin=%u sb_pin=%u db_pin=%u sc_pin=%u dc_pin=%u sd_pin=%u dd_pin=%u se_pin=%u de_pin=%u sf_pin=%u df_pin=%u");
@@ -136,6 +138,22 @@ DECL_COMMAND(command_query_hx71x, "query_hx71x oid=%c ticks=%u times=%u pulse_cn
 
 #define foreach_sensor(i, s) for(uint32_t i=0; i<s; i++)
 
+void HX711_Reset(struct hx71x_s *dev)
+{
+    uint32_t s = dev->sensors;
+    struct gpio_out *sck = dev->sck_out;
+
+    foreach_sensor(i, s)
+        gpio_out_write(sck[i], 1);
+
+    hx71x_udelay(100);
+
+    foreach_sensor(i, s)
+        gpio_out_write(sck[i], 0);
+
+    dev->error_cnt = 0;
+}
+
 //read data from HX711
 uint32_t HX711_Read(struct hx71x_s *dev)
 {
@@ -165,10 +183,20 @@ uint32_t HX711_Read(struct hx71x_s *dev)
         }
         if( n==0 ) //all read 0(low);
             break;
-        hx71x_udelay(10);   //10us
+        hx71x_udelay(10); //10us
         if (nCnt++> 100) //max 1ms.
+        {
+            dev->error_cnt++;
+            if(dev->error_cnt>5)
+            {
+                HX711_Reset(dev);
+                v[0] = 0x800001;
+            }
             return 0; //not change the value of HX71X
+        }
     }
+
+    dev->error_cnt = 0;
 
     //read 24bit data and mode pulse.
     for (uint32_t j=0; j<dev->pulse_cnt; j++)
