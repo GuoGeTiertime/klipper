@@ -398,9 +398,12 @@ class ProbeSessionHelper:
                 positions = positions[-1:] # only keep the last sample
             # Retract
             if len(positions) < sample_count:
-                toolhead.manual_move(
-                    probexy + [pos[2] + probe_retract],
-                    params['lift_speed'])
+                liftdis = probe_retract
+                liftspeed = params['lift_speed']
+                if retries > 1: # if exceed 1 retries, double the lift distance and reduce speed to 1
+                    liftdis *= 2
+                    liftspeed = 1
+                toolhead.manual_move(probexy + [pos[2] + liftdis], liftspeed)
         # Calculate result
         epos = calc_probe_z_average(positions, params['samples_result'])
         self.results.append(epos)
