@@ -243,7 +243,7 @@ class HX71X:
             self._error_cnt[oid] = 0
 
             self.weight[oid] = 0.0
-            self.prevValue[oid] = 0.0
+            self.prevValue[oid] = 0
             self.weight_min[oid] = 0.0
             self.weight_max[oid] = 0.0
             self.read_time[oid] = 0.0
@@ -352,7 +352,7 @@ class HX71X:
         for oid in self.oids:
             self._sample_tare[oid] += self.weight[oid]
             self.weight[oid] = 0.0
-            self.prevValue[oid] = 0.0
+            self.prevValue[oid] = 0
             self.weight_min[oid] = self.weight_max[oid] = 0.0
 
         self.total_weight = 0.0
