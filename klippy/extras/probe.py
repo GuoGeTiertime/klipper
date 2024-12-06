@@ -473,6 +473,7 @@ class ProbePointsHelper:
         self.lift_speed = self.speed
         self.probe_offsets = (0., 0., 0.)
         self.manual_results = []
+        self.ztil_retry = 0
     def minimum_points(self,n):
         if len(self.probe_points) < n:
             raise self.printer.config_error(
@@ -491,7 +492,10 @@ class ProbePointsHelper:
         if is_first:
             # Use full speed to first probe position
             speed = self.speed
-        self._move([None, None, self.horizontal_move_z], speed)
+        move_z = self.default_horizontal_move_z  #add for ztilt retry, reduce the move_z distance when retry. 20241206
+        if self.ztil_retry:
+            move_z = move_z * 0.3
+        self._move([None, None, move_z], speed)
     def _invoke_callback(self, results):
         # Flush lookahead queue
         toolhead = self.printer.lookup_object('toolhead')
@@ -514,6 +518,7 @@ class ProbePointsHelper:
         def_move_z = self.default_horizontal_move_z
         self.horizontal_move_z = gcmd.get_float('HORIZONTAL_MOVE_Z',
                                                 def_move_z)
+        self.ztil_retry = 0
         if probe is None or method == 'manual':
             # Manual probe
             self.lift_speed = self.speed

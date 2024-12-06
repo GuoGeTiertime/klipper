@@ -149,6 +149,7 @@ class ZTilt:
         self.retry_helper.start(gcmd)
         self.probe_helper.start_probe(gcmd)
     def probe_finalize(self, offsets, positions):
+        self.probe_helper.ztil_retry = self.retry_helper.current_retry + 1
         # Setup for coordinate descent analysis
         z_offset = offsets[2]
         logging.info("Calculating bed tilt with: %s", positions)
