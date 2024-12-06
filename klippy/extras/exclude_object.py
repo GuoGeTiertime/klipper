@@ -77,6 +77,10 @@ class ExcludeObject:
         self.excluded_objects = []
         self.current_object = None
         self.in_excluded_region = False
+        self.xmin = 0.0
+        self.xmax = 0.0
+        self.ymin = 0.0
+        self.ymax = 0.0
 
     def _reset_file(self):
         self._reset_state()
@@ -173,7 +177,11 @@ class ExcludeObject:
         status = {
             "objects": self.objects,
             "excluded_objects": self.excluded_objects,
-            "current_object": self.current_object
+            "current_object": self.current_object,
+            "xmin": self.xmin,
+            "xmax": self.xmax,
+            "ymin": self.ymin,
+            "ymax": self.ymax
         }
         return status
 
@@ -273,6 +281,18 @@ class ExcludeObject:
     def _add_object_definition(self, definition):
         self.objects = sorted(self.objects + [definition],
                               key=lambda o: o["name"])
+        if 'polygon' in definition:
+            for point in definition["polygon"]:
+                if self.xmin == 0.0 and self.xmax == 0.0 and self.ymin == 0.0 and self.ymax == 0.0:
+                    self.xmin = point[0]
+                    self.xmax = point[0]
+                    self.ymin = point[1]
+                    self.ymax = point[1]
+                else:
+                    self.xmin = min(self.xmin, point[0])
+                    self.xmax = max(self.xmax, point[0])
+                    self.ymin = min(self.ymin, point[1])
+                    self.ymax = max(self.ymax, point[1])
 
     def _exclude_object(self, name):
         self._register_transform()
