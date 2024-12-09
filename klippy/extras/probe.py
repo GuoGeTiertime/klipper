@@ -467,6 +467,7 @@ class ProbePointsHelper:
                                                 parser=float, count=2)
         def_move_z = config.getfloat('horizontal_move_z', 5.)
         self.default_horizontal_move_z = def_move_z
+        self.default_horizontal_move_z_retry = config.getfloat('horizontal_move_z_retry', def_move_z * 0.5)
         self.speed = config.getfloat('speed', 50., above=0.)
         self.use_offsets = False
         # Internal probing state
@@ -494,7 +495,7 @@ class ProbePointsHelper:
             speed = self.speed
         move_z = self.default_horizontal_move_z  #add for ztilt retry, reduce the move_z distance when retry. 20241206
         if self.ztil_retry:
-            move_z = move_z * 0.3
+            move_z = self.default_horizontal_move_z_retry
         self._move([None, None, move_z], speed)
     def _invoke_callback(self, results):
         # Flush lookahead queue
