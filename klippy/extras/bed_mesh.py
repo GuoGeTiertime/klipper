@@ -309,6 +309,7 @@ class BedMeshCalibrate:
         self._init_mesh_config(config)
         self._generate_points(config.error)
         self._profile_name = "default"
+        self._autosave = config.getint('autosave', 1)
         self.probe_helper = probe.ProbePointsHelper(
             config, self.probe_finalize, self._get_adjusted_points())
         self.probe_helper.minimum_points(3)
@@ -670,6 +671,7 @@ class BedMeshCalibrate:
         self.origin = self.orig_config['origin']
         self.mesh_min = self.orig_config['mesh_min']
         self.mesh_max = self.orig_config['mesh_max']
+        self._autosave = gcmd.get_int('AUTOSAVE', self._autosave)
         for key in list(self.mesh_config.keys()):
             self.mesh_config[key] = self.orig_config[key]
 
@@ -873,7 +875,7 @@ class BedMeshCalibrate:
             z_mesh.set_zero_reference(*self.zero_ref_pos)
         self.bedmesh.set_mesh(z_mesh)
         self.gcode.respond_info("Mesh Bed Leveling Complete")
-        if self._profile_name is not None:
+        if self._autosave and (self._profile_name is not None):
             self.bedmesh.save_profile(self._profile_name)
     def _dump_points(self, probed_pts, corrected_pts, offsets):
         # logs generated points with offset applied, points received
