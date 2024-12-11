@@ -65,6 +65,9 @@ class Heater:
         gcode.register_mux_command("SET_HEATER_TEMPERATURE", "HEATER",
                                    short_name, self.cmd_SET_HEATER_TEMPERATURE,
                                    desc=self.cmd_SET_HEATER_TEMPERATURE_help)
+        gcode.register_mux_command("SET_HEATER_MAXPOWER", "HEATER",
+                                   short_name, self.cmd_SET_HEATER_MAXPOWER,
+                                   desc=self.cmd_SET_HEATER_MAXPOWER_help)
         self.printer.register_event_handler("klippy:shutdown",
                                             self._handle_shutdown)
     def set_pwm(self, read_time, value):
@@ -160,6 +163,11 @@ class Heater:
         temp = gcmd.get_float('TARGET', 0.)
         pheaters = self.printer.lookup_object('heaters')
         pheaters.set_temperature(self, temp)
+    cmd_SET_HEATER_MAXPOWER_help = "Sets a heater max power"
+    def cmd_SET_HEATER_MAXPOWER(self, gcmd):
+        power = gcmd.get_float('POWER', 1.0, above=0., maxval=1.)
+        self.max_power = power
+        self.control.set_max_power(power)
 
 
 ######################################################################
@@ -183,6 +191,8 @@ class ControlBangBang:
             self.heater.set_pwm(read_time, 0.)
     def check_busy(self, eventtime, smoothed_temp, target_temp):
         return smoothed_temp < target_temp-self.max_delta
+    def set_max_power(self, power):
+        self.heater_max_power = power
 
 
 ######################################################################
@@ -241,6 +251,10 @@ class ControlPID:
         if self.reach_over != 0.0 and is_busy:
             is_busy = smoothed_temp < (target_temp + self.reach_over)
         return is_busy
+    def set_max_power(self, power):
+        self.heater_max_power = self.heater.get_max_power()
+        if self.Ki:
+            self.temp_integ_max = self.heater_max_power / self.Ki
 
 
 ######################################################################
