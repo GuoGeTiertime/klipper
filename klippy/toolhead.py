@@ -325,6 +325,8 @@ class ToolHead:
         self.y_backlash_extremum = 0.0
         self.x_cur_backlash = 0.0  # current backlash value
         self.y_cur_backlash = 0.0  # current backlash value
+        gcode.register_command('SET_BUFFER_FLUSH_TIME', self.cmd_SET_BUFFER_FLUSH_TIME)
+
 
     # Print time and flush tracking
     def _advance_flush_time(self, flush_time):
@@ -763,6 +765,29 @@ class ToolHead:
             accel = min(p, t)
         self.max_accel = accel
         self._calc_junction_deviation()
+    def set_buffertime(self, buffertime):
+        global BUFFER_TIME_START, MIN_KIN_TIME
+        global BGFLUSH_LOW_TIME, BGFLUSH_BATCH_TIME, BGFLUSH_EXTRA_TIME
+        BUFFER_TIME_START = buffertime
+        BGFLUSH_LOW_TIME = buffertime
+        BGFLUSH_BATCH_TIME = buffertime
+        BGFLUSH_EXTRA_TIME = buffertime
+        MIN_KIN_TIME = buffertime*0.5
+    def reset_buffertime(self):
+        global BUFFER_TIME_START, MIN_KIN_TIME
+        global BGFLUSH_LOW_TIME, BGFLUSH_BATCH_TIME, BGFLUSH_EXTRA_TIME
+        BUFFER_TIME_START = 0.250
+        BGFLUSH_LOW_TIME = 0.200
+        BGFLUSH_BATCH_TIME = 0.200
+        BGFLUSH_EXTRA_TIME = 0.250
+        MIN_KIN_TIME = 0.100
+    def cmd_SET_BUFFER_FLUSH_TIME(self, gcmd):
+        t = gcmd.get_float('T', None, above=0.01)
+        if t is None:
+            self.reset_buffertime()
+        else:
+            self.set_buffertime(t)
+
 
 def add_printer_objects(config):
     config.get_printer().add_object('toolhead', ToolHead(config))
