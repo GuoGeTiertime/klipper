@@ -42,10 +42,11 @@ class RequestURL:
             if obj is None:
                 break
             self.update_object_name.append(obj) #本地对象名
-            vars = config.get('update_object_vars'+i, None)    #本地变量名,逗号分隔, pathlen,pathwidth,bedtemp,hotendtemp
-            self.update_object_vars.append(vars.split(','))
-            vars = config.get('remote_vars'+i, None) #远程变量名 result.status.pathlen, result.status.pathwidth, result.status.bedtemp, result.status.hotendtemp
-            self.remote_vars.append(vars.split(','))
+            vars = config.get('update_object_vars'+i, None)    #本地变量名示例: path ling  ,  goooo,     back up
+            # 先用逗号分割，然后对每个部分去除首尾空格
+            self.update_object_vars.append([x.strip() for x in vars.split(',')])
+            vars = config.get('remote_vars'+i, None)
+            self.remote_vars.append([x.strip() for x in vars.split(',')])
             self.update_object.append(None)
 
         self.repeat = config.getfloat('repeat', 0)  # 重复调用的时间，等于零就调用一次
