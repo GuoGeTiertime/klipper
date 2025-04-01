@@ -365,8 +365,8 @@ class ProbeSessionHelper:
         epos[2] += zCompensation
         # Report results
         gcode = self.printer.lookup_object('gcode')
-        gcode.respond_info("probe at %.3f,%.3f is z=%.6f"
-                           % (epos[0], epos[1], epos[2]))
+        gcode.respond_info("probe at %.3f,%.3f is z=%.4f, zcompensation=%.4f"
+                           % (epos[0], epos[1], epos[2], zCompensation))
         return epos[:3]
     def run_probe(self, gcmd):
         if not self.multi_probe_pending:
