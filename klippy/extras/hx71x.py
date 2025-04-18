@@ -470,7 +470,8 @@ class HX71X:
         if (self._endstop is not None) and self._endstop.bHoming:
             # call endstop trigger function.
             if self.is_endstop_on():
-                self._endstop.deformation = 0.1 * self.total_weight / self.endstop_deformation
+                # self._endstop.deformation = 0.1 * self.total_weight / self.endstop_deformation
+                self._endstop.deformation = 0.1 * (self.total_weight - self._filter_cur_Values) / self.endstop_deformation
                 self._endstop.trigger(last_read_time - self.endstop_trigger_delay)
 
     def _handle_hx71x_state(self, params):
