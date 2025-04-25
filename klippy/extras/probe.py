@@ -361,6 +361,12 @@ class ProbeSessionHelper:
             raise self.printer.command_error(reason)
         # Allow axis_twist_compensation to update results
         self.printer.send_event("probe:update_results", epos)
+
+        #add by guoge 20250424, log the weight filter values
+        # hx71x = self.printer.lookup_object('hx71x HX714')
+        # if hx71x is not None:
+        #     hx71x.log_weight_filter()
+
         zCompensation = self._calZCompensation(epos)    #add by guoge 20240617, calculate and apply the z compensation.
         epos[2] += zCompensation
         # Report results

@@ -149,7 +149,66 @@ class HX71X_endstop:
             # msg = "hx71x endstop deformation:%.4f, speed:%.1f, time offset:%.4f" % (self.deformation, homespeed, self.deformation / homespeed)
             # self._hx71x._loginfo(msg)
         curtime = self._hx71x.reactor.monotonic()
-        logging.info("exit HX71X_endstop.home_wait() @ curtime: %.4f trigger time:%.4f", curtime, self.trigger_time)
+        # logging.info("exit HX71X_endstop.home_wait() @ curtime: %.4f trigger time:%.4f", curtime, self.trigger_time)
+        
+        self._hx71x.log_weight_filter()
+        msg = "HX71X_endstop.home_wait() @ curtime: %.4f trigger time:%.4f" % (curtime, self.trigger_time)
+        self._hx71x._loginfo(msg)
+
+        #add by guoge 20250425, 用新算法计算trigger time.
+        #1. 获取高于 _filter_cur_Values 大于10%的endstop_threshold的记录点,放到一个数组中,从最后往前找,找到第一个为止.
+        active_values = []
+        n = len(self._hx71x._filter_values)
+        average_value = self._hx71x._filter_cur_Values
+        threshold = self._hx71x.endstop_threshold * 0.2  # 阈值为endstop_threshold的20%,太小的忽略,防止干扰.
+        for i in range(n-1, -1, -1):
+            if (self._hx71x._filter_values[i][0] - average_value ) > threshold:
+                #active_values.append(self._filter_values[i])
+                # 添加到active_values的头部
+                active_values.insert(0, self._hx71x._filter_values[i])
+            else:
+                break
+        # log active_values for debug
+        msg = "active_values: " + " ".join([f"{round(value[0], 2)}@{round(value[1], 3)}" for value in active_values])
+        self._hx71x._loginfo(msg)
+
+        #2. 直线拟合, 计算active_values的斜率
+        if len(active_values) < 3:
+            return self.trigger_time
+
+        # 计算平均值
+        sum_x = sum_y = sum_xy = sum_xx = 0
+        startTime = active_values[0][1] # 起始时间
+        for value in active_values:
+            x = value[1] - startTime  # 时间
+            y = value[0] - average_value  # 重量
+            sum_x += x
+            sum_y += y
+            sum_xy += x * y
+            sum_xx += x * x
+
+        # 计算斜率 K 和截距 C
+        k = (n * sum_xy - sum_x * sum_y) / (n * sum_xx - sum_x * sum_x)
+        c = (sum_y - k * sum_x) / n
+
+        msg = "Linear fit: Y = %.3fX + %.3f" % (k, c)
+        self._hx71x._loginfo(msg)
+
+        # 计算y=0时的x值, 即触发时间
+        trigger_time1 = -c / k  + startTime if k != 0 else self.trigger_time
+
+        # 用第一点反推, 计算触发时间
+        if k!=0 :
+            trigger_time2 = -(active_values[0][0] - average_value) / k + startTime
+        else:
+            trigger_time2 = self.trigger_time
+
+        msg = "trigger_time1: %.4f, trigger_time2: %.4f" % (trigger_time1, trigger_time2)
+        self._hx71x._loginfo(msg)
+
+        # 用第二点反推, 计算触发时间, 并减去延迟时间
+        self.trigger_time = trigger_time2 - self._hx71x.endstop_trigger_delay
+
         return self.trigger_time
     
     def trigger(self, eventime):
@@ -271,8 +330,8 @@ class HX71X:
         self.max_comm_err = config.getint('max_comm_err', 20) # 默认连续20次出错报警.
 
         # 采样滤波参数,采样次数
-        self._filter_times = config.getint('filter_times', 10)
-        self._filter_delay_times = config.getint('filter_delay_times', 20)
+        self._filter_times = config.getint('filter_times', 6)
+        self._filter_delay_times = config.getint('filter_delay_times', 12)
         self._filter_store_times = self._filter_times + self._filter_delay_times  #存储滤波数据的次数等于滤波次数+延迟次数
         self._filter_values = []
         self._filter_cur_Values = 0.0
@@ -433,6 +492,8 @@ class HX71X:
         # self.reactor.update_timer(self.sample_timer, self.reactor.NOW)
         return
     
+    # 设定log方式, 用命令:RESPONSE_WEIGHT SENSOR=HX714 LOG=xx,
+    # 其中xx为1,2,3, 1表示只输出到gcode, 2表示只输出到log文件, 3表示同时输出到gcode和log文件.
     def _loginfo(self, msg, logflag=None):
         if logflag is None:
             logflag = self.isloginfo
@@ -554,7 +615,7 @@ class HX71X:
         self.total_weight = 0.0
         for oid in self.oids:
             self.total_weight += self.weight[oid]
-        self._push_filter_value(self.total_weight)
+        self._push_filter_value(self.total_weight, last_read_time)
 
         # use total weight as temperature.
         self.measured_min = min(self.measured_min, self.total_weight)
@@ -610,18 +671,24 @@ class HX71X:
         # timer interval is short when homing
         self._endstop_trigger(last_read_time)
 
-    def _push_filter_value(self, weight):
+    def _push_filter_value(self, weight, last_read_time):
         if len(self._filter_values) >= self._filter_store_times:
             self._filter_values.pop(0)  # remove the first element.
-        self._filter_values.append(weight)
+        self._filter_values.append([weight, last_read_time])
 
     def _cal_filter_value(self):
         # calculate the average value of filter values.
         total = 0.0
         n = min(len(self._filter_values), self._filter_times)
         for i in range(n):
-            total += self._filter_values[i]
+            total += self._filter_values[i][0]
         self._filter_cur_Values = total / n if n > 0 else 0.0
+
+    #输出所有的filter值,放到一行中输出
+    def log_weight_filter(self):
+        # msg = "Weight filter values: " + " ".join([str(round(value, 2)) for value in self._filter_values])
+        msg = "Weight filter values: " + " ".join([f"{round(value[0], 2)}@{round(value[1], 3)}" for value in self._filter_values])
+        self._loginfo(msg)
 
     # compare the total weight with threshold, if total weight is bigger than it, return True.
     def is_endstop_on(self):
