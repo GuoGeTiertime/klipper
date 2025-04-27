@@ -172,6 +172,9 @@ class HX71X_endstop:
         msg = "active_values: " + " ".join([f"{round(value[0], 2)}@{round(value[1], 3)}" for value in active_values])
         self._hx71x._loginfo(msg)
 
+        # 计算当前触发时的重量
+        self.curTriggerTareWeight = average_value
+
         #2. 直线拟合, 计算active_values的斜率
         if len(active_values) < 3:
             return self.trigger_time
@@ -336,6 +339,8 @@ class HX71X:
         self._filter_values = []
         self._filter_cur_Values = 0.0
         # self._filter_prev_Values = 0.0
+
+        self.curTriggerTareWeight = 0.0
 
         # 超过阈值判断,用于log数据,分析, 当总重量大于overload后,输出在log中.
         self._OverLoad = config.getfloat('overload', 10000.0)
@@ -793,7 +798,16 @@ class HX71X:
         self.min_temp = min_temp
         self.max_temp = max_temp
         return
-
+    
+    #计算最后n个filter值的平均值
+    def calCurAverageWeight(self, n=5):
+        nLen = len(self._filter_values)
+        if nLen < n:
+            n = nLen
+        total = 0.0
+        for i in range(n):
+            total += self._filter_values[nLen-i-1][0]
+        return total / n
 
 def load_config(config):
     return HX71X(config)
