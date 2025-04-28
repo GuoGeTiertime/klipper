@@ -168,12 +168,15 @@ class HX71X_endstop:
                 active_values.insert(0, self._hx71x._filter_values[i])
             else:
                 break
+
+        # 计算当前触发时的清零重量
+        self._hx71x.curTriggerTareWeight = average_value
+
         # log active_values for debug
         msg = "active_values: " + " ".join([f"{round(value[0], 2)}@{round(value[1], 3)}" for value in active_values])
+        msg += "\n curTriggerTareWeight: %.2f" % self._hx71x.curTriggerTareWeight
         self._hx71x._loginfo(msg)
 
-        # 计算当前触发时的重量
-        self.curTriggerTareWeight = average_value
 
         #2. 直线拟合, 计算active_values的斜率
         if len(active_values) < 3:

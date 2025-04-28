@@ -416,7 +416,7 @@ class ProbeSessionHelper:
                 # 计算直线拟合
                 weights = [posWeight, midWeight, stopWeight]
                 testPositions = [pos[2], midZ, stopZ]
-                k, b = calculate_weight_z_slope(weights, testPositions)
+                k, b = calculate_weight_z_slope(weights, testPositions, 3)
 
                 # 如果最后一点的重量大于threshold的30%, 则需要添加一个点来重新计算k和b
                 minWeight = hx71x.endstop_threshold * 0.3;
@@ -429,15 +429,26 @@ class ProbeSessionHelper:
                     newWeight = hx71x.calCurAverageWeight() - tareWeight
                     weights.insert(0, newWeight)
                     testPositions.insert(0, newZ)
-                    k, b = calculate_weight_z_slope(weights, testPositions)
-                    estZ = newZ - newWeight * k
-                    gcmd.respond_info("Get Weight at %.3f %3f %.3f %.3f, weight %.2f %.2f %.2f add:%.2f, k %.3f, b %.3f, estZ %.3f (4points) " 
-                                      % (stopZ, midZ, pos[2], newZ, stopWeight, midWeight, posWeight, newWeight, k, b, estZ))
-                else:
-                    estZ = pos[2] - posWeight * k
-                    gcmd.respond_info("Get Weight at %.3f %3f %.3f, weight %.2f %.2f %.2f, k:%.3f, b:%.3f, estZ:%.3f, " 
-                                      % (stopZ, midZ, pos[2], stopWeight, midWeight, posWeight, k, b, estZ))
-                    
+                    if newWeight > minWeight: #还是大于minWeight,则再次降低一点
+                        k, b = calculate_weight_z_slope(weights, testPositions, 4)
+                        newZ2 = newZ - (newWeight-minWeight*0.6) * k
+                        toolhead.manual_move(probexy + [newZ2], probe_speed)
+                        toolhead.wait_moves()
+                        time.sleep(waitTime)
+                        newWeight2 = hx71x.calCurAverageWeight() - tareWeight
+                        weights.insert(0, newWeight2)
+                        testPositions.insert(0, newZ2)
+                    k, b = calculate_weight_z_slope(weights, testPositions, 3)
+
+                # 用最后一个点来计算estZ
+                estZ = testPositions[0] - weights[0] * k
+
+                msgHeight = "/".join(["%.3f " % h for h in testPositions])
+                msgWeight = "/".join(["%.2f " % w for w in weights])
+                gcmd.respond_info("Move to: %s, weight: %s, k*10000: %.4f, b %.3f, estZ %.3f (%d points) " 
+                                    % (msgHeight, msgWeight, k*10000, b, estZ, len(weights)))
+                gcmd.respond_info("Tare Weight: %.2f" % (tareWeight))
+
                 # 校验tareWeight是否太大.如果太大.需要清零
                 if tareWeight > ( 2.0 * hx71x.endstop_threshold):
                     hx71x.cmd_TARE_WEIGHT(" ")
@@ -453,7 +464,7 @@ class ProbeSessionHelper:
                         gcmd.respond_info("Weight is not increasing,w%d >w%d %.2f > %.2f, test probe failed ---------" % (i, i+1, weights[i], weights[i+1]))
                         bValid = False
                         break
-                #2. 最后两个差值的相差不超过50%.
+                #2. 最先测量的三个点的两个差值的相差不超过50%.
                 if bValid:
                     k = (weights[n-1] - weights[n-2]) / (weights[n-2] - weights[n-3])
                     if k > 1.6 or k < 0.6:
@@ -467,7 +478,7 @@ class ProbeSessionHelper:
                 #如果校验通过,则直接返回.
                 if bValid:
                     pos[2] = estZ
-                    gcmd.respond_info("Probe est z:%.3f" % estZ)
+                    gcmd.respond_info("XY: %.1f %.1f Probe OK, est z:%.3f" % (probexy[0], probexy[1], estZ))
                     self.results.append(pos)
                     return
                 else:
@@ -662,18 +673,20 @@ def run_single_probe(probe, gcmd):
     probe_session.end_probe_session()
     return pos
 
-# 使用线性拟合计算平均斜率 (重量为X轴，Z轴位置为Y轴)
-def calculate_weight_z_slope(weights, positions):
+# 使用线性拟合计算平均斜率 (重量为X轴，Z轴位置为Y轴), n为使用前n个点来计算
+def calculate_weight_z_slope(weights, positions, n=10):
     # 确保有足够的数据点
     if len(weights) < 2 or len(positions) != len(weights):
-        return 1, 0
+        return 0, 0
     
+    if n > len(weights):
+        n = len(weights)
+
     # 计算线性回归所需的和
-    sum_x = sum(weights)
-    sum_y = sum(positions)
-    sum_xy = sum(w * p for w, p in zip(weights, positions))
-    sum_xx = sum(w * w for w in weights)
-    n = len(weights)
+    sum_x = sum(weights[:n])
+    sum_y = sum(positions[:n])
+    sum_xy = sum(w * p for w, p in zip(weights[:n], positions[:n]))
+    sum_xx = sum(w * w for w in weights[:n])
     
     # 计算斜率 k (Y = kX + b 中的k)
     # 斜率表示每单位重量变化对应的Z轴位置变化
