@@ -403,24 +403,27 @@ class ProbeSessionHelper:
                 self.hx71x = self.printer.lookup_object('hx71x HX714')
             waitTime = 0.1
             adjustTimes = 0
+            #不同的阈值
+            th_0 = self.hx71x.endstop_threshold * 0.1
+            th_1 = self.hx71x.endstop_threshold * 0.2
+            th_2 = self.hx71x.endstop_threshold * 0.5
+            th_3 = self.hx71x.endstop_threshold * 1.0
 
             while self.hx71x is not None:
                 # 获取当前高度的重量
                 weightStop, posStop = self._getWeightAtZ(probexy, None, probe_speed, waitTime)
 
-                minWeight = self.hx71x.endstop_threshold * 0.2
-                maxWeight = self.hx71x.endstop_threshold * 0.5
-                validWeight = self.hx71x.endstop_threshold * 1.0
-
-                # 获取预估高度的重量, 如果重量小于threshold的50%,则需要调整高度.
+                # 获取预估高度的重量, 如果重量小于threshold的20%,则需要调整高度. 防止pos[2]在脱离接触的高度.
                 weightEst, posEst = self._getWeightAtZ(probexy, pos[2], probe_speed, waitTime)
-                if weightEst < maxWeight:
-                    adjustZ = pos[2] + ( posStop - pos[2]) * 0.4 #取两点之间的某点重新测量.
+                while weightEst < th_1:
+                    adjustZ = posEst + (posStop - posEst) * 0.1 #取两点之间的某点重新测量.
                     weightEst, posEst = self._getWeightAtZ(probexy, adjustZ, probe_speed, waitTime)
                     adjustTimes += 1
+                    if adjustTimes > 3:
+                        break
 
                 # 如果第一个预测点(调整后)重量仍然小于threshold的20%,在认为重量异常,退出,采用原有测量结果.
-                if weightEst < minWeight:
+                if weightEst < th_1:
                     break
 
                 #重量从小到大, 高度从大到小排序
@@ -428,65 +431,53 @@ class ProbeSessionHelper:
                 testPositions = [posEst, posStop]
                 k, b = calculate_weight_z_slope(weights, testPositions, 2)
 
-                estZ = None
                 #最多做4次预测测量, 
                 for i in range(5):
-                    if weights[0] < maxWeight: #probe结束,可以返回结果.
-                        estZ = testPositions[0] - weights[0] * k
+                    if weights[0] < 0: #出现负值,错误,退出.
+                        gcmd.respond_info("Last probe weight %.2f is negitive, test probe failed ---------" % weights[0])
                         break
+                    elif weights[0] < th_1: #probe结束,可以返回结果.
+                        #打印测量结果,调试.
+                        msgHeight = "/".join(["%.3f " % h for h in testPositions])
+                        msgWeight = "/".join(["%.2f " % w for w in weights])
+                        gcmd.respond_info("Move to: %s, weight: %s, k*10000: %.4f, b %.3f, estZ %.3f (%d points + adjust %d)" 
+                                        % (msgHeight, msgWeight, k*10000, b, estZ, len(weights), adjustTimes))
 
-                    # 估算下一个位置
-                    posEst = testPositions[0] - (weights[0]-minWeight) * k
+                        # 校验tareWeight是否太大.如果太大.需要清零
+                        if self.hx71x.curTriggerTareWeight > ( 2.0 * self.hx71x.endstop_threshold):
+                            time.sleep(0.5)
+                            self.hx71x.cmd_TARE_WEIGHT(" ")
+                            time.sleep(0.5)
+                            gcmd.respond_info("Tare weight is too large, reset tare weight")
+
+                        estZ = testPositions[0] - weights[0] * k
+                        pos[2] = estZ
+                        gcmd.respond_info("XY: %.1f %.1f Probe OK, est z:%.3f" % (probexy[0], probexy[1], estZ))
+                        self.results.append(pos)
+                        return
+
+                    # 估算下一个位置,目标重量为阈值的10%.
+                    posEst = testPositions[0] - (weights[0]-th_0) * k
                     weightEst, posEst = self._getWeightAtZ(probexy, posEst, probe_speed, waitTime)
 
-                    # 如果重量小于minWeight, 并且前一个值比较大,需要微调.
-                    if weightEst < minWeight * 0.5: 
-                        if weights[0] > validWeight: #前一个值比较大,需要微调.
-                            posEst = posEst + (testPositions[0] - posEst) * 0.2 #向前一个点移动一点.
-                            weightEst, posEst = self._getWeightAtZ(probexy, posEst, probe_speed, waitTime)
-                            adjustTimes += 1
-                            if weightEst < minWeight * 0.5: #如果仍然小于minWeight, 认为重量异常,退出.
-                                break
+                    # 如果重量小于minWeight, 并且前一个值比较大,需要微调.减小这两个值之间的差距.
+                    if weightEst < th_0 and weights[0] > th_2: 
+                        posEst = posEst + (testPositions[0] - posEst) * 0.2 #向前一个点移动一点.
+                        weightEst, posEst = self._getWeightAtZ(probexy, posEst, probe_speed, waitTime)
+                        adjustTimes += 1
+                        if weightEst < th_0: #如果仍然小于minWeight, 认为重量异常,退出.
+                            break
 
                     if weightEst > weights[0]: #重量增加,测量错误,退出.
                         break
-
+                    
+                    #添加新数据,并重新计算斜率.
                     weights.insert(0, weightEst)
                     testPositions.insert(0, posEst)
-
                     k, b = calculate_weight_z_slope(weights, testPositions, 3)
 
-                if estZ is None:
-                    break #测量错误,退出,走常规测量.
 
-                msgHeight = "/".join(["%.3f " % h for h in testPositions])
-                msgWeight = "/".join(["%.2f " % w for w in weights])
-                gcmd.respond_info("Move to: %s, weight: %s, k*10000: %.4f, b %.3f, estZ %.3f (%d points) + adjust %d" 
-                                    % (msgHeight, msgWeight, k*10000, b, estZ, len(weights), adjustTimes))
-
-                # 校验tareWeight是否太大.如果太大.需要清零
-                if self.hx71x.curTriggerTareWeight > ( 2.0 * self.hx71x.endstop_threshold):
-                    self.hx71x.cmd_TARE_WEIGHT(" ")
-                    time.sleep(0.2)
-                    gcmd.respond_info("Tare weight is too large, set to 0")
-
-                #进行数据校验,通过后直接返回.
-                bValid = True #使用此变量方便添加校验逻辑.
-                #最后一个测量点的重量大于零.
-                if weights[0] < 0:
-                    gcmd.respond_info("Last probe weight %.2f is too large, or too small, test probe failed ---------" % weights[0])
-                    bValid = False
-
-                #如果校验通过,则直接返回.
-                if bValid:
-                    pos[2] = estZ
-                    gcmd.respond_info("XY: %.1f %.1f Probe OK, est z:%.3f" % (probexy[0], probexy[1], estZ))
-                    self.results.append(pos)
-                    return
-                else:
-                    gcmd.respond_info("Test probe failed, used the normal probe result. --------------------------------")
-                    break
-
+            #进入常规测量模式
             positions.append(pos)
             # Check samples tolerance
             z_positions = [p[2] for p in positions]
