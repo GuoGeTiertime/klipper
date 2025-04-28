@@ -393,15 +393,6 @@ class ProbeSessionHelper:
             bFirst = False
             # Probe position
             pos = self._probe(probe_speed)
-            positions.append(pos)
-            # Check samples tolerance
-            z_positions = [p[2] for p in positions]
-            if max(z_positions)-min(z_positions) > params['samples_tolerance']:
-                if retries >= params['samples_tolerance_retries']:
-                    raise gcmd.error("Probe samples exceed samples_tolerance")
-                gcmd.respond_info("Probe samples exceed tolerance. Retrying...")
-                retries += 1
-                positions = positions[-1:] # only keep the last sample
 
             # add by guoge 20250427, move to the probe position, and wait for the weight stable.
             # check the weight stable
@@ -431,7 +422,7 @@ class ProbeSessionHelper:
                 minWeight = hx71x.endstop_threshold * 0.3;
                 if posWeight > minWeight:
                     # newZ = b - minWeight * k
-                    newZ = pos[2] - (posWeight-minWeight) * k
+                    newZ = pos[2] - (posWeight-minWeight*0.6) * k  #*0.6 保证有和posWeight足够的差值.
                     toolhead.manual_move(probexy + [newZ], probe_speed)
                     toolhead.wait_moves()
                     time.sleep(waitTime)
@@ -446,7 +437,52 @@ class ProbeSessionHelper:
                     estZ = pos[2] - posWeight * k
                     gcmd.respond_info("Get Weight at %.3f %3f %.3f, weight %.2f %.2f %.2f, k:%.3f, b:%.3f, estZ:%.3f, " 
                                       % (stopZ, midZ, pos[2], stopWeight, midWeight, posWeight, k, b, estZ))
-                
+                    
+                # 校验tareWeight是否太大.如果太大.需要清零
+                if tareWeight > ( 2.0 * hx71x.endstop_threshold):
+                    hx71x.cmd_TARE_WEIGHT(" ")
+                    time.sleep(0.2)
+                    gcmd.respond_info("Tare weight is too large, set to 0")
+
+                #进行数据校验,通过后直接返回.
+                # 1. 重量要依次增加
+                bValid = True
+                n = len(weights)
+                for i in range(n-1):
+                    if weights[i] > (weights[i+1]-1): #不能大于下一个重量减一
+                        gcmd.respond_info("Weight is not increasing,w%d >w%d %.2f > %.2f, test probe failed ---------" % (i, i+1, weights[i], weights[i+1]))
+                        bValid = False
+                        break
+                #2. 最后两个差值的相差不超过50%.
+                if bValid:
+                    k = (weights[n-1] - weights[n-2]) / (weights[n-2] - weights[n-3])
+                    if k > 1.6 or k < 0.6:
+                        gcmd.respond_info("Diff between weights is out of range, k:%.3f, test probe failed ---------" % k)
+                        bValid = False
+                #3. 最后一个测量点的重量要小于阈值,并且大于零.
+                if weights[0] > hx71x.endstop_threshold or weights[0] < 0:
+                    gcmd.respond_info("Last probe weight %.2f is too large, or too small, test probe failed ---------" % weights[0])
+                    bValid = False
+
+                #如果校验通过,则直接返回.
+                if bValid:
+                    pos[2] = estZ
+                    gcmd.respond_info("Probe est z:%.3f" % estZ)
+                    self.results.append(pos)
+                    return
+                else:
+                    gcmd.respond_info("Test probe failed, used the normal probe result. --------------------------------")
+
+            positions.append(pos)
+            # Check samples tolerance
+            z_positions = [p[2] for p in positions]
+            if max(z_positions)-min(z_positions) > params['samples_tolerance']:
+                if retries >= params['samples_tolerance_retries']:
+                    raise gcmd.error("Probe samples exceed samples_tolerance")
+                gcmd.respond_info("Probe samples exceed tolerance. Retrying...")
+                retries += 1
+                positions = positions[-1:] # only keep the last sample
+ 
 
             # Retract
             if len(positions) < sample_count:
