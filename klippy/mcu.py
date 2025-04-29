@@ -581,6 +581,15 @@ class MCU:
                 isExist = os.path.exists(portname)
                 if isExist:
                     self._serialport = portname
+
+            # 20250429, is uart or usb port by serial port name end with port0~3
+            isUartPort = False
+            if self._serialport.endswith("port0") or self._serialport.endswith("port1") or self._serialport.endswith("port2") or self._serialport.endswith("port3"):
+                isUartPort = True
+            # NOT uart port, set baud to 250000.
+            if not isUartPort:
+                logging.info("Serial port %s is not uart port, set baud to 250000." % (self._serialport))
+                self._baud = 250000
                     
         # Check if serial port exists, ignore if not
         self.isSerialExist = True
