@@ -442,11 +442,11 @@ class ProbeSessionHelper:
                     elif weights[0] < th_1: #probe结束,可以返回结果.
                         estZ = testPositions[0] - weights[0] * k
                         #打印测量结果,调试.
-                        msgHeight = "/".join(["%.3f " % h for h in testPositions])
-                        msgWeight = "/".join(["%.2f " % w for w in weights])
-                        gcmd.respond_info("Move to: %s, weight: %s, k*10000: %.4f, b %.3f, estZ %.3f (%d points + adjust %d)" 
-                                        % (msgHeight, msgWeight, k*10000, b, estZ, len(weights), adjustTimes))
-                        gcmd.respond_info("XY: %.1f %.1f Probe OK, est z:%.3f" % (probexy[0], probexy[1], estZ))
+                        # msgHeight = "/".join(["%.3f " % h for h in testPositions])
+                        # msgWeight = "/".join(["%.2f " % w for w in weights])
+                        # gcmd.respond_info("Move to: %s, weight: %s, k*10000: %.4f, b %.3f, estZ %.3f (%d points + adjust %d)" 
+                        #                % (msgHeight, msgWeight, k*10000, b, estZ, len(weights), adjustTimes))
+                        # gcmd.respond_info("XY: %.1f %.1f Probe OK, est z:%.3f" % (probexy[0], probexy[1], estZ))
 
                         # 校验tareWeight是否太大.如果太大.需要清零
                         if self.hx71x.curTriggerTareWeight > ( 2.0 * self.hx71x.endstop_threshold):
