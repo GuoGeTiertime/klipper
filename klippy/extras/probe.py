@@ -407,11 +407,14 @@ class ProbeSessionHelper:
             th_0 = self.hx71x.endstop_threshold * 0.1
             th_1 = self.hx71x.endstop_threshold * 0.2
             th_2 = self.hx71x.endstop_threshold * 0.5
-            th_3 = self.hx71x.endstop_threshold * 1.0
+            th_3 = self.hx71x.endstop_threshold * 2.0
 
             while self.hx71x is not None:
                 # 获取当前高度的重量
                 weightStop, posStop = self._getWeightAtZ(probexy, None, probe_speed, waitTime)
+                if weightStop < th_3:
+                    gcmd.respond_info("Stop weight(%.2f) is too small, test probe failed ---------" % (weightStop))
+                    break
 
                 # 获取预估高度的重量, 如果重量小于threshold的20%,则需要调整高度. 防止pos[2]在脱离接触的高度.
                 weightEst, posEst = self._getWeightAtZ(probexy, pos[2], probe_speed, waitTime)
@@ -437,11 +440,13 @@ class ProbeSessionHelper:
                         gcmd.respond_info("Last probe weight %.2f is negitive, test probe failed ---------" % weights[0])
                         break
                     elif weights[0] < th_1: #probe结束,可以返回结果.
+                        estZ = testPositions[0] - weights[0] * k
                         #打印测量结果,调试.
                         msgHeight = "/".join(["%.3f " % h for h in testPositions])
                         msgWeight = "/".join(["%.2f " % w for w in weights])
                         gcmd.respond_info("Move to: %s, weight: %s, k*10000: %.4f, b %.3f, estZ %.3f (%d points + adjust %d)" 
                                         % (msgHeight, msgWeight, k*10000, b, estZ, len(weights), adjustTimes))
+                        gcmd.respond_info("XY: %.1f %.1f Probe OK, est z:%.3f" % (probexy[0], probexy[1], estZ))
 
                         # 校验tareWeight是否太大.如果太大.需要清零
                         if self.hx71x.curTriggerTareWeight > ( 2.0 * self.hx71x.endstop_threshold):
@@ -450,9 +455,7 @@ class ProbeSessionHelper:
                             time.sleep(0.5)
                             gcmd.respond_info("Tare weight is too large, reset tare weight")
 
-                        estZ = testPositions[0] - weights[0] * k
                         pos[2] = estZ
-                        gcmd.respond_info("XY: %.1f %.1f Probe OK, est z:%.3f" % (probexy[0], probexy[1], estZ))
                         self.results.append(pos)
                         return
 
@@ -496,7 +499,7 @@ class ProbeSessionHelper:
                 if retries > 1: # if exceed 1 retries, double the lift distance and reduce speed to 1
                     liftdis *= 2
                     liftspeed = 1
-                toolhead.manual_move(probexy + [pos[2] + liftdis], liftspeed)
+                self.toolhead.manual_move(probexy + [pos[2] + liftdis], liftspeed)
         # Calculate result
         epos = calc_probe_z_average(positions, params['samples_result'])
         self.results.append(epos)
