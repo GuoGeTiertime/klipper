@@ -573,10 +573,10 @@ class MCU:
         
             # add for serial port auto detect, 20240726
             isExist = os.path.exists(self._serialport)
-            # try serial1~4 for alternative serial port.
-            for i in range(1, 5):
+            # try serial1~9 for alternative serial port. use the first available port.
+            for i in range(1, 10):
                 portname = config.get("serial%d" % (i,), None)
-                if isExist or portname is None:
+                if isExist or portname is None: # test all options to avoid unparse error of config file
                     continue
                 isExist = os.path.exists(portname)
                 if isExist:
