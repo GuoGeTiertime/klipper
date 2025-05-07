@@ -233,6 +233,12 @@ class GCodeDispatch:
         if self.m112_r.match(script) is not None:
             self._process_commands(script.split('\n'), need_ack=False)
             return
+        # add command run right now! script start with M113, 
+        # gcode is after M113, need delete M113.
+        if script.startswith("M113 "):
+            cmd = script[5:] # delete M113
+            self._process_commands(cmd.split('\n'), need_ack=False)
+            return
         with self.mutex:
             self._process_commands(script.split('\n'), need_ack=False)
     def get_mutex(self):
