@@ -429,6 +429,10 @@ class ProbeSessionHelper:
                 if weightEst < th_1:
                     break
 
+                # 如果预测点高度小于前一个点,或者重量大于前一个点,认为异常,退出.
+                if posEst < posStop or weightEst > weightStop:
+                    break
+
                 #重量从小到大, 高度从大到小排序
                 weights = [weightEst, weightStop]
                 testPositions = [posEst, posStop]
@@ -441,6 +445,9 @@ class ProbeSessionHelper:
                         break
                     elif weights[0] < th_1: #probe结束,可以返回结果.
                         estZ = testPositions[0] - weights[0] * k
+                        # 预测点必须位于[PosStop, PosStop+1]之间, 否则认为异常,退出.
+                        if estZ < posStop or estZ > posStop+1:
+                            break
                         #打印测量结果,调试.
                         # msgHeight = "/".join(["%.3f " % h for h in testPositions])
                         # msgWeight = "/".join(["%.2f " % w for w in weights])
@@ -461,6 +468,9 @@ class ProbeSessionHelper:
 
                     # 估算下一个位置,目标重量为阈值的10%.
                     posEst = testPositions[0] - (weights[0]-th_0) * k
+                    # 预测点必须位于[PosStop, PosStop+1]之间, 否则认为异常,退出.
+                    if posEst < posStop or posEst > posStop+1:
+                        break
                     weightEst, posEst = self._getWeightAtZ(probexy, posEst, probe_speed, waitTime)
 
                     # 如果重量小于minWeight, 并且前一个值比较大,需要微调.减小这两个值之间的差距.
@@ -473,11 +483,16 @@ class ProbeSessionHelper:
 
                     if weightEst > weights[0]: #重量增加,测量错误,退出.
                         break
+                    if posEst < testPositions[0]: #如果预测点高度小于前一个点,认为异常,退出.
+                        break
                     
                     #添加新数据,并重新计算斜率.
                     weights.insert(0, weightEst)
                     testPositions.insert(0, posEst)
                     k, b = calculate_weight_z_slope(weights, testPositions, 3)
+
+                # while 循环结束, 认为测量异常,退出.
+                break; # while self.hx71x is not None:
 
 
             #进入常规测量模式
