@@ -257,6 +257,7 @@ class HX71X:
         self._sample_times = 1000000000
         self._sample_tare = {}  # 0.0
         self._error_cnt = {}  # 0
+        self._comm_err_max = {}  # 0
 
         self._cnt_in_cycle = 0
 
@@ -310,6 +311,7 @@ class HX71X:
             self._sample_cnt_total[oid] = 0
             self._sample_tare[oid] = 0.0
             self._error_cnt[oid] = 0
+            self._comm_err_max[oid] = 0
 
             self.weight[oid] = 0.0
             self.prevValue[oid] = 0
@@ -559,6 +561,7 @@ class HX71X:
         bWrongValue = abs(value-0x800000)<0x10 and abs(value - self.prevValue[oid]) > abs(100.0/self.scale)
         if value == 0 or bWrongValue:
             self._error_cnt[oid] += 1
+            self._comm_err_max[oid] = max(self._comm_err_max[oid], self._error_cnt[oid])
             errcnt = self._error_cnt[oid]
             if errcnt < 4 or (errcnt % 4)==0:
                 logging.info("  *** Error Senser:%s(oid:%d) can't read hx711 or data error @ %.3f, cnt:%d, value:%d(0x%X), errcnt:%d", 
@@ -769,6 +772,7 @@ class HX71X:
             state['weight%d' % idx] = round(self.weight[oid], 2)
             state['weight%d_min' % idx] = round(self.weight_min[oid], 2)
             state['weight%d_max' % idx] = round(self.weight_max[oid], 2)
+            state['comm_err%d' % idx] = self._comm_err_max[oid]
         
         # analyze the weight sensor data, get max diff and min diff.
         minDiff = min(self.weight_min.values())
