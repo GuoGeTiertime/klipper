@@ -150,6 +150,7 @@ class HX71X_endstop:
             # self._hx71x._loginfo(msg)
         curtime = self._hx71x.reactor.monotonic()
         # logging.info("exit HX71X_endstop.home_wait() @ curtime: %.4f trigger time:%.4f", curtime, self.trigger_time)
+        self.trigger_time = self.trigger_time - self._hx71x.endstop_trigger_delay
         
         self._hx71x.log_weight_filter()
         msg = "HX71X_endstop.home_wait() @ curtime: %.4f trigger time:%.4f" % (curtime, self.trigger_time)
@@ -160,6 +161,7 @@ class HX71X_endstop:
         active_values = []
         n = len(self._hx71x._filter_values)
         average_value = self._hx71x._filter_cur_Values
+        self._hx71x.curTriggerTareWeight = average_value # 当前触发时的清零重量,
         threshold = self._hx71x.endstop_threshold * 0.2  # 阈值为endstop_threshold的20%,太小的忽略,防止干扰.
         for i in range(n-1, -1, -1):
             if (self._hx71x._filter_values[i][0] - average_value ) > threshold:
@@ -169,17 +171,19 @@ class HX71X_endstop:
             else:
                 break
 
-        # 计算当前触发时的清零重量
-        self._hx71x.curTriggerTareWeight = average_value
 
         # log active_values for debug
         msg = "active_values: " + " ".join([f"{round(value[0], 2)}@{round(value[1], 3)}" for value in active_values])
         msg += "\n curTriggerTareWeight: %.2f" % self._hx71x.curTriggerTareWeight
         self._hx71x._loginfo(msg)
 
+        # 直接用第一个点计算触发时间
+        if len(active_values) > 0:
+            self.trigger_time = active_values[0][1] - self._hx71x.endstop_trigger_delay
+            return self.trigger_time
 
         #2. 直线拟合, 计算active_values的斜率
-        if len(active_values) < 3:
+        if len(active_values) < 3:  # 至少需要3个点,否则直接用原有方式:延时+变形 计算触发时间
             return self.trigger_time
 
         # 计算平均值
