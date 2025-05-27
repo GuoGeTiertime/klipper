@@ -403,13 +403,13 @@ class ProbeSessionHelper:
                 self.hx71x = self.printer.lookup_object('hx71x HX714')
             waitTime = 0.1
             adjustTimes = 0
-            #不同的阈值
-            th_0 = self.hx71x.endstop_threshold * 0.1
-            th_1 = self.hx71x.endstop_threshold * 0.2
-            th_2 = self.hx71x.endstop_threshold * 0.5
-            th_3 = self.hx71x.endstop_threshold * 2.0
 
             while self.hx71x is not None:
+                #不同的阈值
+                th_0 = self.hx71x.endstop_threshold * 0.1
+                th_1 = self.hx71x.endstop_threshold * 0.2
+                th_2 = self.hx71x.endstop_threshold * 0.5
+                th_3 = self.hx71x.endstop_threshold * 2.0
                 # 获取当前高度的重量
                 weightStop, posStop = self._getWeightAtZ(probexy, None, probe_speed, waitTime)
                 if weightStop < th_3:
