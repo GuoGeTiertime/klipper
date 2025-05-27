@@ -400,7 +400,7 @@ class ProbeSessionHelper:
             # add by guoge 20250427, move to the probe position, and wait for the weight stable.
             # check the weight stable
             if self.hx71x is None:
-                self.hx71x = self.printer.lookup_object('hx71x HX714')
+                self.hx71x = self.printer.lookup_object('hx71x HX714', None)
             waitTime = 0.1
             adjustTimes = 0
 
