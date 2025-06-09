@@ -73,7 +73,7 @@ class RequestURL:
     def _handle_ready(self):
         self._loginfo(f"RequestURL {self.name} ready")
         for i in range(len(self.update_object_name)):
-            self.update_object[i] = self.printer.lookup_object(self.update_object_name[i])
+            self.update_object[i] = self.printer.lookup_object(self.update_object_name[i], None)
             if self.update_object[i] is None:
                 raise self.printer.config_error("update_object not found: %s" % self.update_object_name[i])
             self._loginfo( "update object:%s by Request %s" % (self.update_object_name[i], self.name ) )
