@@ -68,6 +68,8 @@ class SaveVariables:
         try:
             with open(self.filename, "w") as f:
                 varfile.write(f)
+                f.flush()
+                os.fsync(f.fileno())
         except:
             msg = "Unable to save variable"
             logging.exception(msg)
