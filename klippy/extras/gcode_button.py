@@ -20,7 +20,7 @@ class GCodeButton:
             buttons.register_adc_button(self.pin, amin, amax, pullup,
                                         self.button_callback)
         gcode_macro = self.printer.load_object(config, 'gcode_macro')
-        self.press_template = gcode_macro.load_template(config, 'press_gcode')
+        self.press_template = gcode_macro.load_template(config, 'press_gcode', '')
         self.release_template = gcode_macro.load_template(config,
                                                           'release_gcode', '')
         self.gcode = self.printer.lookup_object('gcode')
@@ -34,13 +34,16 @@ class GCodeButton:
 
     def button_callback(self, eventtime, state):
         self.last_state = state
-        template = self.press_template
-        if not state:
-            template = self.release_template
-        try:
-            self.gcode.run_script(template.render())
-        except:
-            logging.exception("Script running error")
+        template = self.press_template if state else self.release_template
+        
+        # 检查模板是否有有效内容
+        if template and template.render().strip():
+            try:
+                self.gcode.run_script(template.render())
+            except:
+                logging.exception("Script running error")
+        # else:
+        #     logging.info("No valid script to run for button %s", self.name)
 
     def get_status(self, eventtime=None):
         if self.last_state:
