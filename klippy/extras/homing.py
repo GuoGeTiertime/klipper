@@ -253,6 +253,7 @@ class PrinterHoming:
         # Register g-code commands
         gcode = self.printer.lookup_object('gcode')
         gcode.register_command('G28', self.cmd_G28)
+        gcode.register_command('G28.2', self.cmd_G28_2)
     def manual_home(self, toolhead, endstops, pos, speed,
                     triggered, check_triggered):
         hmove = HomingMove(self.printer, endstops, toolhead)
@@ -297,6 +298,8 @@ class PrinterHoming:
                     "Homing failed due to printer shutdown")
             self.printer.lookup_object('stepper_enable').motor_off()
             raise
-
+    # 20250618 添加G28.2命令，用于执行原始的G28命令
+    def cmd_G28_2(self, gcmd):
+        self.cmd_G28(gcmd)
 def load_config(config):
     return PrinterHoming(config)
