@@ -49,6 +49,7 @@ class GCodeMove:
         self.saved_states = {}
         self.move_transform = self.move_with_transform = None
         self.position_with_transform = (lambda: [0., 0., 0., 0.])
+        self.mcu_pos_record = None #record the mcu position by GET_POSITION command
     def _handle_ready(self):
         self.is_printer_ready = True
         if self.move_transform is None:
@@ -96,7 +97,7 @@ class GCodeMove:
         return self.speed_factor * 60.
     def get_status(self, eventtime=None):
         move_position = self._get_gcode_position()
-        return {
+        status = {
             'speed_factor': self._get_gcode_speed_override(),
             'speed': self._get_gcode_speed(),
             'extrude_factor': self.extrude_factor,
@@ -106,6 +107,9 @@ class GCodeMove:
             'position': self.Coord(*self.last_position),
             'gcode_position': self.Coord(*move_position),
         }
+        if self.mcu_pos_record is not None:
+            status['mcu_pos_record'] = self.mcu_pos_record
+        return status
     def reset_last_position(self):
         if self.is_printer_ready:
             self.last_position = self.position_with_transform()
@@ -251,6 +255,10 @@ class GCodeMove:
         steppers = kin.get_steppers()
         mcu_pos = " ".join(["%s:%d" % (s.get_name(), s.get_mcu_position())
                             for s in steppers])
+        mcu_pos_record = {}
+        for s in steppers:
+            mcu_pos_record[s.get_name()] = s.get_mcu_position()
+        self.mcu_pos_record = mcu_pos_record
         cinfo = [(s.get_name(), s.get_commanded_position()) for s in steppers]
         stepper_pos = " ".join(["%s:%.6f" % (a, v) for a, v in cinfo])
         kinfo = zip("XYZ", kin.calc_position(dict(cinfo)))
