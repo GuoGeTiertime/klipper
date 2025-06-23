@@ -11,6 +11,10 @@ class GCodeButton:
         self.name = config.get_name().split(' ')[-1]
         self.pin = config.get('pin')
         self.last_state = 0
+        self.mutex = self.printer.get_reactor().mutex()
+        self.busyCount = 0
+        self.maxBusyCount = 6   # 最大同时执行次数
+
         buttons = self.printer.load_object(config, "buttons")
         if config.get('analog_range', None) is None:
             buttons.register_buttons([self.pin], self.button_callback)
@@ -35,7 +39,13 @@ class GCodeButton:
     def button_callback(self, eventtime, state):
         self.last_state = state
         template = self.press_template if state else self.release_template
-        
+
+        with self.mutex:
+            if self.busyCount > self.maxBusyCount:
+                logging.info("Button %s is busy, skipping execution", self.name)
+                return
+            self.busyCount += 1
+
         # 检查模板是否有有效内容
         if template and template.render().strip():
             try:
@@ -44,6 +54,9 @@ class GCodeButton:
                 logging.exception("Script running error")
         # else:
         #     logging.info("No valid script to run for button %s", self.name)
+
+        with self.mutex:
+            self.busyCount -= 1
 
     def get_status(self, eventtime=None):
         if self.last_state:
