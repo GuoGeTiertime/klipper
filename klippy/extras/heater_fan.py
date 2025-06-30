@@ -18,6 +18,7 @@ class PrinterHeaterFan:
         self.heaters = []
         self.fan = fan.Fan(config, default_shutdown_speed=1.)
         self.fan_speed = config.getfloat("fan_speed", 1., minval=0., maxval=1.)
+        self.idle_speed = config.getfloat("idle_speed", self.fan_speed * 0.5, minval=0., maxval=1.)
         self.last_speed = 0.
     def handle_ready(self):
         pheaters = self.printer.lookup_object('heaters')
@@ -31,8 +32,10 @@ class PrinterHeaterFan:
         for heater in self.heaters:
             current_temp, target_temp = heater.get_temp(eventtime)
             enable_temp = self.heater_temp - self.hysteresis if self.last_speed>0 else self.heater_temp + self.hysteresis
-            if target_temp or current_temp > enable_temp:
+            if target_temp:
                 speed = self.fan_speed
+            elif current_temp > enable_temp:
+                speed = max(speed, self.idle_speed)
         if speed != self.last_speed:
             self.last_speed = speed
             curtime = self.printer.get_reactor().monotonic()
