@@ -119,9 +119,13 @@ class ControlAutoTune:
         Ku = 4. * self.heater_max_power / (math.pi * amplitude)
         Tu = time_diff
         # Use Ziegler-Nichols method to generate PID parameters
-        Ti = 0.5 * Tu
-        Td = 0.125 * Tu
-        Kp = 0.6 * Ku * heaters.PID_PARAM_BASE
+        # Ti = 0.5 * Tu
+        # Td = 0.125 * Tu
+        # Kp = 0.6 * Ku * heaters.PID_PARAM_BASE
+        # 降低输出波动,减小稳态误差,全面降低KP,KI,KD
+        Ti = 0.8 * Tu
+        Td = 0.06 * Tu
+        Kp = 0.45 * Ku * heaters.PID_PARAM_BASE
         Ki = Kp / Ti
         Kd = Kp * Td
         logging.info("Autotune: raw=%f/%f Ku=%f Tu=%f  Kp=%f Ki=%f Kd=%f",
