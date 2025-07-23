@@ -121,6 +121,9 @@ class BedMesh:
         self.gcode.register_command(
             'BED_MESH_OFFSET', self.cmd_BED_MESH_OFFSET,
             desc=self.cmd_BED_MESH_OFFSET_help)
+        self.gcode.register_command(
+            'BED_MESH_CHECK', self.cmd_BED_MESH_CHECK,
+            desc=self.cmd_BED_MESH_CHECK_help)
         # Register transform
         gcode_move = self.printer.load_object(config, 'gcode_move')
         gcode_move.set_move_transform(self)
@@ -223,13 +226,17 @@ class BedMesh:
     def get_status(self, eventtime=None):
         return self.status
     def update_status(self):
+        # 初始化状态字典，供外部应用程序(Moonraker、Fluidd、KlipperScreen等)访问
         self.status = {
-            "profile_name": "",
-            "mesh_min": (0., 0.),
-            "mesh_max": (0., 0.),
-            "probed_matrix": [[]],
-            "mesh_matrix": [[]],
-            "profiles": self.pmgr.get_profiles()
+            "profile_name": "",              # 当前mesh配置文件名称
+            "mesh_min": (0., 0.),           # mesh区域最小坐标
+            "mesh_max": (0., 0.),           # mesh区域最大坐标
+            "probed_matrix": [[]],          # 原始探测数据矩阵
+            "mesh_matrix": [[]],            # 插值后的高密度网格矩阵
+            "curvature_x_matrix": [[]],     # X方向曲率矩阵(新增)
+            "curvature_y_matrix": [[]],     # Y方向曲率矩阵(新增) 
+            "curvature_warnings": [],       # 高曲率警告列表(新增)
+            "profiles": self.pmgr.get_profiles()  # 保存的mesh配置文件列表
         }
         if self.z_mesh is not None:
             params = self.z_mesh.get_mesh_params()
@@ -237,11 +244,20 @@ class BedMesh:
             mesh_max = (params['max_x'], params['max_y'])
             probed_matrix = self.z_mesh.get_probed_matrix()
             mesh_matrix = self.z_mesh.get_mesh_matrix()
-            self.status['profile_name'] = self.z_mesh.get_profile_name()
-            self.status['mesh_min'] = mesh_min
-            self.status['mesh_max'] = mesh_max
-            self.status['probed_matrix'] = probed_matrix
-            self.status['mesh_matrix'] = mesh_matrix
+            # 从ZMesh对象获取曲率分析数据
+            curvature_x_matrix = self.z_mesh.get_curvature_x_matrix()  # X方向曲率矩阵
+            curvature_y_matrix = self.z_mesh.get_curvature_y_matrix()  # Y方向曲率矩阵
+            curvature_warnings = self.z_mesh.get_curvature_warnings()  # 高曲率警告列表
+            
+            # 更新状态字典中的所有mesh相关数据
+            self.status['profile_name'] = self.z_mesh.get_profile_name()       # 配置文件名
+            self.status['mesh_min'] = mesh_min                                 # mesh最小坐标
+            self.status['mesh_max'] = mesh_max                                 # mesh最大坐标
+            self.status['probed_matrix'] = probed_matrix                       # 原始探测数据
+            self.status['mesh_matrix'] = mesh_matrix                           # 插值网格数据
+            self.status['curvature_x_matrix'] = curvature_x_matrix             # X方向曲率数据(新增)
+            self.status['curvature_y_matrix'] = curvature_y_matrix             # Y方向曲率数据(新增)
+            self.status['curvature_warnings'] = curvature_warnings             # 高曲率警告(新增)
     def get_mesh(self):
         return self.z_mesh
     cmd_BED_MESH_OUTPUT_help = "Retrieve interpolated grid of probed z-points"
@@ -282,6 +298,21 @@ class BedMesh:
             gcode_move.reset_last_position()
         else:
             gcmd.respond_info("No mesh loaded to offset")
+    cmd_BED_MESH_CHECK_help = "使用曲率分析检查床面不规则性"
+    def cmd_BED_MESH_CHECK(self, gcmd):
+        """手动检查床面曲率和不规则性的G-code命令
+        用法: BED_MESH_CHECK [THRESHOLD=0.05]
+        """
+        # 检查是否存在mesh数据
+        if self.z_mesh is None:
+            gcmd.respond_info("bed_mesh: 没有可用的mesh数据。请先运行 BED_MESH_CALIBRATE。")
+            return
+        
+        # 获取用户指定的曲率阈值，默认为0.05
+        threshold = gcmd.get_float('THRESHOLD', 0.05, minval=0.001, maxval=1.0)
+        
+        # 执行床面不规则性检查并输出结果
+        self.z_mesh.check_bed_irregularities(gcmd.respond_info, threshold)
 
 
 class ZrefMode:
@@ -298,6 +329,9 @@ class BedMeshCalibrate:
         self.radius = self.origin = None
         self.mesh_min = self.mesh_max = (0., 0.)
         self.adaptive_margin = config.getfloat('adaptive_margin', 0.0)
+        # 曲率阈值配置 - 超过此值的区域将被标记为潜在问题区域
+        self.curvature_threshold = config.getfloat('curvature_threshold', 0.05, 
+                                                  minval=0.001, maxval=1.0)
         self.zero_ref_pos = config.getfloatlist(
             "zero_reference_position", None, count=2
         )
@@ -865,7 +899,7 @@ class BedMeshCalibrate:
 
         z_mesh = ZMesh(params, self._profile_name)
         try:
-            z_mesh.build_mesh(probed_matrix)
+            z_mesh.build_mesh(probed_matrix, self.curvature_threshold)
         except BedMeshError as e:
             raise self.gcode.error(str(e))
         if self.zero_reference_mode == ZrefMode.IN_MESH:
@@ -965,6 +999,9 @@ class ZMesh:
     def __init__(self, params, name):
         self.profile_name = name or "adaptive-%X" % (id(self),)
         self.probed_matrix = self.mesh_matrix = None
+        # 曲率分析数据 - 用于检测床面不规则性
+        self.curvature_x_matrix = self.curvature_y_matrix = None  # X和Y方向的曲率矩阵（二阶导数）
+        self.curvature_warnings = []  # 高曲率区域的警告列表，包含坐标和曲率值
         self.mesh_params = params
         self.mesh_offsets = [0., 0.]
         logging.debug('bed_mesh: probe/mesh parameters:')
@@ -1010,10 +1047,145 @@ class ZMesh:
             return [[round(z, 6) for z in line]
                     for line in self.probed_matrix]
         return [[]]
+    def get_curvature_x_matrix(self):
+        """获取X方向曲率矩阵，返回格式化的二维数组"""
+        if self.curvature_x_matrix is not None:
+            # 将曲率值四舍五入到6位小数，便于显示和传输
+            return [[round(c, 6) for c in line]
+                    for line in self.curvature_x_matrix]
+        return [[]]  # 如果曲率矩阵不存在，返回空数组
+    
+    def get_curvature_y_matrix(self):
+        """获取Y方向曲率矩阵，返回格式化的二维数组"""
+        if self.curvature_y_matrix is not None:
+            # 将曲率值四舍五入到6位小数，便于显示和传输
+            return [[round(c, 6) for c in line]
+                    for line in self.curvature_y_matrix]
+        return [[]]  # 如果曲率矩阵不存在，返回空数组
+    
+    def get_curvature_warnings(self):
+        """获取高曲率警告列表，包含位置坐标和曲率值"""
+        return self.curvature_warnings
     def get_mesh_params(self):
         return self.mesh_params
     def get_profile_name(self):
         return self.profile_name
+    def calculate_curvature(self, curvature_threshold=0.05):
+        """使用有限差分法计算mesh_matrix中每个点的曲率"""
+        if self.mesh_matrix is None:
+            return None, None, []
+        
+        y_count = len(self.mesh_matrix)
+        x_count = len(self.mesh_matrix[0])
+        
+        # 检查mesh点数是否足够进行曲率计算（至少需要3x3的网格）
+        if y_count < 3 or x_count < 3:
+            logging.info("bed_mesh: 网格点数不足，无法进行曲率计算")
+            return None, None, []
+        
+        # 初始化曲率矩阵 - 与mesh_matrix同样大小的二维数组
+        curvature_x = [[0.0 for _ in range(x_count)] for _ in range(y_count)]  # X方向曲率(d²z/dx²)
+        curvature_y = [[0.0 for _ in range(x_count)] for _ in range(y_count)]  # Y方向曲率(d²z/dy²)
+        
+        # 使用二阶有限差分法计算每个点的曲率
+        for j in range(y_count):
+            for i in range(x_count):
+                # X方向曲率计算 (d²z/dx²) - 使用三点有限差分公式
+                if i == 0:
+                    # 左边界点：使用前向差分公式 f''(x) ≈ [f(x+2h) - 2f(x+h) + f(x)] / h²
+                    if x_count >= 3:
+                        curvature_x[j][i] = (self.mesh_matrix[j][i+2] - 
+                                           2*self.mesh_matrix[j][i+1] + 
+                                           self.mesh_matrix[j][i]) / (self.mesh_x_dist**2)
+                elif i == x_count - 1:
+                    # 右边界点：使用后向差分公式 f''(x) ≈ [f(x) - 2f(x-h) + f(x-2h)] / h²
+                    if x_count >= 3:
+                        curvature_x[j][i] = (self.mesh_matrix[j][i] - 
+                                           2*self.mesh_matrix[j][i-1] + 
+                                           self.mesh_matrix[j][i-2]) / (self.mesh_x_dist**2)
+                else:
+                    # 内部点：使用中心差分公式 f''(x) ≈ [f(x+h) - 2f(x) + f(x-h)] / h²
+                    curvature_x[j][i] = (self.mesh_matrix[j][i+1] - 
+                                       2*self.mesh_matrix[j][i] + 
+                                       self.mesh_matrix[j][i-1]) / (self.mesh_x_dist**2)
+                
+                # Y方向曲率计算 (d²z/dy²) - 使用三点有限差分公式  
+                if j == 0:
+                    # 下边界点：使用前向差分公式 f''(y) ≈ [f(y+2h) - 2f(y+h) + f(y)] / h²
+                    if y_count >= 3:
+                        curvature_y[j][i] = (self.mesh_matrix[j+2][i] - 
+                                           2*self.mesh_matrix[j+1][i] + 
+                                           self.mesh_matrix[j][i]) / (self.mesh_y_dist**2)
+                elif j == y_count - 1:
+                    # 上边界点：使用后向差分公式 f''(y) ≈ [f(y) - 2f(y-h) + f(y-2h)] / h²
+                    if y_count >= 3:
+                        curvature_y[j][i] = (self.mesh_matrix[j][i] - 
+                                           2*self.mesh_matrix[j-1][i] + 
+                                           self.mesh_matrix[j-2][i]) / (self.mesh_y_dist**2)
+                else:
+                    # 内部点：使用中心差分公式 f''(y) ≈ [f(y+h) - 2f(y) + f(y-h)] / h²
+                    curvature_y[j][i] = (self.mesh_matrix[j+1][i] - 
+                                       2*self.mesh_matrix[j][i] + 
+                                       self.mesh_matrix[j-1][i]) / (self.mesh_y_dist**2)
+        
+        # 寻找高曲率区域（可能的床面问题区域）
+        warnings = []
+        for j in range(y_count):
+            for i in range(x_count):
+                # 计算总曲率：X和Y方向曲率绝对值之和
+                total_curvature = abs(curvature_x[j][i]) + abs(curvature_y[j][i])
+                
+                # 如果总曲率超过阈值，记录为潜在问题区域
+                if total_curvature > curvature_threshold:
+                    x_coord = self.get_x_coordinate(i)  # 转换索引为实际X坐标
+                    y_coord = self.get_y_coordinate(j)  # 转换索引为实际Y坐标
+                    warnings.append({
+                        'x': x_coord,                      # 实际X坐标(mm)
+                        'y': y_coord,                      # 实际Y坐标(mm)
+                        'curvature_x': curvature_x[j][i],  # X方向曲率值
+                        'curvature_y': curvature_y[j][i],  # Y方向曲率值
+                        'total_curvature': total_curvature # 总曲率值
+                    })
+        
+        # 将曲率数据保存到实例变量中，供外部访问
+        self.curvature_x_matrix = curvature_x  # X方向曲率矩阵
+        self.curvature_y_matrix = curvature_y  # Y方向曲率矩阵  
+        self.curvature_warnings = warnings     # 高曲率警告列表
+        
+        return curvature_x, curvature_y, warnings
+    
+    def check_bed_irregularities(self, print_func, curvature_threshold=0.05):
+        """检查床面不规则性并向用户报告"""
+        # 计算曲率并获取警告信息
+        curvature_x, curvature_y, warnings = self.calculate_curvature(curvature_threshold)
+        
+        # 如果没有检测到高曲率区域，报告床面平整
+        if not warnings:
+            print_func("bed_mesh: 床面表面看起来较为平整")
+            return
+        
+        # 构建详细的警告消息
+        msg = "bed_mesh: 检测到潜在的床面不规则性:\n"
+        msg += "高曲率区域 (可能表示有杂物、翘曲或调平问题):\n"
+        
+        # 按总曲率值降序排列，最多显示前10个最严重的区域
+        for w in sorted(warnings, key=lambda x: x['total_curvature'], reverse=True)[:10]:
+            msg += "  位置 (%.1f, %.1f): X曲率=%.4f Y曲率=%.4f 总曲率=%.4f\n" % (
+                w['x'], w['y'], w['curvature_x'], w['curvature_y'], w['total_curvature'])
+        
+        # 如果问题区域超过10个，显示剩余数量
+        if len(warnings) > 10:
+            msg += "  ... 还有 %d 个其他位置\n" % (len(warnings) - 10)
+        
+        # 提供用户建议
+        msg += "\n建议:\n"
+        msg += "- 检查床面是否有杂物或异物\n"
+        msg += "- 确认打印床固定牢固且水平\n"
+        msg += "- 考虑清洁床面表面\n"
+        msg += "- 如果问题持续存在，请用直尺检查床面平整度\n"
+        
+        print_func(msg)
+    
     def print_probed_matrix(self, print_func):
         if self.probed_matrix is not None:
             msg = "Mesh Leveling Probed Z positions:\n"
@@ -1045,10 +1217,17 @@ class ZMesh:
             print_func(msg)
         else:
             print_func("bed_mesh: Z Mesh not generated")
-    def build_mesh(self, z_matrix):
-        self.probed_matrix = z_matrix
-        self._sample(z_matrix)
-        self.print_mesh(logging.debug)
+    def build_mesh(self, z_matrix, curvature_threshold=0.05):
+        """构建网格并进行曲率分析"""
+        self.probed_matrix = z_matrix          # 保存原始探测数据
+        self._sample(z_matrix)                 # 执行插值算法生成高密度网格
+        self.print_mesh(logging.debug)         # 输出mesh信息到调试日志
+        
+        # 计算并存储曲率数据 - 用于检测床面问题
+        self.calculate_curvature(curvature_threshold)
+        
+        # 检查床面不规则性并向用户报告
+        self.check_bed_irregularities(logging.info, curvature_threshold)
     def set_zero_reference(self, xpos, ypos):
         offset = self.calc_z(xpos, ypos)
         logging.info(
@@ -1362,7 +1541,7 @@ class ProfileManager:
         mesh_params = profile['mesh_params']
         z_mesh = ZMesh(mesh_params, prof_name)
         try:
-            z_mesh.build_mesh(probed_matrix)
+            z_mesh.build_mesh(probed_matrix, 0.05)  # Use default threshold for loaded profiles
         except BedMeshError as e:
             raise self.gcode.error(str(e))
         self.bedmesh.set_mesh(z_mesh)
