@@ -332,6 +332,12 @@ class BedMeshCalibrate:
         # 曲率阈值配置 - 超过此值的区域将被标记为潜在问题区域
         self.curvature_threshold = config.getfloat('curvature_threshold', 0.05, 
                                                   minval=0.001, maxval=1.0)
+        # 曲率计算算法配置 - 'spline'(三次样条,默认)或'finite_diff'(有限差分)
+        self.curvature_algorithm = config.get('curvature_algorithm', 'spline').strip().lower()
+        if self.curvature_algorithm not in ['spline', 'finite_diff']:
+            raise config.error(
+                "bed_mesh: curvature_algorithm must be 'spline' or 'finite_diff', "
+                "got '%s'" % self.curvature_algorithm)
         self.zero_ref_pos = config.getfloatlist(
             "zero_reference_position", None, count=2
         )
@@ -899,7 +905,7 @@ class BedMeshCalibrate:
 
         z_mesh = ZMesh(params, self._profile_name)
         try:
-            z_mesh.build_mesh(probed_matrix, self.curvature_threshold)
+            z_mesh.build_mesh(probed_matrix, self.curvature_threshold, self.curvature_algorithm)
         except BedMeshError as e:
             raise self.gcode.error(str(e))
         if self.zero_reference_mode == ZrefMode.IN_MESH:
@@ -1070,9 +1076,10 @@ class ZMesh:
         return self.mesh_params
     def get_profile_name(self):
         return self.profile_name
-    def calculate_curvature(self, curvature_threshold=0.05):
-        """使用有限差分法计算mesh_matrix中每个点的曲率"""
+    def calculate_curvature_finite_diff(self, curvature_threshold=0.05):
+        """使用有限差分法计算mesh_matrix中每个点的曲率（原方法）"""
         if self.mesh_matrix is None:
+            logging.info("zmesh: mesh_matrix is None")
             return None, None, []
         
         y_count = len(self.mesh_matrix)
@@ -1080,7 +1087,7 @@ class ZMesh:
         
         # 检查mesh点数是否足够进行曲率计算（至少需要3x3的网格）
         if y_count < 3 or x_count < 3:
-            logging.info("bed_mesh: 网格点数不足，无法进行曲率计算")
+            logging.info("zmesh: 网格点数不足，无法进行曲率计算")
             return None, None, []
         
         # 初始化曲率矩阵 - 与mesh_matrix同样大小的二维数组
@@ -1127,6 +1134,176 @@ class ZMesh:
                     curvature_y[j][i] = (self.mesh_matrix[j+1][i] - 
                                        2*self.mesh_matrix[j][i] + 
                                        self.mesh_matrix[j-1][i]) / (self.mesh_y_dist**2)
+        return curvature_x, curvature_y
+    
+    def calculate_curvature_spline(self, curvature_threshold=0.05):
+        """使用三次样条拟合计算mesh_matrix中每个点的曲率（新方法）"""
+        if self.mesh_matrix is None:
+            logging.info("zmesh: mesh_matrix is None")
+            return None, None, []
+        
+        y_count = len(self.mesh_matrix)
+        x_count = len(self.mesh_matrix[0])
+        
+        # 检查mesh点数是否足够进行曲率计算（至少需要4x4的网格用于三次样条）
+        if y_count < 4 or x_count < 4:
+            logging.info("zmesh: 网格点数不足，无法进行三次样条曲率计算，回退到有限差分方法")
+            return self.calculate_curvature_finite_diff(curvature_threshold)
+        
+        # 初始化曲率矩阵 - 与mesh_matrix同样大小的二维数组
+        curvature_x = [[0.0 for _ in range(x_count)] for _ in range(y_count)]  # X方向曲率(d²z/dx²)
+        curvature_y = [[0.0 for _ in range(x_count)] for _ in range(y_count)]  # Y方向曲率(d²z/dy²)
+        
+        # 计算X方向曲率 - 对每一行进行三次样条插值
+        for j in range(y_count):
+            # 构建三次样条拟合参数
+            x_coords = [self.get_x_coordinate(i) for i in range(x_count)]
+            z_values = self.mesh_matrix[j]
+            
+            # 计算三次样条的系数
+            spline_coeffs = self._compute_cubic_spline_coeffs(x_coords, z_values)
+            
+            # 使用样条系数计算每个点的二阶导数（曲率）
+            for i in range(x_count):
+                curvature_x[j][i] = self._evaluate_spline_second_derivative(
+                    x_coords, spline_coeffs, self.get_x_coordinate(i))
+        
+        # 计算Y方向曲率 - 对每一列进行三次样条插值
+        for i in range(x_count):
+            # 构建三次样条拟合参数
+            y_coords = [self.get_y_coordinate(j) for j in range(y_count)]
+            z_values = [self.mesh_matrix[j][i] for j in range(y_count)]
+            
+            # 计算三次样条的系数
+            spline_coeffs = self._compute_cubic_spline_coeffs(y_coords, z_values)
+            
+            # 使用样条系数计算每个点的二阶导数（曲率）
+            for j in range(y_count):
+                curvature_y[j][i] = self._evaluate_spline_second_derivative(
+                    y_coords, spline_coeffs, self.get_y_coordinate(j))
+        
+        return curvature_x, curvature_y
+    
+    def _compute_cubic_spline_coeffs(self, x_coords, y_values):
+        """计算自然三次样条的系数
+        
+        返回每个区间的四次多项式系数 [a, b, c, d]
+        其中样条函数为: S(x) = a + b*(x-xi) + c*(x-xi)² + d*(x-xi)³
+        二阶导数为: S''(x) = 2*c + 6*d*(x-xi)
+        """
+        n = len(x_coords)
+        if n < 4:
+            # 点数不足，无法构建三次样条
+            return []
+        
+        # 计算步长
+        h = [x_coords[i+1] - x_coords[i] for i in range(n-1)]
+        
+        # 构建三对角矩阵求解二阶导数
+        # 使用自然边界条件：S''(x0) = S''(xn-1) = 0
+        A = [[0.0 for _ in range(n)] for _ in range(n)]
+        b = [0.0 for _ in range(n)]
+        
+        # 边界条件：自然样条
+        A[0][0] = 1.0
+        A[n-1][n-1] = 1.0
+        b[0] = 0.0
+        b[n-1] = 0.0
+        
+        # 内部节点的连续性条件
+        for i in range(1, n-1):
+            A[i][i-1] = h[i-1]
+            A[i][i] = 2 * (h[i-1] + h[i])
+            A[i][i+1] = h[i]
+            b[i] = 6 * ((y_values[i+1] - y_values[i]) / h[i] - 
+                       (y_values[i] - y_values[i-1]) / h[i-1])
+        
+        # 求解三对角线性方程组得到二阶导数
+        S = self._solve_tridiagonal(A, b)
+        
+        # 计算每个区间的样条系数
+        coeffs = []
+        for i in range(n-1):
+            a = y_values[i]
+            b_coeff = (y_values[i+1] - y_values[i]) / h[i] - h[i] * (2*S[i] + S[i+1]) / 6
+            c = S[i] / 2
+            d = (S[i+1] - S[i]) / (6 * h[i])
+            coeffs.append([a, b_coeff, c, d])
+        
+        return coeffs
+    
+    def _solve_tridiagonal(self, A, b):
+        """求解三对角线性方程组 Ax = b"""
+        n = len(b)
+        # Thomas算法求解三对角矩阵
+        c_star = [0.0] * n
+        d_star = [0.0] * n
+        
+        c_star[0] = A[0][1] / A[0][0] if A[0][0] != 0 else 0
+        d_star[0] = b[0] / A[0][0] if A[0][0] != 0 else 0
+        
+        for i in range(1, n):
+            denom = A[i][i] - A[i][i-1] * c_star[i-1]
+            if i < n-1:
+                c_star[i] = A[i][i+1] / denom if denom != 0 else 0
+            d_star[i] = (b[i] - A[i][i-1] * d_star[i-1]) / denom if denom != 0 else 0
+        
+        # 回代求解
+        x = [0.0] * n
+        x[n-1] = d_star[n-1]
+        for i in range(n-2, -1, -1):
+            x[i] = d_star[i] - c_star[i] * x[i+1]
+        
+        return x
+    
+    def _evaluate_spline_second_derivative(self, x_coords, coeffs, x):
+        """计算三次样条在指定点的二阶导数"""
+        n = len(x_coords)
+        
+        # 找到x所在的区间
+        interval = 0
+        for i in range(n-1):
+            if x_coords[i] <= x <= x_coords[i+1]:
+                interval = i
+                break
+        
+        # 确保区间索引有效
+        interval = min(interval, len(coeffs) - 1)
+        
+        if interval >= len(coeffs):
+            return 0.0
+        
+        # 获取区间系数 [a, b, c, d]
+        a, b, c, d = coeffs[interval]
+        
+        # 计算相对位置
+        dx = x - x_coords[interval]
+        
+        # 三次样条的二阶导数: S''(x) = 2*c + 6*d*(x-xi)
+        second_derivative = 2 * c + 6 * d * dx
+        
+        return second_derivative
+    
+    def calculate_curvature(self, curvature_threshold=0.05, algorithm='spline'):
+        """计算mesh_matrix中每个点的曲率
+        
+        参数:
+            curvature_threshold: 曲率阈值，超过此值的区域将被标记为潜在问题区域
+            algorithm: 曲率计算算法，'spline'（三次样条）或'finite_diff'（有限差分）
+        """
+        if algorithm == 'spline':
+            curvature_x, curvature_y = self.calculate_curvature_spline(curvature_threshold)
+        elif algorithm == 'finite_diff':
+            curvature_x, curvature_y = self.calculate_curvature_finite_diff(curvature_threshold)
+        else:
+            logging.info("zmesh: 未知的曲率计算算法 '%s'，使用默认的三次样条方法" % algorithm)
+            curvature_x, curvature_y = self.calculate_curvature_spline(curvature_threshold)
+        
+        if curvature_x is None or curvature_y is None:
+            return None, None, []
+        
+        y_count = len(curvature_x)
+        x_count = len(curvature_x[0])
         
         # 寻找高曲率区域（可能的床面问题区域）
         warnings = []
@@ -1156,8 +1333,8 @@ class ZMesh:
     
     def check_bed_irregularities(self, print_func, curvature_threshold=0.05):
         """检查床面不规则性并向用户报告"""
-        # 计算曲率并获取警告信息
-        curvature_x, curvature_y, warnings = self.calculate_curvature(curvature_threshold)
+        # 使用当前存储的曲率数据，无需重新计算
+        warnings = self.curvature_warnings
         
         # 如果没有检测到高曲率区域，报告床面平整
         if not warnings:
@@ -1217,14 +1394,14 @@ class ZMesh:
             print_func(msg)
         else:
             print_func("bed_mesh: Z Mesh not generated")
-    def build_mesh(self, z_matrix, curvature_threshold=0.05):
+    def build_mesh(self, z_matrix, curvature_threshold=0.05, curvature_algorithm='spline'):
         """构建网格并进行曲率分析"""
         self.probed_matrix = z_matrix          # 保存原始探测数据
         self._sample(z_matrix)                 # 执行插值算法生成高密度网格
         self.print_mesh(logging.debug)         # 输出mesh信息到调试日志
         
         # 计算并存储曲率数据 - 用于检测床面问题
-        self.calculate_curvature(curvature_threshold)
+        self.calculate_curvature(curvature_threshold, curvature_algorithm)
         
         # 检查床面不规则性并向用户报告
         self.check_bed_irregularities(logging.info, curvature_threshold)
@@ -1541,7 +1718,7 @@ class ProfileManager:
         mesh_params = profile['mesh_params']
         z_mesh = ZMesh(mesh_params, prof_name)
         try:
-            z_mesh.build_mesh(probed_matrix, 0.05)  # Use default threshold for loaded profiles
+            z_mesh.build_mesh(probed_matrix, 0.05, 'spline')  # Use default threshold and algorithm for loaded profiles
         except BedMeshError as e:
             raise self.gcode.error(str(e))
         self.bedmesh.set_mesh(z_mesh)
