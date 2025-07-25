@@ -910,7 +910,7 @@ class BedMeshCalibrate:
                         "Probed table length: %d Probed Table:\n%s") %
                     (len(probed_matrix), str(probed_matrix)))
 
-        z_mesh = ZMesh(params, self._profile_name)
+        z_mesh = ZMesh(params, self._profile_name, self.curvature_precision)
         try:
             z_mesh.build_mesh(probed_matrix, self.curvature_threshold, self.curvature_algorithm)
         except BedMeshError as e:
@@ -1009,12 +1009,13 @@ class MoveSplitter:
 
 
 class ZMesh:
-    def __init__(self, params, name):
+    def __init__(self, params, name, curvature_precision='exact'):
         self.profile_name = name or "adaptive-%X" % (id(self),)
         self.probed_matrix = self.mesh_matrix = None
         # 曲率分析数据 - 用于检测床面不规则性
         self.curvature_x_matrix = self.curvature_y_matrix = None  # X和Y方向的曲率矩阵（二阶导数）
         self.curvature_warnings = []  # 高曲率区域的警告列表，包含坐标和曲率值
+        self.curvature_precision = curvature_precision  # 曲率计算精度
         self.mesh_params = params
         self.mesh_offsets = [0., 0.]
         logging.debug('bed_mesh: probe/mesh parameters:')
@@ -1782,7 +1783,7 @@ class ProfileManager:
                 "bed_mesh: Unknown profile [%s]" % prof_name)
         probed_matrix = profile['points']
         mesh_params = profile['mesh_params']
-        z_mesh = ZMesh(mesh_params, prof_name)
+        z_mesh = ZMesh(mesh_params, prof_name, 'exact')  # Use default precision for loaded profiles
         try:
             z_mesh.build_mesh(probed_matrix, 0.05, 'spline')  # Use default threshold and algorithm for loaded profiles
         except BedMeshError as e:
