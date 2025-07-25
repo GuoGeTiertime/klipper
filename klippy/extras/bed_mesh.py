@@ -338,6 +338,13 @@ class BedMeshCalibrate:
             raise config.error(
                 "bed_mesh: curvature_algorithm must be 'spline' or 'finite_diff', "
                 "got '%s'" % self.curvature_algorithm)
+        
+        # 曲率计算精度配置 - 'approximate'(二阶导数近似)或'exact'(精确曲率,默认)
+        self.curvature_precision = config.get('curvature_precision', 'exact').strip().lower()
+        if self.curvature_precision not in ['approximate', 'exact']:
+            raise config.error(
+                "bed_mesh: curvature_precision must be 'approximate' or 'exact', "
+                "got '%s'" % self.curvature_precision)
         self.zero_ref_pos = config.getfloatlist(
             "zero_reference_position", None, count=2
         )
@@ -1163,10 +1170,14 @@ class ZMesh:
             # 计算三次样条的系数
             spline_coeffs = self._compute_cubic_spline_coeffs(x_coords, z_values)
             
-            # 使用样条系数计算每个点的二阶导数（曲率）
+            # 使用样条系数计算每个点的曲率
             for i in range(x_count):
-                curvature_x[j][i] = self._evaluate_spline_second_derivative(
-                    x_coords, spline_coeffs, self.get_x_coordinate(i))
+                if self.curvature_precision == 'exact':
+                    curvature_x[j][i] = self._evaluate_exact_curvature(
+                        x_coords, spline_coeffs, self.get_x_coordinate(i))
+                else:  # approximate
+                    curvature_x[j][i] = abs(self._evaluate_spline_second_derivative(
+                        x_coords, spline_coeffs, self.get_x_coordinate(i)))
         
         # 计算Y方向曲率 - 对每一列进行三次样条插值
         for i in range(x_count):
@@ -1177,10 +1188,14 @@ class ZMesh:
             # 计算三次样条的系数
             spline_coeffs = self._compute_cubic_spline_coeffs(y_coords, z_values)
             
-            # 使用样条系数计算每个点的二阶导数（曲率）
+            # 使用样条系数计算每个点的曲率
             for j in range(y_count):
-                curvature_y[j][i] = self._evaluate_spline_second_derivative(
-                    y_coords, spline_coeffs, self.get_y_coordinate(j))
+                if self.curvature_precision == 'exact':
+                    curvature_y[j][i] = self._evaluate_exact_curvature(
+                        y_coords, spline_coeffs, self.get_y_coordinate(j))
+                else:  # approximate
+                    curvature_y[j][i] = abs(self._evaluate_spline_second_derivative(
+                        y_coords, spline_coeffs, self.get_y_coordinate(j)))
         
         return curvature_x, curvature_y
     
@@ -1256,6 +1271,34 @@ class ZMesh:
         
         return x
     
+    def _evaluate_spline_first_derivative(self, x_coords, coeffs, x):
+        """计算三次样条在指定点的一阶导数"""
+        n = len(x_coords)
+        
+        # 找到x所在的区间
+        interval = 0
+        for i in range(n-1):
+            if x_coords[i] <= x <= x_coords[i+1]:
+                interval = i
+                break
+        
+        # 确保区间索引有效
+        interval = min(interval, len(coeffs) - 1)
+        
+        if interval >= len(coeffs):
+            return 0.0
+        
+        # 获取区间系数 [a, b, c, d]
+        a, b, c, d = coeffs[interval]
+        
+        # 计算相对位置
+        dx = x - x_coords[interval]
+        
+        # 三次样条的一阶导数: S'(x) = b + 2*c*(x-xi) + 3*d*(x-xi)²
+        first_derivative = b + 2 * c * dx + 3 * d * dx * dx
+        
+        return first_derivative
+
     def _evaluate_spline_second_derivative(self, x_coords, coeffs, x):
         """计算三次样条在指定点的二阶导数"""
         n = len(x_coords)
@@ -1284,12 +1327,35 @@ class ZMesh:
         
         return second_derivative
     
+    def _evaluate_exact_curvature(self, x_coords, coeffs, x):
+        """计算三次样条在指定点的精确曲率值
+        
+        使用完整曲率公式: κ = |f''(x)| / (1 + f'(x)²)^(3/2)
+        当一阶导数较小时，近似为: κ ≈ |f''(x)|
+        """
+        # 计算一阶导数
+        first_derivative = self._evaluate_spline_first_derivative(x_coords, coeffs, x)
+        # 计算二阶导数
+        second_derivative = self._evaluate_spline_second_derivative(x_coords, coeffs, x)
+        
+        # 如果一阶导数很小（床面相对平坦），使用近似公式
+        if abs(first_derivative) < 0.1:  # 阈值可调
+            return abs(second_derivative)
+        
+        # 否则使用精确曲率公式
+        curvature = abs(second_derivative) / (1 + first_derivative**2)**(3/2)
+        return curvature
+    
     def calculate_curvature(self, curvature_threshold=0.05, algorithm='spline'):
         """计算mesh_matrix中每个点的曲率
         
         参数:
             curvature_threshold: 曲率阈值，超过此值的区域将被标记为潜在问题区域
             algorithm: 曲率计算算法，'spline'（三次样条）或'finite_diff'（有限差分）
+            
+        曲率计算精度由配置选项 curvature_precision 控制:
+        - 'approximate': 使用二阶导数绝对值作为曲率近似（默认，计算快速）
+        - 'exact': 使用完整曲率公式 κ = |f''(x)| / (1 + f'(x)²)^(3/2)（更精确）
         """
         if algorithm == 'spline':
             curvature_x, curvature_y = self.calculate_curvature_spline(curvature_threshold)
