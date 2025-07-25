@@ -345,6 +345,9 @@ class BedMeshCalibrate:
             raise config.error(
                 "bed_mesh: curvature_precision must be 'approximate' or 'exact', "
                 "got '%s'" % self.curvature_precision)
+        
+        # 改进的边界条件配置 - 让端点曲率与相邻点相近
+        self.improved_boundary_conditions = config.getboolean('improved_boundary_conditions', True)
         self.zero_ref_pos = config.getfloatlist(
             "zero_reference_position", None, count=2
         )
@@ -910,7 +913,7 @@ class BedMeshCalibrate:
                         "Probed table length: %d Probed Table:\n%s") %
                     (len(probed_matrix), str(probed_matrix)))
 
-        z_mesh = ZMesh(params, self._profile_name, self.curvature_precision)
+        z_mesh = ZMesh(params, self._profile_name, self.curvature_precision, self.improved_boundary_conditions)
         try:
             z_mesh.build_mesh(probed_matrix, self.curvature_threshold, self.curvature_algorithm)
         except BedMeshError as e:
@@ -1009,13 +1012,14 @@ class MoveSplitter:
 
 
 class ZMesh:
-    def __init__(self, params, name, curvature_precision='exact'):
+    def __init__(self, params, name, curvature_precision='exact', improved_boundary_conditions=True):
         self.profile_name = name or "adaptive-%X" % (id(self),)
         self.probed_matrix = self.mesh_matrix = None
         # 曲率分析数据 - 用于检测床面不规则性
         self.curvature_x_matrix = self.curvature_y_matrix = None  # X和Y方向的曲率矩阵（二阶导数）
         self.curvature_warnings = []  # 高曲率区域的警告列表，包含坐标和曲率值
         self.curvature_precision = curvature_precision  # 曲率计算精度
+        self.improved_boundary_conditions = improved_boundary_conditions  # 改进的边界条件
         self.mesh_params = params
         self.mesh_offsets = [0., 0.]
         logging.debug('bed_mesh: probe/mesh parameters:')
@@ -1085,7 +1089,7 @@ class ZMesh:
     def get_profile_name(self):
         return self.profile_name
     def calculate_curvature_finite_diff(self, curvature_threshold=0.05):
-        """使用有限差分法计算mesh_matrix中每个点的曲率（原方法）"""
+        """使用改进的有限差分法计算mesh_matrix中每个点的曲率，端点曲率与相邻点相近"""
         if self.mesh_matrix is None:
             logging.info("zmesh: mesh_matrix is None")
             return None, None, []
@@ -1102,41 +1106,69 @@ class ZMesh:
         curvature_x = [[0.0 for _ in range(x_count)] for _ in range(y_count)]  # X方向曲率(d²z/dx²)
         curvature_y = [[0.0 for _ in range(x_count)] for _ in range(y_count)]  # Y方向曲率(d²z/dy²)
         
-        # 使用二阶有限差分法计算每个点的曲率
+        # 使用改进的二阶有限差分法计算每个点的曲率
         for j in range(y_count):
             for i in range(x_count):
-                # X方向曲率计算 (d²z/dx²) - 使用三点有限差分公式
+                # X方向曲率计算 (d²z/dx²) - 使用改进的有限差分公式
                 if i == 0:
                     # 左边界点：使用前向差分公式 f''(x) ≈ [f(x+2h) - 2f(x+h) + f(x)] / h²
                     if x_count >= 3:
                         curvature_x[j][i] = (self.mesh_matrix[j][i+2] - 
                                            2*self.mesh_matrix[j][i+1] + 
                                            self.mesh_matrix[j][i]) / (self.mesh_x_dist**2)
+                        # 平滑处理：如果端点曲率与相邻点差异过大，进行插值平滑
+                        if x_count >= 4 and hasattr(self, 'improved_boundary_conditions') and self.improved_boundary_conditions:
+                            neighbor_curvature = (self.mesh_matrix[j][i+3] - 
+                                                2*self.mesh_matrix[j][i+2] + 
+                                                self.mesh_matrix[j][i+1]) / (self.mesh_x_dist**2)
+                            # 使用加权平均平滑端点曲率
+                            curvature_x[j][i] = 0.7 * curvature_x[j][i] + 0.3 * neighbor_curvature
                 elif i == x_count - 1:
                     # 右边界点：使用后向差分公式 f''(x) ≈ [f(x) - 2f(x-h) + f(x-2h)] / h²
                     if x_count >= 3:
                         curvature_x[j][i] = (self.mesh_matrix[j][i] - 
                                            2*self.mesh_matrix[j][i-1] + 
                                            self.mesh_matrix[j][i-2]) / (self.mesh_x_dist**2)
+                        # 平滑处理：如果端点曲率与相邻点差异过大，进行插值平滑
+                        if x_count >= 4 and hasattr(self, 'improved_boundary_conditions') and self.improved_boundary_conditions:
+                            neighbor_curvature = (self.mesh_matrix[j][i-1] - 
+                                                2*self.mesh_matrix[j][i-2] + 
+                                                self.mesh_matrix[j][i-3]) / (self.mesh_x_dist**2)
+                            # 使用加权平均平滑端点曲率
+                            curvature_x[j][i] = 0.7 * curvature_x[j][i] + 0.3 * neighbor_curvature
                 else:
                     # 内部点：使用中心差分公式 f''(x) ≈ [f(x+h) - 2f(x) + f(x-h)] / h²
                     curvature_x[j][i] = (self.mesh_matrix[j][i+1] - 
                                        2*self.mesh_matrix[j][i] + 
                                        self.mesh_matrix[j][i-1]) / (self.mesh_x_dist**2)
                 
-                # Y方向曲率计算 (d²z/dy²) - 使用三点有限差分公式  
+                # Y方向曲率计算 (d²z/dy²) - 使用改进的有限差分公式  
                 if j == 0:
                     # 下边界点：使用前向差分公式 f''(y) ≈ [f(y+2h) - 2f(y+h) + f(y)] / h²
                     if y_count >= 3:
                         curvature_y[j][i] = (self.mesh_matrix[j+2][i] - 
                                            2*self.mesh_matrix[j+1][i] + 
                                            self.mesh_matrix[j][i]) / (self.mesh_y_dist**2)
+                        # 平滑处理：如果端点曲率与相邻点差异过大，进行插值平滑
+                        if y_count >= 4 and hasattr(self, 'improved_boundary_conditions') and self.improved_boundary_conditions:
+                            neighbor_curvature = (self.mesh_matrix[j+3][i] - 
+                                                2*self.mesh_matrix[j+2][i] + 
+                                                self.mesh_matrix[j+1][i]) / (self.mesh_y_dist**2)
+                            # 使用加权平均平滑端点曲率
+                            curvature_y[j][i] = 0.7 * curvature_y[j][i] + 0.3 * neighbor_curvature
                 elif j == y_count - 1:
                     # 上边界点：使用后向差分公式 f''(y) ≈ [f(y) - 2f(y-h) + f(y-2h)] / h²
                     if y_count >= 3:
                         curvature_y[j][i] = (self.mesh_matrix[j][i] - 
                                            2*self.mesh_matrix[j-1][i] + 
                                            self.mesh_matrix[j-2][i]) / (self.mesh_y_dist**2)
+                        # 平滑处理：如果端点曲率与相邻点差异过大，进行插值平滑
+                        if y_count >= 4 and hasattr(self, 'improved_boundary_conditions') and self.improved_boundary_conditions:
+                            neighbor_curvature = (self.mesh_matrix[j-1][i] - 
+                                                2*self.mesh_matrix[j-2][i] + 
+                                                self.mesh_matrix[j-3][i]) / (self.mesh_y_dist**2)
+                            # 使用加权平均平滑端点曲率
+                            curvature_y[j][i] = 0.7 * curvature_y[j][i] + 0.3 * neighbor_curvature
                 else:
                     # 内部点：使用中心差分公式 f''(y) ≈ [f(y+h) - 2f(y) + f(y-h)] / h²
                     curvature_y[j][i] = (self.mesh_matrix[j+1][i] - 
@@ -1201,7 +1233,7 @@ class ZMesh:
         return curvature_x, curvature_y
     
     def _compute_cubic_spline_coeffs(self, x_coords, y_values):
-        """计算自然三次样条的系数
+        """计算三次样条系数，支持改进的边界条件让端点曲率与相邻点相近
         
         返回每个区间的四次多项式系数 [a, b, c, d]
         其中样条函数为: S(x) = a + b*(x-xi) + c*(x-xi)² + d*(x-xi)³
@@ -1216,15 +1248,41 @@ class ZMesh:
         h = [x_coords[i+1] - x_coords[i] for i in range(n-1)]
         
         # 构建三对角矩阵求解二阶导数
-        # 使用自然边界条件：S''(x0) = S''(xn-1) = 0
         A = [[0.0 for _ in range(n)] for _ in range(n)]
         b = [0.0 for _ in range(n)]
         
-        # 边界条件：自然样条
-        A[0][0] = 1.0
-        A[n-1][n-1] = 1.0
-        b[0] = 0.0
-        b[n-1] = 0.0
+        # 根据配置选择边界条件
+        if hasattr(self, 'improved_boundary_conditions') and self.improved_boundary_conditions:
+            # 改进的边界条件：端点曲率与相邻点相近
+            # 左端点：使用前向差分估计二阶导数
+            if n >= 3:
+                # 使用三点公式估计左端点的二阶导数
+                # f''(x0) ≈ [f(x2) - 2f(x1) + f(x0)] / h²
+                left_second_deriv = (y_values[2] - 2*y_values[1] + y_values[0]) / (h[0]**2)
+                A[0][0] = 1.0
+                b[0] = left_second_deriv
+            else:
+                # 点数不足，使用自然边界条件
+                A[0][0] = 1.0
+                b[0] = 0.0
+            
+            # 右端点：使用后向差分估计二阶导数
+            if n >= 3:
+                # 使用三点公式估计右端点的二阶导数
+                # f''(xn-1) ≈ [f(xn-1) - 2f(xn-2) + f(xn-3)] / h²
+                right_second_deriv = (y_values[n-1] - 2*y_values[n-2] + y_values[n-3]) / (h[n-2]**2)
+                A[n-1][n-1] = 1.0
+                b[n-1] = right_second_deriv
+            else:
+                # 点数不足，使用自然边界条件
+                A[n-1][n-1] = 1.0
+                b[n-1] = 0.0
+        else:
+            # 自然边界条件：S''(x0) = S''(xn-1) = 0
+            A[0][0] = 1.0
+            A[n-1][n-1] = 1.0
+            b[0] = 0.0
+            b[n-1] = 0.0
         
         # 内部节点的连续性条件
         for i in range(1, n-1):
@@ -1783,7 +1841,7 @@ class ProfileManager:
                 "bed_mesh: Unknown profile [%s]" % prof_name)
         probed_matrix = profile['points']
         mesh_params = profile['mesh_params']
-        z_mesh = ZMesh(mesh_params, prof_name, 'exact')  # Use default precision for loaded profiles
+        z_mesh = ZMesh(mesh_params, prof_name, 'exact', True)  # Use default precision and improved boundary conditions for loaded profiles
         try:
             z_mesh.build_mesh(probed_matrix, 0.05, 'spline')  # Use default threshold and algorithm for loaded profiles
         except BedMeshError as e:
