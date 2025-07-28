@@ -3,7 +3,7 @@
 # Copyright (C) 2018-2019 Eric Callahan <arksine.code@gmail.com>
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
-import logging, math, json, collections
+import logging, math, json, collections, os
 from . import probe
 
 PROFILE_VERSION = 1
@@ -97,6 +97,7 @@ class BedMesh:
         self.fade_start = config.getfloat('fade_start', 1.)
         self.fade_end = config.getfloat('fade_end', 0.)
         self.fade_dist = self.fade_end - self.fade_start
+        self.matrixfile = os.path.expanduser(config.get('matrixfile', '~/printer_data/config/bed_matrix.json'))
         if self.fade_dist <= 0.:
             self.fade_start = self.fade_end = self.FADE_DISABLE
         self.log_fade_complete = False
