@@ -3,7 +3,7 @@
 # Copyright (C) 2018-2019 Eric Callahan <arksine.code@gmail.com>
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
-import logging, math, json, collections, os
+import logging, math, json, collections, os, datetime
 from . import probe
 
 PROFILE_VERSION = 1
@@ -92,12 +92,14 @@ class BedMesh:
         self.last_position = [0., 0., 0., 0.]
         self.bmc = BedMeshCalibrate(config, self)
         self.z_mesh = None
+        self.loaded_mesh_data = None
         self.toolhead = None
         self.horizontal_move_z = config.getfloat('horizontal_move_z', 5.)
         self.fade_start = config.getfloat('fade_start', 1.)
         self.fade_end = config.getfloat('fade_end', 0.)
         self.fade_dist = self.fade_end - self.fade_start
         self.matrixfile = os.path.expanduser(config.get('matrixfile', '~/printer_data/config/bed_matrix.json'))
+        self.comparefile = os.path.expanduser(config.get('comparefile', '~/printer_data/config/bed_compare.json'))
         if self.fade_dist <= 0.:
             self.fade_start = self.fade_end = self.FADE_DISABLE
         self.log_fade_complete = False
@@ -109,6 +111,7 @@ class BedMesh:
         # setup persistent storage
         self.pmgr = ProfileManager(config, self)
         self.save_profile = self.pmgr.save_profile
+        self.verify_result = "ok"
         # register gcodes
         self.gcode.register_command(
             'BED_MESH_OUTPUT', self.cmd_BED_MESH_OUTPUT,
@@ -125,6 +128,15 @@ class BedMesh:
         self.gcode.register_command(
             'BED_MESH_CHECK', self.cmd_BED_MESH_CHECK,
             desc=self.cmd_BED_MESH_CHECK_help)
+        self.gcode.register_command(
+            'BED_MESH_SAVE', self.cmd_BED_MESH_SAVE,
+            desc=self.cmd_BED_MESH_SAVE_help)
+        self.gcode.register_command(
+            'BED_MESH_LOAD', self.cmd_BED_MESH_LOAD,
+            desc=self.cmd_BED_MESH_LOAD_help)
+        self.gcode.register_command(
+            'BED_MESH_DIFF', self.cmd_BED_MESH_DIFF,
+            desc=self.cmd_BED_MESH_DIFF_help)
         # Register transform
         gcode_move = self.printer.load_object(config, 'gcode_move')
         gcode_move.set_move_transform(self)
@@ -233,11 +245,13 @@ class BedMesh:
             "mesh_min": (0., 0.),           # mesh区域最小坐标
             "mesh_max": (0., 0.),           # mesh区域最大坐标
             "probed_matrix": [[]],          # 原始探测数据矩阵
+            "diff_matrix": [[]],            # 差异矩阵
             "mesh_matrix": [[]],            # 插值后的高密度网格矩阵
             "curvature_x_matrix": [[]],     # X方向曲率矩阵(新增)
             "curvature_y_matrix": [[]],     # Y方向曲率矩阵(新增) 
             "curvature_warnings": [],       # 高曲率警告列表(新增)
-            "profiles": self.pmgr.get_profiles()  # 保存的mesh配置文件列表
+            "profiles": self.pmgr.get_profiles(),  # 保存的mesh配置文件列表
+            "verify_result": "ok"  # 检查差异结果
         }
         if self.z_mesh is not None:
             params = self.z_mesh.get_mesh_params()
@@ -245,6 +259,7 @@ class BedMesh:
             mesh_max = (params['max_x'], params['max_y'])
             probed_matrix = self.z_mesh.get_probed_matrix()
             mesh_matrix = self.z_mesh.get_mesh_matrix()
+            diff_matrix = self.z_mesh.get_diff_matrix()
             # 从ZMesh对象获取曲率分析数据
             curvature_x_matrix = self.z_mesh.get_curvature_x_matrix()  # X方向曲率矩阵
             curvature_y_matrix = self.z_mesh.get_curvature_y_matrix()  # Y方向曲率矩阵
@@ -256,9 +271,11 @@ class BedMesh:
             self.status['mesh_max'] = mesh_max                                 # mesh最大坐标
             self.status['probed_matrix'] = probed_matrix                       # 原始探测数据
             self.status['mesh_matrix'] = mesh_matrix                           # 插值网格数据
+            self.status['diff_matrix'] = diff_matrix                           # 差异矩阵
             self.status['curvature_x_matrix'] = curvature_x_matrix             # X方向曲率数据(新增)
             self.status['curvature_y_matrix'] = curvature_y_matrix             # Y方向曲率数据(新增)
             self.status['curvature_warnings'] = curvature_warnings             # 高曲率警告(新增)
+            self.status['verify_result'] = self.verify_result               # 检查差异结果
     def get_mesh(self):
         return self.z_mesh
     cmd_BED_MESH_OUTPUT_help = "Retrieve interpolated grid of probed z-points"
@@ -299,28 +316,260 @@ class BedMesh:
             gcode_move.reset_last_position()
         else:
             gcmd.respond_info("No mesh loaded to offset")
-    cmd_BED_MESH_CHECK_help = "使用曲率分析检查床面不规则性"
+    cmd_BED_MESH_CHECK_help = "使用曲率分析或Z值比较检查床面不规则性"
     def cmd_BED_MESH_CHECK(self, gcmd):
         """手动检查床面曲率和不规则性的G-code命令
-        用法: BED_MESH_CHECK [THRESHOLD=0.05]
+        用法: BED_MESH_CHECK [ALGORITHM=curvature] [TEMP=60.0] [THRESHOLD=0.05]
+        参数:
+            ALGORITHM: 算法选择，'curvature'(曲率分析,默认) 或 'differ'(Z值比较)
+            TEMP: 温度参数，用于Z值比较时加载对应温度的mesh数据，默认60.0°C
+            THRESHOLD: 阈值参数，曲率阈值或Z值差异阈值，默认0.05mm
         """
         # 检查是否存在mesh数据
         if self.z_mesh is None:
             gcmd.respond_info("bed_mesh: 没有可用的mesh数据。请先运行 BED_MESH_CALIBRATE。")
             return
         
-        # 获取用户指定的曲率阈值，默认为0.05
+        # 获取参数
+        algorithm = gcmd.get('ALGORITHM', 'curvature').strip().lower()
+        if algorithm not in ['curvature', 'differ']:
+            gcmd.respond_info("bed_mesh: ALGORITHM 必须是 'curvature' 或 'differ'")
+            return
+        
+        temp = gcmd.get_float('TEMP', 60.0, minval=0.0, maxval=200.0)
         threshold = gcmd.get_float('THRESHOLD', 0.05, minval=0.001, maxval=1.0)
         
-        # 执行床面不规则性检查并输出结果
-        self.z_mesh.check_bed_irregularities(gcmd.respond_info, threshold)
+        gcmd.respond_info(f"=== Bed Mesh Check ===")
+        gcmd.respond_info(f"Algorithm: {algorithm}")
+        gcmd.respond_info(f"Temperature: {temp}°C")
+        gcmd.respond_info(f"Threshold: {threshold}mm")
+        
+        if algorithm == 'curvature':
+            # 执行曲率分析
+            gcmd.respond_info("=== 执行曲率分析 ===")
+            self.z_mesh.check_bed_irregularities(gcmd.respond_info, threshold)
+            
+        elif algorithm == 'differ':
+            # 执行Z值比较
+            gcmd.respond_info("=== 执行Z值比较 ===")
+            # self._check_z_comparison(gcmd, temp, threshold)
+    
+    def _check_z_comparison(self, gcmd, target_temp, threshold):
+        return
+    
+    cmd_BED_MESH_SAVE_help = "Save the current bed mesh to temperature data file"
+    def cmd_BED_MESH_SAVE(self, gcmd):
+        # 检查是否有可用的网格数据
+        if self.z_mesh is None:
+            gcmd.respond_info("No mesh data available to save. Please run BED_MESH_CALIBRATE first.")
+            return
+        
+        # 从外部获取床面温度参数，默认60°C
+        bed_temp = gcmd.get_int('TEMP', 60)
+        # 获取写入模式参数，默认true（追加到base_matrix）
+        is_base = gcmd.get_int('BASE', 1)
+        
+        gcmd.respond_info(f"Using bed temperature: {bed_temp}°C")
+        gcmd.respond_info(f"Write mode: {'base_matrix (unique/cover)' if is_base else 'measurement_matrix (append)'}")
+        
+        # 获取网格数据
+        mesh_params = self.z_mesh.get_mesh_params()
+        probed_matrix = self.z_mesh.get_probed_matrix()
+        mesh_matrix = self.z_mesh.get_mesh_matrix()
+        
+        # 创建session数据
+        session = {
+            'session_id': f"session_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}",
+            'timestamp': datetime.datetime.now().isoformat(),
+            'bed_temp': bed_temp,
+            'mesh_data':{
+                "mesh_params": mesh_params,
+                "probed_matrix": probed_matrix,
+                "mesh_matrix": mesh_matrix
+            }
+        }
 
+        # 确定文件路径
+        filename = self.matrixfile
+        # 读取现有数据或创建新文件
+        try:
+            with open(filename, 'r', encoding='utf-8') as f:
+                bedmesh_data = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            bedmesh_data = {
+                "metadata": {
+                    "created_at": datetime.datetime.now().isoformat(),
+                    "version": 1
+                },
+                "base_meshes": [],
+                "measurement_meshes": []
+            }
+        
+        # 更新metadata
+        bedmesh_data["metadata"]["last_updated"] = datetime.datetime.now().isoformat()
+        
+        # 根据BASE参数决定写入位置
+        if is_base:
+            # base_matrix: 同一温度只存储一次,如果温度相同，则覆盖
+            bAdd = False
+            for i, existing_session in enumerate(bedmesh_data['base_meshes']):
+                if existing_session.get('bed_temp', 0) == bed_temp:
+                    # replace the original matrix.
+                    bedmesh_data['base_meshes'][i] = session
+                    bAdd = True
+                    break
+
+            if not bAdd:
+                bedmesh_data['base_meshes'].append(session)
+        else:
+            # measurement_matrix: 追加模式，最新在索引0，最多10次
+            if 'measurement_meshes' not in bedmesh_data:
+                bedmesh_data['measurement_meshes'] = []
+            
+            # 插入到索引0位置（最新数据）
+            bedmesh_data['measurement_meshes'].insert(0, session)
+            
+            # 保持最多10次记录
+            if len(bedmesh_data['measurement_meshes']) > 10:
+                bedmesh_data['measurement_meshes'] = bedmesh_data['measurement_meshes'][:10]
+
+        # 保存文件
+        try:
+            with open(filename, 'w', encoding='utf-8') as f:
+                json.dump(bedmesh_data, f, ensure_ascii=False, indent=2)
+
+        except Exception as e:
+            gcmd.respond_info(f"Failed to save bedmesh matrix data: {str(e)}")
+            logging.error(f"bed_mesh: Error saving bedmesh matrix data: {str(e)}")
+
+    cmd_BED_MESH_LOAD_help = "Load bed mesh data from bedmesh matrix data file"
+    def cmd_BED_MESH_LOAD(self, gcmd):
+        bMeasure = gcmd.get_int('MEASURE', 0)
+        bed_temp = gcmd.get_int('TEMP', None)
+        index = gcmd.get_int('INDEX', -1)
+        bApply = gcmd.get_int('APPLY', 0) # apply as current bedmesh else just load as loaded_mesh_data.
+        
+        # 确定文件路径
+        filename = self.matrixfile
+        
+        # 检查文件是否存在
+        if not os.path.exists(filename):
+            gcmd.respond_info(f"Bedmesh matrix data file not found: {filename}")
+            return
+
+        try:
+            # 读取文件
+            with open(filename, 'r', encoding='utf-8') as f:
+                bedmesh_data = json.load(f)
+
+            meshes = bedmesh_data.get('base_meshes', [])
+            if bMeasure:
+                meshes = bedmesh_data.get('measurement_meshes', [])
+
+            if not meshes:
+                gcmd.respond_info("No bedmesh data found")
+                return
+            
+            mesh = None
+            # first, find the mesh with the same temperature
+            if bed_temp is not None:
+                for session in meshes:
+                    if session.get('bed_temp', 0) == bed_temp:
+                        mesh = session
+                        break
+            elif index >= 0 and index < len(meshes):
+                    mesh = meshes[index]
+
+            if mesh is None:
+                gcmd.respond_info(f"No bedmesh found with temperature {bed_temp}°C or index {index}")
+                return
+
+            timestamp = mesh['timestamp']
+            gcmd.respond_info(f"Loading bedmesh with temperature: {mesh['bed_temp']}°C, index: {index}, timestamp: {timestamp}")
+
+            if bApply:
+                self.z_mesh = self._apply_mesh(mesh['mesh_data'])
+                self.z_mesh.print_mesh(gcmd.respond_info, move_z=None)
+                self.update_status()
+            else:
+                self.loaded_mesh_data = mesh['mesh_data']
+
+        except Exception as e:
+            gcmd.respond_info(f"Failed to load bedmesh data: {str(e)}")
+            logging.error(f"bed_mesh: Error loading bedmesh data: {str(e)}")
+
+    def _apply_mesh(self, mesh_data):
+        newMesh = ZMesh(mesh_data['mesh_params'], "loaded")
+        newMesh.probed_matrix = mesh_data['probed_matrix']
+        newMesh.mesh_matrix = mesh_data['mesh_matrix']
+        return newMesh
+
+    cmd_BED_MESH_DIFF_help = "Diff the current bedmesh with the loaded bedmesh"
+    def cmd_BED_MESH_DIFF(self, gcmd):
+        if self.z_mesh is None:
+            gcmd.respond_info("No bedmesh data available to diff. Please run BED_MESH_CALIBRATE first.")
+            return
+        if self.loaded_mesh_data is None:
+            gcmd.respond_info("No loaded bedmesh data available to diff. Please run BED_MESH_LOAD first.")
+            return
+
+        # get command parameters.
+        diff_warning = gcmd.get_float('DIFF_WARNING', 0.05)
+        diff_error = gcmd.get_float('DIFF_ERROR', 0.1)
+        diff_critical = gcmd.get_float('DIFF_CRITICAL', 0.2)
+
+        # load the base mesh.
+        baseMesh = self._apply_mesh(self.loaded_mesh_data)
+        # print the loaded mesh for debug.
+        baseMesh.print_mesh(gcmd.respond_info, move_z=None)
+        self.z_mesh.print_mesh(gcmd.respond_info, move_z=None)
+        
+        # calculate the xy coordinates of the base mesh.
+        xmin = self.z_mesh.mesh_params['min_x']
+        xmax = self.z_mesh.mesh_params['max_x']
+        ymin = self.z_mesh.mesh_params['min_y']
+        ymax = self.z_mesh.mesh_params['max_y']
+        x_count = self.z_mesh.mesh_params['x_count']
+        y_count = self.z_mesh.mesh_params['y_count']
+        xStep = (xmax - xmin) / (x_count - 1)
+        yStep = (ymax - ymin) / (y_count - 1)
+
+        max_diff = 0
+        self.z_mesh.diff_matrix = self.z_mesh.get_probed_matrix()
+        for m in range(y_count):
+            y = ymin + m * yStep
+            for n in range(x_count):
+                x = xmin + n * xStep
+                z_base = baseMesh.calc_z(x, y)
+                z_current = self.z_mesh.calc_z(x, y)
+                z_diff = z_current - z_base
+                self.z_mesh.diff_matrix[m][n] = z_diff
+                gcmd.respond_info(f"x: {x}, y: {y}, z_base: {z_base}, z_current: {z_current}, z_diff: {z_diff}")
+
+                if abs(z_diff) > max_diff:
+                    max_diff = abs(z_diff)
+
+        if max_diff > diff_critical:
+            self.verify_result = "critical"
+            gcmd.respond_info(f"Bedmesh diff is critical: {max_diff}")
+        elif max_diff > diff_error:
+            self.verify_result = "error"
+            gcmd.respond_info(f"Bedmesh diff is error: {max_diff}")
+        elif max_diff > diff_warning:
+            self.verify_result = "warning"
+            gcmd.respond_info(f"Bedmesh diff is warning: {max_diff}")
+        else:
+            self.verify_result = "ok"
+            gcmd.respond_info(f"Bedmesh diff is ok: {max_diff}")
+        
+        self.update_status()
+
+        return
 
 class ZrefMode:
     DISABLED = 0  # Zero reference disabled
     IN_MESH = 1   # Zero reference position within mesh
     PROBE = 2     # Zero refrennce position outside of mesh, probe needed
-
 
 class BedMeshCalibrate:
     ALGOS = ['lagrange', 'bicubic']
@@ -1015,7 +1264,7 @@ class MoveSplitter:
 class ZMesh:
     def __init__(self, params, name, curvature_precision='exact', improved_boundary_conditions=True):
         self.profile_name = name or "adaptive-%X" % (id(self),)
-        self.probed_matrix = self.mesh_matrix = None
+        self.probed_matrix = self.mesh_matrix = self.diff_matrix = None
         # 曲率分析数据 - 用于检测床面不规则性
         self.curvature_x_matrix = self.curvature_y_matrix = None  # X和Y方向的曲率矩阵（二阶导数）
         self.curvature_warnings = []  # 高曲率区域的警告列表，包含坐标和曲率值
@@ -1085,6 +1334,10 @@ class ZMesh:
     def get_curvature_warnings(self):
         """获取高曲率警告列表，包含位置坐标和曲率值"""
         return self.curvature_warnings
+    
+    def get_diff_matrix(self):
+        return self.diff_matrix
+    
     def get_mesh_params(self):
         return self.mesh_params
     def get_profile_name(self):
