@@ -83,6 +83,7 @@ class EEPROMCommandHelper:
         ret =  {"file_position": int.from_bytes(file_position, 'little'), "base_position_e": struct.unpack('f', base_position_e)[0]}
         gcmd.respond_info("EEPROM_PRINTER_INFO ret:%s" % str(ret))
 
+    cmd_EEPROM_DEBUG_READ_help = "Read data bytes from eeprom"
     def cmd_EEPROM_DEBUG_READ(self, gcmd):
         addr = gcmd.get("ADDR", minval=0, maxval=2047, parser=lambda x: int(x, 0))
         size = gcmd.get("SIZE", minval=0, maxval=56, parser=lambda x: int(x, 0))
@@ -96,16 +97,14 @@ class EEPROMCommandHelper:
 
         gcmd.respond_info(reg_vals)
 
-    cmd_EEPROM_DEBUG_READ_help = "Read data bytes from eeprom"
-
+    cmd_EEPROM_DEBUG_WRITE_BYTE_help = "Write byte data to eeprom"
     def cmd_EEPROM_DEBUG_WRITE_BYTE(self, gcmd):
         addr = gcmd.get("ADDR", minval=0, maxval=2047, parser=lambda x: int(x, 0))
         val = gcmd.get("VAL", minval=0, maxval=255, parser=lambda x: int(x, 0))
         gcmd.respond_info("EEPROM_DEBUG_WRITE_BYTE : ADDR[0x%x] = 0x%x" % (addr, val))
         self.chip.write_reg(addr, val)
 
-    cmd_EEPROM_DEBUG_WRITE_BYTE_help = "Write byte data to eeprom"
-
+    cmd_EEPROM_DEBUG_WRITE_INT_help = "Write int (4 byte) data to eeprom"
     def cmd_EEPROM_DEBUG_WRITE_INT(self, gcmd):
         pos = self.chip.read_reg(0, 1)
         gcmd.respond_info("EEPROM_POS int_pos:%s" % int.from_bytes(pos, 'little'))
@@ -121,8 +120,7 @@ class EEPROMCommandHelper:
                 % (addr, vals[0], vals[1], vals[2], vals[3]))
         self.chip.write_reg(addr, vals)
 
-    cmd_EEPROM_DEBUG_WRITE_INT_help = "Write int (4 byte) data to eeprom"
-
+    cmd_EEPROM_DEBUG_WRITE_FLOAT_help = "Write float (4 byte) data to eeprom"
     def cmd_EEPROM_DEBUG_WRITE_FLOAT(self, gcmd):
         addr = gcmd.get("ADDR", minval=0, maxval=2047, parser=lambda x: int(x, 0))
         val = gcmd.get_float("VAL", 0.)
@@ -138,9 +136,8 @@ class EEPROMCommandHelper:
         gcmd.respond_info("EEPROM_DEBUG_WRITE_FLOAT : ADDR[0x%x] = 0x%02x 0x%02x 0x%02x 0x%02x"
                         % (addr, vals[0], vals[1], vals[2], vals[3]))
         self.chip.write_reg(addr, vals)
-
-    cmd_EEPROM_DEBUG_WRITE_FLOAT_help = "Write float (4 byte) data to eeprom"
     
+    cmd_EEPROM_READ_help = "Read data bytes from eeprom"
     def cmd_EEPROM_READ(self, gcmd):
         addr = gcmd.get("ADDR", minval=0, maxval=2047, parser=lambda x: int(x, 0))
         size = gcmd.get("SIZE", minval=0, maxval=56, parser=lambda x: int(x, 0))
@@ -152,15 +149,15 @@ class EEPROMCommandHelper:
                 reg_vals += '\n'
             reg_vals += '0x%x ' % vals[i]
         # gcmd.respond_info(reg_vals)
-    cmd_EEPROM_READ_help = "Read data bytes from eeprom"
-
+    
+    cmd_EEPROM_WRITE_BYTE_help = "Write byte data to eeprom"
     def cmd_EEPROM_WRITE_BYTE(self, gcmd):
         addr = gcmd.get("ADDR", minval=0, maxval=2047, parser=lambda x: int(x, 0))
         val = gcmd.get("VAL", minval=0, maxval=255, parser=lambda x: int(x, 0))
         # gcmd.respond_info("EEPROM_WRITE_BYTE : ADDR[0x%x] = 0x%x" % (addr, val))
         self.chip.write_reg(addr, val)
-    cmd_EEPROM_WRITE_BYTE_help = "Write byte data to eeprom"
-
+    
+    cmd_EEPROM_WRITE_INT_help = "Write int (4 byte) data to eeprom"
     def cmd_EEPROM_WRITE_INT(self, gcmd):
         # pos = self.chip.read_reg(0, 1)
         # gcmd.respond_info("EEPROM_POS int_pos:%s" % int.from_bytes(pos, 'little'))
@@ -175,8 +172,8 @@ class EEPROMCommandHelper:
         # gcmd.respond_info("EEPROM_WRITE_INT : ADDR[0x%x] = 0x%02x 0x%02x 0x%02x 0x%02x"
                 # % (addr, vals[0], vals[1], vals[2], vals[3]))
         self.chip.write_reg(addr, vals)
-    cmd_EEPROM_WRITE_INT_help = "Write int (4 byte) data to eeprom"
 
+    cmd_EEPROM_WRITE_FLOAT_help = "Write float (4 byte) data to eeprom"
     def cmd_EEPROM_WRITE_FLOAT(self, gcmd):
         addr = gcmd.get("ADDR", minval=0, maxval=2047, parser=lambda x: int(x, 0))
         val = gcmd.get_float("VAL", 0.)
@@ -192,7 +189,6 @@ class EEPROMCommandHelper:
         # gcmd.respond_info("EEPROM_WRITE_FLOAT : ADDR[0x%x] = 0x%02x 0x%02x 0x%02x 0x%02x"
                         # % (addr, vals[0], vals[1], vals[2], vals[3]))
         self.chip.write_reg(addr, vals)
-    cmd_EEPROM_WRITE_FLOAT_help = "Write float (4 byte) data to eeprom"  
 
 class BL24C16F:
     def __init__(self, config):
