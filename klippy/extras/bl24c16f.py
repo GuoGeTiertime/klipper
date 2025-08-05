@@ -306,7 +306,7 @@ class BL24C16F:
             # 写入第二页
             self._write_to_chip(second_page_addr, second_page_data)
 
-    def _write_to_chip(chip_addr, write_data):
+    def _write_to_chip(self, chip_addr, write_data):
         index = chip_addr // 256
         offset = chip_addr % 256
         data_to_write = [offset] + write_data
