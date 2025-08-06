@@ -200,15 +200,17 @@ class EEPROMCommandHelper:
             self.chip.status["byte_data"] = reg_vals
         elif data_type_upper == "INT":
             for i in range(0, size, 4):
-                int_val = vals[i] | (vals[i+1] << 8) | (vals[i+2] << 16) | (vals[i+3] << 24)
+                int_val =  int.from_bytes(
+                    bytes([vals[i], vals[i+1], vals[i+2], vals[i+3]]),
+                    byteorder='little',  # 或 'big'（根据硬件端序）
+                    signed=True          # 关键参数：启用有符号解析
+                )
                 reg_vals.append(int_val)
             self.chip.status["int_data"] = reg_vals
         elif data_type_upper == "FLOAT":
             for i in range(0, size, 4):
-                # 将4字节转换为浮点数
-                float_bytes = bytes([vals[i], vals[i+1], vals[i+2], vals[i+3]])
-                float_val = struct.unpack('f', float_bytes)[0]
-                reg_vals.append(float_val)
+                float_val = struct.unpack('<f', bytes(vals[i:i+4]))[0]  # 直接解包字节
+                reg_vals.append(f"{float_val:.6f}")
             self.chip.status["float_data"] = reg_vals
         elif data_type_upper == "STRING":
             self.cmd_EEPROM_READ_STRING(gcmd)
@@ -226,7 +228,7 @@ class EEPROMCommandHelper:
     def cmd_EEPROM_WRITE_INT(self, gcmd):
         # gcmd.respond_info("EEPROM_POS int_pos:%s" % int.from_bytes(pos, 'little'))
         addr = gcmd.get("ADDR", minval=0, maxval=2047, parser=lambda x: int(x, 0))
-        val = gcmd.get("VAL", minval=0, maxval=4294967296, parser=lambda x: int(x, 0))
+        val = gcmd.get("VAL", 0, parser=lambda x: int(x, 0))
         # gcmd.respond_info("EEPROM_WRITE_INT : val = %d" % val)
         vals = [val & 0xFF, (val >> 8) & 0xFF, (val >> 16) & 0xFF, (val >> 24) & 0xFF]
         # gcmd.respond_info("EEPROM_WRITE_INT : ADDR[0x%x] = 0x%02x 0x%02x 0x%02x 0x%02x"
