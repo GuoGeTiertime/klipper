@@ -200,12 +200,22 @@ class EEPROMCommandHelper:
             self.chip.status["byte_data"] = reg_vals
         elif data_type_upper == "INT":
             for i in range(0, size, 4):
-                int_val =  int.from_bytes(
-                    bytes([vals[i], vals[i+1], vals[i+2], vals[i+3]]),
-                    byteorder='little',  # 或 'big'（根据硬件端序）
-                    signed=True          # 关键参数：启用有符号解析
-                )
-                reg_vals.append(int_val)
+                # 读取3字节数据 + 1字节CRC
+                data_bytes = vals[i:i+3]
+                received_crc = vals[i+3]
+                # 校验CRC
+                calculated_crc = self.crc8(data_bytes)
+                if calculated_crc != received_crc:
+                    gcmd.respond_info("CRC Error at 0x%04X" % (addr+i))
+                    reg_vals.append(10000000000)
+                    self.chip.status["int_data"] = reg_vals
+                else:
+                    # 转换为有符号整数（24位）
+                    int_val = data_bytes[0] | (data_bytes[1] << 8) | (data_bytes[2] << 16)
+                    if int_val & 0x800000:  # 检查符号位
+                        int_val -= 0x1000000
+                    reg_vals.append(int_val)
+            # gcmd.respond_info("EEPROM_READ_INT : ADDR[0x%04X] = 0x%02X 0x%02X 0x%02X (CRC=0x%02X)" % (addr, vals[0], vals[1], vals[2], vals[3]))
             self.chip.status["int_data"] = reg_vals
         elif data_type_upper == "FLOAT":
             for i in range(0, size, 4):
@@ -228,11 +238,20 @@ class EEPROMCommandHelper:
     def cmd_EEPROM_WRITE_INT(self, gcmd):
         # gcmd.respond_info("EEPROM_POS int_pos:%s" % int.from_bytes(pos, 'little'))
         addr = gcmd.get("ADDR", minval=0, maxval=2047, parser=lambda x: int(x, 0))
-        val = gcmd.get("VAL", 0, parser=lambda x: int(x, 0))
-        # gcmd.respond_info("EEPROM_WRITE_INT : val = %d" % val)
-        vals = [val & 0xFF, (val >> 8) & 0xFF, (val >> 16) & 0xFF, (val >> 24) & 0xFF]
-        # gcmd.respond_info("EEPROM_WRITE_INT : ADDR[0x%x] = 0x%02x 0x%02x 0x%02x 0x%02x"
-                # % (addr, vals[0], vals[1], vals[2], vals[3]))
+        val = gcmd.get("VAL", minval=-8388608, maxval=8388607, parser=lambda x: int(x, 0))
+        # 将32位整数转为24位有符号数（丢弃高8位）
+        val_24bit = val & 0xFFFFFF
+        if val < 0:
+            val_24bit -= 0x1000000  # 补码转换（确保最高位为1）
+        # 拆分为3字节数据
+        data_bytes = [
+            val_24bit & 0xFF,          # 字节0: LSB
+            (val_24bit >> 8) & 0xFF,    # 字节1
+            (val_24bit >> 16) & 0xFF    # 字节2（含符号位）
+        ]
+        crc = self.crc8(data_bytes)     # 计算前3字节的CRC
+        vals = data_bytes + [crc]  # 组合成4字节
+        # gcmd.respond_info("EEPROM_WRITE_INT : ADDR[0x%04X] = ""Data: 0x%02X 0x%02X 0x%02X | ""CRC: 0x%02X" % (addr, vals[0], vals[1], vals[2], vals[3]))
         self.chip.write_reg(addr, vals)
 
     cmd_EEPROM_WRITE_FLOAT_help = "Write float (4 byte) data to eeprom"
@@ -247,6 +266,17 @@ class EEPROMCommandHelper:
         # gcmd.respond_info("EEPROM_WRITE_FLOAT : ADDR[0x%x] = 0x%02x 0x%02x 0x%02x 0x%02x"
                         # % (addr, vals[0], vals[1], vals[2], vals[3]))
         self.chip.write_reg(addr, vals)
+    
+    def crc8(self, data, poly=0x31, init=0x55, xor_out=0x00):
+        crc = init
+        for byte in data:
+            crc ^= byte
+            for _ in range(8):
+                if crc & 0x80:
+                    crc = ((crc << 1) & 0xFF) ^ poly
+                else:
+                    crc = (crc << 1) & 0xFF
+        return crc ^ xor_out  
 
 class BL24C16F:
     def __init__(self, config):
@@ -332,7 +362,7 @@ class BL24C16F:
     def eepromReadBody(self, pos):
         file_position = self.read_reg(pos*8, 4)
         base_position_e = self.read_reg(pos*8+4, 4)
-        return {"file_position": int.from_bytes(file_position, 'little'), "base_position_e": struct.unpack('f', base_position_e)[0]}
+        return {"file_position": int.from_bytes(file_position, 'little'), "base_position_e": struct.unpack('f', base_position_e)[0]}  
 
 def load_config(config):
     return BL24C16F(config)
