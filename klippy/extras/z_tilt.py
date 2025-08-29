@@ -161,8 +161,12 @@ class ZTilt:
                     - params['z_adjust'])
         def errorfunc(params):
             total_error = 0.
-            for pos in positions:
+            # for pos in positions:
+            #     total_error += adjusted_height(pos, params)**2
+            # modify by guoge 20250829, only use the first 3 points
+            for pos in positions[:3]:
                 total_error += adjusted_height(pos, params)**2
+            # end modify
             return total_error
         new_params = mathutil.coordinate_descent(
             params.keys(), params, errorfunc)
