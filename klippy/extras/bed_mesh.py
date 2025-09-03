@@ -93,6 +93,10 @@ class BedMesh:
         self.bmc = BedMeshCalibrate(config, self)
         self.z_mesh = None
         self.loaded_mesh_data = None
+        # 新增：基准mesh相关变量
+        self.base_mesh_temp = None
+        self.base_mesh_timestamp = None
+        self.base_mesh_session_id = None
         self.toolhead = None
         self.horizontal_move_z = config.getfloat('horizontal_move_z', 5.)
         self.fade_start = config.getfloat('fade_start', 1.)
@@ -251,7 +255,9 @@ class BedMesh:
             "curvature_y_matrix": [[]],     # Y方向曲率矩阵(新增) 
             "curvature_warnings": [],       # 高曲率警告列表(新增)
             "profiles": self.pmgr.get_profiles(),  # 保存的mesh配置文件列表
-            "verify_result": "ok"  # 检查差异结果
+            "verify_result": "ok",  # 检查差异结果
+            # 新增：基准mesh数据字段
+            "base_mesh": None               # 基准mesh数据，包含完整的mesh信息
         }
         if self.z_mesh is not None:
             params = self.z_mesh.get_mesh_params()
@@ -276,8 +282,48 @@ class BedMesh:
             self.status['curvature_y_matrix'] = curvature_y_matrix             # Y方向曲率数据(新增)
             self.status['curvature_warnings'] = curvature_warnings             # 高曲率警告(新增)
             self.status['verify_result'] = self.verify_result               # 检查差异结果
+        
+        # 新增：更新基准mesh数据到状态
+        if self.loaded_mesh_data is not None:
+            try:
+                # 创建基准mesh对象以获取完整数据
+                base_mesh = self._apply_mesh(self.loaded_mesh_data)
+                
+                # 计算基准mesh的曲率数据
+                base_mesh.build_mesh(self.loaded_mesh_data['probed_matrix'], 
+                                    curvature_threshold=0.05, 
+                                    curvature_algorithm='spline')
+                
+                # 构建基准mesh状态数据
+                self.status['base_mesh'] = {
+                    "profile_name": "base_mesh",
+                    "mesh_min": (base_mesh.mesh_params['min_x'], base_mesh.mesh_params['min_y']),
+                    "mesh_max": (base_mesh.mesh_params['max_x'], base_mesh.mesh_params['max_y']),
+                    "probed_matrix": base_mesh.get_probed_matrix(),
+                    "mesh_matrix": base_mesh.get_mesh_matrix(),
+                    "curvature_x_matrix": base_mesh.get_curvature_x_matrix(),
+                    "curvature_y_matrix": base_mesh.get_curvature_y_matrix(),
+                    "curvature_warnings": base_mesh.get_curvature_warnings(),
+                    "bed_temp": self.base_mesh_temp,
+                    "timestamp": self.base_mesh_timestamp,
+                    "session_id": self.base_mesh_session_id
+                }
+            except Exception as e:
+                logging.error(f"bed_mesh: Error creating base_mesh status: {str(e)}")
+                self.status['base_mesh'] = None
+        else:
+            self.status['base_mesh'] = None
     def get_mesh(self):
         return self.z_mesh
+    
+    def clear_base_mesh(self):
+        """清理基准mesh数据"""
+        self.loaded_mesh_data = None
+        self.base_mesh_temp = None
+        self.base_mesh_timestamp = None
+        self.base_mesh_session_id = None
+        self.update_status()
+        
     cmd_BED_MESH_OUTPUT_help = "Retrieve interpolated grid of probed z-points"
     def cmd_BED_MESH_OUTPUT(self, gcmd):
         if gcmd.get_int('PGP', 0):
@@ -301,7 +347,14 @@ class BedMesh:
             gcmd.respond_info("Bed has not been probed")
     cmd_BED_MESH_CLEAR_help = "Clear the Mesh so no z-adjustment is made"
     def cmd_BED_MESH_CLEAR(self, gcmd):
-        self.set_mesh(None)
+        # 检查是否要清理基准mesh数据
+        clear_base = gcmd.get_int('BASE', 0)
+        if clear_base:
+            self.clear_base_mesh()
+            gcmd.respond_info("Base mesh data cleared")
+        else:
+            self.set_mesh(None)
+            gcmd.respond_info("Current mesh cleared")
     cmd_BED_MESH_OFFSET_help = "Add X/Y offsets to the mesh lookup"
     def cmd_BED_MESH_OFFSET(self, gcmd):
         if self.z_mesh is not None:
@@ -493,6 +546,12 @@ class BedMesh:
                 self.update_status()
             else:
                 self.loaded_mesh_data = mesh['mesh_data']
+                # 新增：保存基准mesh的元数据信息
+                self.base_mesh_temp = mesh.get('bed_temp')
+                self.base_mesh_timestamp = mesh.get('timestamp')
+                self.base_mesh_session_id = mesh.get('session_id')
+                # 更新状态以包含基准mesh数据
+                self.update_status()
 
         except Exception as e:
             gcmd.respond_info(f"Failed to load bedmesh data: {str(e)}")
