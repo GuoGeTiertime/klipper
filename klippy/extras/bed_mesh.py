@@ -115,7 +115,8 @@ class BedMesh:
         # setup persistent storage
         self.pmgr = ProfileManager(config, self)
         self.save_profile = self.pmgr.save_profile
-        self.verify_result = "ok"
+        self.verify_result = "none"
+        self.max_diff = 0.0
         # register gcodes
         self.gcode.register_command(
             'BED_MESH_OUTPUT', self.cmd_BED_MESH_OUTPUT,
@@ -255,10 +256,12 @@ class BedMesh:
             "curvature_y_matrix": [[]],     # Y方向曲率矩阵(新增) 
             "curvature_warnings": [],       # 高曲率警告列表(新增)
             "profiles": self.pmgr.get_profiles(),  # 保存的mesh配置文件列表
-            "verify_result": "ok",  # 检查差异结果
+            "verify_result": self.verify_result,               # 检查差异结果  # 检查差异结果
+            "max_diff": 0.0,         # 最大差异值
             # 新增：基准mesh数据字段
             "base_mesh": None               # 基准mesh数据，包含完整的mesh信息
         }
+        
         if self.z_mesh is not None:
             params = self.z_mesh.get_mesh_params()
             mesh_min = (params['min_x'], params['min_y'])
@@ -281,8 +284,8 @@ class BedMesh:
             self.status['curvature_x_matrix'] = curvature_x_matrix             # X方向曲率数据(新增)
             self.status['curvature_y_matrix'] = curvature_y_matrix             # Y方向曲率数据(新增)
             self.status['curvature_warnings'] = curvature_warnings             # 高曲率警告(新增)
-            self.status['verify_result'] = self.verify_result               # 检查差异结果
-        
+            
+            self.status['max_diff'] = self.max_diff                         # 最大差异值
         # 新增：更新基准mesh数据到状态
         if self.loaded_mesh_data is not None:
             try:
@@ -561,13 +564,23 @@ class BedMesh:
 
     cmd_BED_MESH_DIFF_help = "Diff the current bedmesh with the loaded bedmesh"
     def cmd_BED_MESH_DIFF(self, gcmd):
-        if self.z_mesh is None:
-            gcmd.respond_info("No bedmesh data available to diff. Please run BED_MESH_CALIBRATE first.")
-            return
         if self.loaded_mesh_data is None:
             gcmd.respond_info("No loaded bedmesh data available to diff. Please run BED_MESH_LOAD first.")
+            self.verify_result = "no_loaded_base_mesh_data"
+            gcmd.respond_info("verify_result: " + self.verify_result)
+            self.max_diff = 0.0
+            # 清理当前mesh的差异矩阵数据
+            if self.z_mesh is not None:
+                self.z_mesh.diff_matrix = None
+            self.update_status()
             return
-
+        if self.z_mesh is None:
+            gcmd.respond_info("No bedmesh data available to diff. Please run BED_MESH_CALIBRATE first.")
+            self.verify_result = "no_probed_mesh_data"
+            gcmd.respond_info("verify_result: " + self.verify_result)
+            self.max_diff = 0.0
+            self.update_status()
+            return
         # get command parameters.
         diff_warning = gcmd.get_float('DIFF_WARNING', 0.1)
         diff_error = gcmd.get_float('DIFF_ERROR', 0.2)
@@ -616,7 +629,7 @@ class BedMesh:
         else:
             self.verify_result = "ok"
             gcmd.respond_info(f"Bedmesh diff is ok: {max_diff}")
-        
+        self.max_diff = max_diff
         self.update_status()
 
         return
