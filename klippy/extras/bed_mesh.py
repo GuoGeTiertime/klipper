@@ -300,10 +300,6 @@ class BedMesh:
                     "mesh_min": (base_mesh.mesh_params['min_x'], base_mesh.mesh_params['min_y']),
                     "mesh_max": (base_mesh.mesh_params['max_x'], base_mesh.mesh_params['max_y']),
                     "probed_matrix": base_mesh.get_probed_matrix(),
-                    "mesh_matrix": base_mesh.get_mesh_matrix(),
-                    "curvature_x_matrix": base_mesh.get_curvature_x_matrix(),
-                    "curvature_y_matrix": base_mesh.get_curvature_y_matrix(),
-                    "curvature_warnings": base_mesh.get_curvature_warnings(),
                     "bed_temp": self.base_mesh_temp,
                     "timestamp": self.base_mesh_timestamp,
                     "session_id": self.base_mesh_session_id
@@ -573,9 +569,9 @@ class BedMesh:
             return
 
         # get command parameters.
-        diff_warning = gcmd.get_float('DIFF_WARNING', 0.05)
-        diff_error = gcmd.get_float('DIFF_ERROR', 0.1)
-        diff_critical = gcmd.get_float('DIFF_CRITICAL', 0.2)
+        diff_warning = gcmd.get_float('DIFF_WARNING', 0.1)
+        diff_error = gcmd.get_float('DIFF_ERROR', 0.2)
+        diff_critical = gcmd.get_float('DIFF_CRITICAL', 0.5)
 
         # load the base mesh.
         baseMesh = self._apply_mesh(self.loaded_mesh_data)
