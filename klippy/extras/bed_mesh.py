@@ -371,28 +371,28 @@ class BedMesh:
             gcode_move.reset_last_position()
         else:
             gcmd.respond_info("No mesh loaded to offset")
-    cmd_BED_MESH_CHECK_help = "使用曲率分析或Z值比较检查床面不规则性"
+    cmd_BED_MESH_CHECK_help = "Check bed surface irregularities using curvature analysis or Z-value comparison"
     def cmd_BED_MESH_CHECK(self, gcmd):
-        """手动检查床面曲率和不规则性的G-code命令
-        用法: BED_MESH_CHECK [ALGORITHM=curvature] [TEMP=60.0] [THRESHOLD=0.05]
-        参数:
-            ALGORITHM: 算法选择，'curvature'(曲率分析,默认) 或 'differ'(Z值比较)
-            TEMP: 温度参数，用于Z值比较时加载对应温度的mesh数据，默认60.0°C
-            THRESHOLD: 阈值参数，曲率阈值或Z值差异阈值，默认0.05mm
-            CURVATURE: 曲率更新参数，0:不更新, 1:更新, 默认0
+        """Manual G-code command to check bed surface curvature and irregularities
+        Usage: BED_MESH_CHECK [ALGORITHM=curvature] [TEMP=60.0] [THRESHOLD=0.05] [CURVATURE=0]
+        Parameters:
+            ALGORITHM: Algorithm selection, 'curvature'(curvature analysis, default) or 'differ'(Z-value comparison)
+            TEMP: Temperature parameter for loading mesh data at corresponding temperature during Z-value comparison, default 60.0°C
+            THRESHOLD: Threshold parameter, curvature threshold or Z-value difference threshold, default 0.05mm
+            CURVATURE: Curvature update parameter, 0:no update, 1:update, default 0
         """
-        # 设置需要更新曲率数据
+        # Set whether to update curvature data
         self.update_curvature_data = gcmd.get_int('CURVATURE', 0)
         
-        # 检查是否存在mesh数据
+        # Check if mesh data exists
         if self.z_mesh is None:
-            gcmd.respond_info("bed_mesh: 没有可用的mesh数据。请先运行 BED_MESH_CALIBRATE。")
+            gcmd.respond_info("bed_mesh: No mesh data available. Please run BED_MESH_CALIBRATE first.")
             return
         
-        # 获取参数
+        # Get parameters
         algorithm = gcmd.get('ALGORITHM', 'curvature').strip().lower()
         if algorithm not in ['curvature', 'differ']:
-            gcmd.respond_info("bed_mesh: ALGORITHM 必须是 'curvature' 或 'differ'")
+            gcmd.respond_info("bed_mesh: ALGORITHM must be 'curvature' or 'differ'")
             return
         
         temp = gcmd.get_float('TEMP', 60.0, minval=0.0, maxval=200.0)
@@ -404,13 +404,13 @@ class BedMesh:
         gcmd.respond_info(f"Threshold: {threshold}mm")
         
         if algorithm == 'curvature':
-            # 执行曲率分析
-            gcmd.respond_info("=== 执行曲率分析 ===")
+            # Execute curvature analysis
+            gcmd.respond_info("=== Executing Curvature Analysis ===")
             self.z_mesh.check_bed_irregularities(gcmd.respond_info, threshold)
             
         elif algorithm == 'differ':
-            # 执行Z值比较
-            gcmd.respond_info("=== 执行Z值比较 ===")
+            # Execute Z-value comparison
+            gcmd.respond_info("=== Executing Z-value Comparison ===")
             # self._check_z_comparison(gcmd, temp, threshold)
     
     def _check_z_comparison(self, gcmd, target_temp, threshold):
