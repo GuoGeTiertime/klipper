@@ -97,6 +97,8 @@ class BedMesh:
         self.base_mesh_temp = None
         self.base_mesh_timestamp = None
         self.base_mesh_session_id = None
+        #新增：是否更新曲率相关数据
+        self.update_curvature_data = False
         self.toolhead = None
         self.horizontal_move_z = config.getfloat('horizontal_move_z', 5.)
         self.fade_start = config.getfloat('fade_start', 1.)
@@ -269,10 +271,17 @@ class BedMesh:
             probed_matrix = self.z_mesh.get_probed_matrix()
             mesh_matrix = self.z_mesh.get_mesh_matrix()
             diff_matrix = self.z_mesh.get_diff_matrix()
-            # 从ZMesh对象获取曲率分析数据
-            curvature_x_matrix = self.z_mesh.get_curvature_x_matrix()  # X方向曲率矩阵
-            curvature_y_matrix = self.z_mesh.get_curvature_y_matrix()  # Y方向曲率矩阵
-            curvature_warnings = self.z_mesh.get_curvature_warnings()  # 高曲率警告列表
+            # 只在需要时更新曲率分析数据
+            if self.update_curvature_data:
+                curvature_x_matrix = self.z_mesh.get_curvature_x_matrix()  # X方向曲率矩阵
+                curvature_y_matrix = self.z_mesh.get_curvature_y_matrix()  # Y方向曲率矩阵
+                curvature_warnings = self.z_mesh.get_curvature_warnings()  # 高曲率警告列表
+            
+            else:
+                # 使用默认值或保持上次的值
+                curvature_x_matrix = self.status.get('curvature_x_matrix', [[]])
+                curvature_y_matrix = self.status.get('curvature_y_matrix', [[]])
+                curvature_warnings = self.status.get('curvature_warnings', [])
             
             # 更新状态字典中的所有mesh相关数据
             self.status['profile_name'] = self.z_mesh.get_profile_name()       # 配置文件名
@@ -284,7 +293,6 @@ class BedMesh:
             self.status['curvature_x_matrix'] = curvature_x_matrix             # X方向曲率数据(新增)
             self.status['curvature_y_matrix'] = curvature_y_matrix             # Y方向曲率数据(新增)
             self.status['curvature_warnings'] = curvature_warnings             # 高曲率警告(新增)
-            
             self.status['max_diff'] = self.max_diff                         # 最大差异值
         # 新增：更新基准mesh数据到状态
         if self.loaded_mesh_data is not None:
@@ -292,8 +300,9 @@ class BedMesh:
                 # 创建基准mesh对象以获取完整数据
                 base_mesh = self._apply_mesh(self.loaded_mesh_data)
                 
-                # 计算基准mesh的曲率数据
-                base_mesh.build_mesh(self.loaded_mesh_data['probed_matrix'], 
+                if self.update_curvature_data:
+                    # 计算基准mesh的曲率数据
+                    base_mesh.build_mesh(self.loaded_mesh_data['probed_matrix'], 
                                     curvature_threshold=0.05, 
                                     curvature_algorithm='spline')
                 
@@ -377,15 +386,20 @@ class BedMesh:
             TEMP: 温度参数，用于Z值比较时加载对应温度的mesh数据，默认60.0°C
             THRESHOLD: 阈值参数，曲率阈值或Z值差异阈值，默认0.05mm
         """
+        # 设置需要更新曲率数据
+        self.update_curvature_data = True
+        
         # 检查是否存在mesh数据
         if self.z_mesh is None:
             gcmd.respond_info("bed_mesh: 没有可用的mesh数据。请先运行 BED_MESH_CALIBRATE。")
+            self.update_curvature_data = False
             return
         
         # 获取参数
         algorithm = gcmd.get('ALGORITHM', 'curvature').strip().lower()
         if algorithm not in ['curvature', 'differ']:
             gcmd.respond_info("bed_mesh: ALGORITHM 必须是 'curvature' 或 'differ'")
+            self.update_curvature_data = False
             return
         
         temp = gcmd.get_float('TEMP', 60.0, minval=0.0, maxval=200.0)
@@ -564,6 +578,7 @@ class BedMesh:
 
     cmd_BED_MESH_DIFF_help = "Diff the current bedmesh with the loaded bedmesh"
     def cmd_BED_MESH_DIFF(self, gcmd):
+        self.update_curvature_data = False
         if self.loaded_mesh_data is None:
             gcmd.respond_info("No loaded bedmesh data available to diff. Please run BED_MESH_LOAD first.")
             self.verify_result = "no_loaded_base_mesh_data"
