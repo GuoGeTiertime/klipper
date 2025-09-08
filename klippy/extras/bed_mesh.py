@@ -98,7 +98,7 @@ class BedMesh:
         self.base_mesh_timestamp = None
         self.base_mesh_session_id = None
         #新增：是否更新曲率相关数据
-        self.update_curvature_data = False
+        self.update_curvature_data = 0 # 0:不更新, 1:更新
         self.toolhead = None
         self.horizontal_move_z = config.getfloat('horizontal_move_z', 5.)
         self.fade_start = config.getfloat('fade_start', 1.)
@@ -299,13 +299,6 @@ class BedMesh:
             try:
                 # 创建基准mesh对象以获取完整数据
                 base_mesh = self._apply_mesh(self.loaded_mesh_data)
-                
-                if self.update_curvature_data:
-                    # 计算基准mesh的曲率数据
-                    base_mesh.build_mesh(self.loaded_mesh_data['probed_matrix'], 
-                                    curvature_threshold=0.05, 
-                                    curvature_algorithm='spline')
-                
                 # 构建基准mesh状态数据
                 self.status['base_mesh'] = {
                     "profile_name": "base_mesh",
@@ -357,6 +350,7 @@ class BedMesh:
     def cmd_BED_MESH_CLEAR(self, gcmd):
         # 检查是否要清理基准mesh数据
         clear_base = gcmd.get_int('BASE', 0)
+        self.update_curvature_data = 0
         if clear_base:
             self.clear_base_mesh()
             gcmd.respond_info("Base mesh data cleared")
@@ -385,21 +379,20 @@ class BedMesh:
             ALGORITHM: 算法选择，'curvature'(曲率分析,默认) 或 'differ'(Z值比较)
             TEMP: 温度参数，用于Z值比较时加载对应温度的mesh数据，默认60.0°C
             THRESHOLD: 阈值参数，曲率阈值或Z值差异阈值，默认0.05mm
+            CURVATURE: 曲率更新参数，0:不更新, 1:更新, 默认0
         """
         # 设置需要更新曲率数据
-        self.update_curvature_data = True
+        self.update_curvature_data = gcmd.get_int('CURVATURE', 0)
         
         # 检查是否存在mesh数据
         if self.z_mesh is None:
             gcmd.respond_info("bed_mesh: 没有可用的mesh数据。请先运行 BED_MESH_CALIBRATE。")
-            self.update_curvature_data = False
             return
         
         # 获取参数
         algorithm = gcmd.get('ALGORITHM', 'curvature').strip().lower()
         if algorithm not in ['curvature', 'differ']:
             gcmd.respond_info("bed_mesh: ALGORITHM 必须是 'curvature' 或 'differ'")
-            self.update_curvature_data = False
             return
         
         temp = gcmd.get_float('TEMP', 60.0, minval=0.0, maxval=200.0)
@@ -578,7 +571,6 @@ class BedMesh:
 
     cmd_BED_MESH_DIFF_help = "Diff the current bedmesh with the loaded bedmesh"
     def cmd_BED_MESH_DIFF(self, gcmd):
-        self.update_curvature_data = False
         if self.loaded_mesh_data is None:
             gcmd.respond_info("No loaded bedmesh data available to diff. Please run BED_MESH_LOAD first.")
             self.verify_result = "no_loaded_base_mesh_data"
