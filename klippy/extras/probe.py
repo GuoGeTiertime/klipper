@@ -373,7 +373,7 @@ class ProbeSessionHelper:
         epos[2] += zCompensation
         # Report results
         gcode = self.printer.lookup_object('gcode')
-        gcode.respond_info("probe at %.3f,%.3f is z=%.4f, zcompensation=%.4f"
+        gcode.respond_info("probe at %.3f,%.3f is z=%.4f, zcompensation=%.4f, by probing_move()"
                            % (epos[0], epos[1], epos[2], zCompensation))
         return epos[:3]
     def run_probe(self, gcmd):
@@ -464,6 +464,8 @@ class ProbeSessionHelper:
 
                         pos[2] = estZ
                         self.results.append(pos)
+                        gcmd.respond_info("probe at %.3f,%.3f is z=%.4f, verify by HX71X"% (pos[0], pos[1], pos[2]))
+
                         return
 
                     # 估算下一个位置,目标重量为阈值的10%.

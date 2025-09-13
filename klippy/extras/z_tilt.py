@@ -7,6 +7,9 @@ import logging
 import mathutil
 from . import probe
 
+class error(Exception):
+    pass
+
 class ZAdjustHelper:
     def __init__(self, config, z_count):
         self.printer = config.get_printer()
@@ -175,6 +178,45 @@ class ZTilt:
                     - x_adjust * offsets[0] - y_adjust * offsets[1])
         adjustments = [x*x_adjust + y*y_adjust + z_adjust
                        for x, y in self.z_positions]
+        
+        if len(self.z_positions) == 4 :
+            # modify by guoge 20250901, for 4 point, reference to quad gantry.
+            # Z stepper1 ----> O                             O <---- Z stepper2
+            #                  | * <-- probe1   probe2 --> * |
+            #                  |                             |
+            #                  |                             | <--- X2 rail
+            #   X1 rail -----> |                             |
+            #                  |                             |
+            #                  |=============================|
+            #                  |            ^                |
+            #                  |            |                |
+            #                  |   Y rail --/                |
+            #                  |                             |
+            #                  | * <-- probe0   probe3 --> * |
+            # Z stepper0 ----> O                             O <---- Z stepper3
+            # verify steppers position, steppers 0/3 and 1/2 are on the same X coordinate.
+            if abs(positions[0][0] - positions[3][0]) > 1 or abs(positions[1][0] - positions[2][0]) > 1:
+                raise error("Steppers 0/3 and 1/2 are not on the same X coordinate. Please check z_tilt config for quad gantry.")
+            
+            totalz = 0
+            for pos in positions:
+                totalz += pos[2]
+            averagez = totalz / len(positions)
+
+            # calc stepper0 / stepper3 adjustment.
+            def adjustfunc(y0, z0, y1, z1, y2):
+                k = (z1-z0) / (y1-y0)
+                adj = (y2-y0) * k + z0
+                return adj
+            adjustments[0] = adjustfunc( positions[0][1], positions[0][2], positions[3][1], positions[3][2], self.z_positions[0][1])
+            adjustments[1] = adjustfunc( positions[1][1], positions[1][2], positions[2][1], positions[2][2], self.z_positions[1][1])
+            adjustments[2] = adjustfunc( positions[1][1], positions[1][2], positions[2][1], positions[2][2], self.z_positions[2][1])
+            adjustments[3] = adjustfunc( positions[0][1], positions[0][2], positions[3][1], positions[3][2], self.z_positions[3][1])
+            logging.info("Calculating quad gantry adjustment: %.4f, %4f, %.4f, %4f", adjustments[0], adjustments[1], adjustments[2], adjustments[3] )
+
+            # adjustments = [ -(averagez - pos[2]) * 1.5
+            #                for pos in positions]
+
         self.z_helper.adjust_steppers(adjustments, speed)
         return self.z_status.check_retry_result(
             self.retry_helper.check_retry([p[2] for p in positions]))
