@@ -571,6 +571,7 @@ class BedMesh:
 
     cmd_BED_MESH_DIFF_help = "Diff the current bedmesh with the loaded bedmesh"
     def cmd_BED_MESH_DIFF(self, gcmd):
+        error_value = gcmd.get_float('VALUE', 0.2)
         if self.loaded_mesh_data is None:
             gcmd.respond_info("No loaded bedmesh data available to diff. Please run BED_MESH_LOAD first.")
             self.verify_result = "no_loaded_base_mesh_data"
@@ -589,10 +590,9 @@ class BedMesh:
             self.update_status()
             return
         # get command parameters.
-        diff_warning = gcmd.get_float('DIFF_WARNING', 0.1)
-        diff_error = gcmd.get_float('DIFF_ERROR', 0.2)
-        diff_critical = gcmd.get_float('DIFF_CRITICAL', 0.5)
-
+        diff_warning = gcmd.get_float('DIFF_WARNING', round(error_value/2, 2))
+        diff_error = gcmd.get_float('DIFF_ERROR', round(error_value, 2))
+        diff_critical = gcmd.get_float('DIFF_CRITICAL', round(error_value*2, 2))
         # load the base mesh.
         baseMesh = self._apply_mesh(self.loaded_mesh_data)
         # print the loaded mesh for debug.
