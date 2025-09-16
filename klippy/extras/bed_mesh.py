@@ -93,6 +93,7 @@ class BedMesh:
         self.bmc = BedMeshCalibrate(config, self)
         self.z_mesh = None
         self.loaded_mesh_data = None
+        self.base_check = 1
         # 新增：基准mesh相关变量
         self.base_mesh_temp = None
         self.base_mesh_timestamp = None
@@ -262,6 +263,7 @@ class BedMesh:
             "max_diff": 0.0,         # 最大差异值
             # 新增：基准mesh数据字段
             "base_mesh": None               # 基准mesh数据，包含完整的mesh信息
+            "base_check": self.base_check   # base mesh检查状态
         }
         
         if self.z_mesh is not None:
@@ -294,6 +296,7 @@ class BedMesh:
             self.status['curvature_y_matrix'] = curvature_y_matrix             # Y方向曲率数据(新增)
             self.status['curvature_warnings'] = curvature_warnings             # 高曲率警告(新增)
             self.status['max_diff'] = self.max_diff                         # 最大差异值
+            self.status['base_check'] = self.base_check                    # 基准mesh检查结果
         # 新增：更新基准mesh数据到状态
         if self.loaded_mesh_data is not None:
             try:
@@ -514,6 +517,8 @@ class BedMesh:
         # 检查文件是否存在
         if not os.path.exists(filename):
             gcmd.respond_info(f"Bedmesh matrix data file not found: {filename}")
+            self.base_check = 0
+            self.update_status()
             return
 
         try:
@@ -527,6 +532,8 @@ class BedMesh:
 
             if not meshes:
                 gcmd.respond_info("No bedmesh data found")
+                self.base_check = 0
+                self.update_status()
                 return
             
             mesh = None
@@ -541,11 +548,13 @@ class BedMesh:
 
             if mesh is None:
                 gcmd.respond_info(f"No bedmesh found with temperature {bed_temp}°C or index {index}")
+                self.base_check = 0
+                self.update_status()
                 return
 
             timestamp = mesh['timestamp']
             gcmd.respond_info(f"Loading bedmesh with temperature: {mesh['bed_temp']}°C, index: {index}, timestamp: {timestamp}")
-
+            self.base_check = 1
             if bApply:
                 self.z_mesh = self._apply_mesh(mesh['mesh_data'])
                 self.z_mesh.print_mesh(gcmd.respond_info, move_z=None)
@@ -562,6 +571,8 @@ class BedMesh:
         except Exception as e:
             gcmd.respond_info(f"Failed to load bedmesh data: {str(e)}")
             logging.error(f"bed_mesh: Error loading bedmesh data: {str(e)}")
+            self.base_check = 0
+            self.update_status()
 
     def _apply_mesh(self, mesh_data):
         newMesh = ZMesh(mesh_data['mesh_params'], "loaded")
