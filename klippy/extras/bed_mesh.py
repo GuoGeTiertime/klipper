@@ -262,7 +262,7 @@ class BedMesh:
             "verify_result": self.verify_result,               # 检查差异结果  # 检查差异结果
             "max_diff": 0.0,         # 最大差异值
             # 新增：基准mesh数据字段
-            "base_mesh": None               # 基准mesh数据，包含完整的mesh信息
+            "base_mesh": None,               # 基准mesh数据，包含完整的mesh信息
             "base_check": self.base_check   # base mesh检查状态
         }
         
