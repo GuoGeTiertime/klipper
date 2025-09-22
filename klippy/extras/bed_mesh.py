@@ -263,7 +263,8 @@ class BedMesh:
             "max_diff": 0.0,         # 最大差异值
             # 新增：基准mesh数据字段
             "base_mesh": None,               # 基准mesh数据，包含完整的mesh信息
-            "base_check": self.base_check   # base mesh检查状态
+            "base_check": self.base_check,   # base mesh检查状态
+            "base_mesh_temp": self.base_mesh_temp
         }
         
         if self.z_mesh is not None:
@@ -297,6 +298,7 @@ class BedMesh:
             self.status['curvature_warnings'] = curvature_warnings             # 高曲率警告(新增)
             self.status['max_diff'] = self.max_diff                         # 最大差异值
             self.status['base_check'] = self.base_check                    # 基准mesh检查结果
+            self.status['base_mesh_temp'] = self.base_mesh_temp            # 基准mesh温度
         # 新增：更新基准mesh数据到状态
         if self.loaded_mesh_data is not None:
             try:
@@ -507,7 +509,7 @@ class BedMesh:
     cmd_BED_MESH_LOAD_help = "Load bed mesh data from bedmesh matrix data file"
     def cmd_BED_MESH_LOAD(self, gcmd):
         bMeasure = gcmd.get_int('MEASURE', 0)
-        bed_temp = gcmd.get_int('TEMP', None)
+        self.base_mesh_temp = gcmd.get_int('TEMP', None)
         index = gcmd.get_int('INDEX', -1)
         bApply = gcmd.get_int('APPLY', 0) # apply as current bedmesh else just load as loaded_mesh_data.
         
@@ -538,16 +540,16 @@ class BedMesh:
             
             mesh = None
             # first, find the mesh with the same temperature
-            if bed_temp is not None:
+            if self.base_mesh_temp is not None:
                 for session in meshes:
-                    if session.get('bed_temp', 0) == bed_temp:
+                    if session.get('bed_temp', 0) == self.base_mesh_temp:
                         mesh = session
                         break
             elif index >= 0 and index < len(meshes):
                     mesh = meshes[index]
 
             if mesh is None:
-                gcmd.respond_info(f"No bedmesh found with temperature {bed_temp}°C or index {index}")
+                gcmd.respond_info(f"No bedmesh found with temperature {self.base_mesh_temp}°C or index {index}")
                 self.base_check = 0
                 self.update_status()
                 return
