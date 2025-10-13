@@ -324,8 +324,9 @@ class BedMesh:
     
     def clear_base_mesh(self):
         """清理基准mesh数据"""
+        self.base_check = 0
         self.loaded_mesh_data = None
-        self.base_mesh_temp = None
+        #self.base_mesh_temp = None #需要用与找不到基准时，作为基准温度，不清理
         self.base_mesh_timestamp = None
         self.base_mesh_session_id = None
         self.update_status()
@@ -519,8 +520,7 @@ class BedMesh:
         # 检查文件是否存在
         if not os.path.exists(filename):
             gcmd.respond_info(f"Bedmesh matrix data file not found: {filename}")
-            self.base_check = 0
-            self.update_status()
+            self.clear_base_mesh()
             return
 
         try:
@@ -534,8 +534,7 @@ class BedMesh:
 
             if not meshes:
                 gcmd.respond_info("No bedmesh data found")
-                self.base_check = 0
-                self.update_status()
+                self.clear_base_mesh()
                 return
             
             mesh = None
@@ -550,8 +549,7 @@ class BedMesh:
 
             if mesh is None:
                 gcmd.respond_info(f"No bedmesh found with temperature {self.base_mesh_temp}°C or index {index}")
-                self.base_check = 0
-                self.update_status()
+                self.clear_base_mesh()
                 return
 
             timestamp = mesh['timestamp']
@@ -573,8 +571,7 @@ class BedMesh:
         except Exception as e:
             gcmd.respond_info(f"Failed to load bedmesh data: {str(e)}")
             logging.error(f"bed_mesh: Error loading bedmesh data: {str(e)}")
-            self.base_check = 0
-            self.update_status()
+            self.clear_base_mesh()
 
     def _apply_mesh(self, mesh_data):
         newMesh = ZMesh(mesh_data['mesh_params'], "loaded")
