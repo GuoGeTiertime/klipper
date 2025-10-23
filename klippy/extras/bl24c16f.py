@@ -63,6 +63,9 @@ class EEPROMCommandHelper:
                                    self.cmd_EEPROM_POS)
         gcode.register_mux_command("EEPROM_PRINTER_INFO", "CHIP", name,
                                    self.cmd_EEPROM_PRINTER_INFO)
+        gcode.register_mux_command("EEPROM_FACTORY_RESET", "CHIP", name,
+                                   self.cmd_EEPROM_FACTORY_RESET,
+                                   desc=self.cmd_EEPROM_FACTORY_RESET_help)
 
     def cmd_EEPROM_IS_FIRST_USED(self, gcmd):
         val = self.chip.read_reg(1, 1)
@@ -276,7 +279,59 @@ class EEPROMCommandHelper:
                     crc = ((crc << 1) & 0xFF) ^ poly
                 else:
                     crc = (crc << 1) & 0xFF
-        return crc ^ xor_out  
+        return crc ^ xor_out
+    
+    cmd_EEPROM_FACTORY_RESET_help = "Reset EEPROM to factory defaults (requires CONFIRM=1)"
+    def cmd_EEPROM_FACTORY_RESET(self, gcmd):
+        """恢复EEPROM出厂默认设置"""
+        # 需要确认参数，防止误操作
+        confirm = gcmd.get_int("CONFIRM", 0)
+        if confirm != 1:
+            gcmd.respond_info("警告: 此操作将清除所有EEPROM数据!")
+            gcmd.respond_info("如果确认要恢复出厂默认，请执行:")
+            gcmd.respond_info("EEPROM_FACTORY_RESET CONFIRM=1")
+            return
+        
+        # 获取清除范围，默认清除所有2048字节
+        start_addr = gcmd.get_int("START", 0, minval=0, maxval=2047)
+        end_addr = gcmd.get_int("END", 2047, minval=0, maxval=2047)
+        
+        if end_addr < start_addr:
+            gcmd.respond_info("错误: END地址必须大于或等于START地址")
+            return
+        
+        gcmd.respond_info("开始恢复出厂默认设置...")
+        gcmd.respond_info("清除地址范围: 0x%04X - 0x%04X" % (start_addr, end_addr))
+        
+        # 批量写入0xFF（EEPROM擦除状态）
+        batch_size = 16  # 每次写入16字节（一页）
+        total_bytes = end_addr - start_addr + 1
+        cleared_bytes = 0
+        
+        for addr in range(start_addr, end_addr + 1, batch_size):
+            # 计算本次写入的字节数
+            remaining = end_addr - addr + 1
+            write_size = min(batch_size, remaining)
+            
+            # 写入0xFF
+            data = [0xFF] * write_size
+            self.chip.write_reg(addr, data)
+            
+            cleared_bytes += write_size
+            
+            # 每256字节显示一次进度
+            if cleared_bytes % 256 == 0 or cleared_bytes == total_bytes:
+                progress = (cleared_bytes * 100) // total_bytes
+                gcmd.respond_info("进度: %d%% (%d/%d 字节)" % (progress, cleared_bytes, total_bytes))
+        
+        # 重置关键标志位
+        if start_addr == 0 and end_addr >= 1:
+            self.chip.write_reg(0, 0)    # 重置位置指针
+            self.chip.write_reg(1, 255)  # 设置首次使用标志
+            gcmd.respond_info("已重置位置指针和首次使用标志")
+        
+        gcmd.respond_info("恢复出厂默认设置完成!")
+        gcmd.respond_info("总计清除: %d 字节" % cleared_bytes)  
 
 class BL24C16F:
     def __init__(self, config):
