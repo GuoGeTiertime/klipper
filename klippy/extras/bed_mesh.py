@@ -556,8 +556,9 @@ class BedMesh:
             gcmd.respond_info(f"Loading bedmesh with temperature: {mesh['bed_temp']}°C, index: {index}, timestamp: {timestamp}")
             self.base_check = 1
             if bApply:
-                self.z_mesh = self._apply_mesh(mesh['mesh_data'])
-                self.z_mesh.print_mesh(gcmd.respond_info, move_z=None)
+                new_mesh = self._apply_mesh(mesh['mesh_data'])
+                self.set_mesh(new_mesh)  # 使用 set_mesh 来正确初始化
+                new_mesh.print_mesh(gcmd.respond_info, move_z=None)
                 self.update_status()
             else:
                 self.loaded_mesh_data = mesh['mesh_data']
@@ -1306,6 +1307,8 @@ class MoveSplitter:
         self.total_move_length = math.sqrt(sum([d*d for d in axes_d[:3]]))
         self.axis_move = [not isclose(d, 0., abs_tol=1e-10) for d in axes_d]
     def _calc_z_offset(self, pos):
+        if self.z_mesh is None:
+            return 0.
         z = self.z_mesh.calc_z(pos[0], pos[1])
         offset = self.fade_offset
         return self.z_factor * (z - offset) + offset
