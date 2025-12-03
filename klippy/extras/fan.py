@@ -77,6 +77,7 @@ class Fan:
         return {
             'speed': self.last_fan_value,
             'rpm': tachometer_status['rpm'],
+            'max_power': self.max_power,
         }
 
 class FanTachometer:
