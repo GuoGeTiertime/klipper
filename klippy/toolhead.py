@@ -219,6 +219,8 @@ class ToolHead:
         # Velocity and acceleration control
         self.max_velocity = config.getfloat('max_velocity', above=0.)
         self.max_accel = config.getfloat('max_accel', above=0.)
+        self.origin_max_z_velocity = None
+        self.origin_max_z_accel = None
         min_cruise_ratio = 0.5
         if config.getfloat('minimum_cruise_ratio', None) is None:
             req_accel_to_decel = config.getfloat('max_accel_to_decel', None,
@@ -720,6 +722,8 @@ class ToolHead:
     def cmd_SET_VELOCITY_LIMIT(self, gcmd):
         max_velocity = gcmd.get_float('VELOCITY', None, above=0.)
         max_accel = gcmd.get_float('ACCEL', None, above=0.)
+        max_z_velocity = gcmd.get_float('Z_VELOCITY', None, above=0.)
+        max_z_accel = gcmd.get_float('Z_ACCEL', None, above=0.)
         square_corner_velocity = gcmd.get_float(
             'SQUARE_CORNER_VELOCITY', None, minval=0.)
         min_cruise_ratio = gcmd.get_float(
@@ -736,6 +740,20 @@ class ToolHead:
             self.max_velocity = max_velocity
         if max_accel is not None:
             self.max_accel = max_accel
+    
+        # add by guoge, 20251205, add for max_z_velocity and max_z_accel, use origin value to limit the new value.
+        if max_z_velocity is not None:
+            if self.origin_max_z_velocity is None:
+                self.origin_max_z_velocity = self.kin.max_z_velocity
+            self.kin.max_z_velocity = min(self.origin_max_z_velocity, max_z_velocity)
+            gcmd.respond_info("set max_z_velocity: %.6f" % (self.kin.max_z_velocity))
+        if max_z_accel is not None:
+            if self.origin_max_z_accel is None:
+                self.origin_max_z_accel = self.kin.max_z_accel
+            self.kin.max_z_accel = min(self.origin_max_z_accel, max_z_accel)
+            gcmd.respond_info("set max_z_accel: %.6f" % (self.kin.max_z_accel))
+            
+
         if square_corner_velocity is not None:
             self.square_corner_velocity = square_corner_velocity
         if min_cruise_ratio is not None:
