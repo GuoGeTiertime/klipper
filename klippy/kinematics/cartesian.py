@@ -48,6 +48,7 @@ class CartKinematics:
                                               above=0., maxval=max_velocity)
         self.max_z_accel = config.getfloat('max_z_accel', max_accel,
                                            above=0., maxval=max_accel)
+        self.z_accel_jog_ratio = config.getfloat('z_accel_jog_ratio', 0.1, above=0., maxval=1.0)
         self.limits = [(1.0, -1.0)] * 3
     def get_steppers(self):
         return [s for rail in self.rails for s in rail.get_steppers()]
@@ -118,9 +119,11 @@ class CartKinematics:
             return
         # Move with Z - update velocity and accel for slower Z axis
         self._check_endstops(move)
-        z_ratio = move.move_d / abs(move.axes_d[2])
+        dz_1 = 1.0 / abs(move.axes_d[2])
+        z_ratio = move.move_d * dz_1
+        accel_scale = max(min(dz_1*dz_1, 1.0), self.z_accel_jog_ratio) # reduce accel when z is large
         move.limit_speed(
-            self.max_z_velocity * z_ratio, self.max_z_accel * z_ratio)
+            self.max_z_velocity * z_ratio, self.max_z_accel * z_ratio * accel_scale)
     def get_status(self, eventtime):
         axes = [a for a, (l, h) in zip("xyz", self.limits) if l <= h]
         return {
