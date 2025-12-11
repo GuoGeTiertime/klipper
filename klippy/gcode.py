@@ -362,7 +362,7 @@ class GCodeDispatch:
         self.printer.invoke_shutdown("Shutdown due to M112 command")
     def cmd_M115(self, gcmd):
         # Get Firmware Version and Capabilities
-        software_version = 2.0.0
+        software_version = "2.0.0"
         kw = {"FIRMWARE_NAME": "Klipper", "FIRMWARE_VERSION": software_version}
         msg = " ".join(["%s:%s" % (k, v) for k, v in kw.items()])
         did_ack = gcmd.ack(msg)
