@@ -259,6 +259,8 @@ class ProbeSessionHelper:
                                                  minval=0.)
         self.samples_retries = config.getint('samples_tolerance_retries', 0,
                                              minval=0)
+        self.sample_retract_wait_time = config.getfloat('sample_retract_wait_time', 0.01, above=0.)
+        self.weight_wait_time = config.getfloat('weight_wait_time', 0.1, above=0.)
         # Session state
         self.multi_probe_pending = False
         self.results = []
@@ -401,7 +403,7 @@ class ProbeSessionHelper:
             # check the weight stable
             if self.hx71x is None:
                 self.hx71x = self.printer.lookup_object('hx71x HX714', None)
-            waitTime = 0.1
+            waitTime = self.weight_wait_time
             adjustTimes = 0
 
             while self.hx71x is not None:
@@ -456,7 +458,7 @@ class ProbeSessionHelper:
                         # gcmd.respond_info("XY: %.1f %.1f Probe OK, est z:%.3f" % (probexy[0], probexy[1], estZ))
 
                         # 校验tareWeight是否太大.如果太大.需要清零
-                        if self.hx71x.curTriggerTareWeight > ( 2.0 * self.hx71x.endstop_threshold):
+                        if abs(self.hx71x.curTriggerTareWeight) > ( 1.0 * self.hx71x.endstop_threshold):
                             time.sleep(0.5)
                             self.hx71x.cmd_TARE_WEIGHT(" ")
                             time.sleep(0.5)
@@ -517,6 +519,8 @@ class ProbeSessionHelper:
                     liftdis *= 2
                     liftspeed = 1
                 self.toolhead.manual_move(probexy + [pos[2] + liftdis], liftspeed)
+                self.toolhead.dwell(self.sample_retract_wait_time)
+                self.toolhead.wait_moves()
         # Calculate result
         epos = calc_probe_z_average(positions, params['samples_result'])
         self.results.append(epos)
@@ -557,8 +561,9 @@ class ProbeSessionHelper:
         else:
             self.toolhead.manual_move(probexy + [posZ], speed)
             self.toolhead.wait_moves()
-        
-        time.sleep(waitTime)
+
+        self.toolhead.dwell(waitTime)
+        self.toolhead.wait_moves()
         weight = self.hx71x.calCurAverageWeight() - self.hx71x.curTriggerTareWeight
         return weight, posZ
 
