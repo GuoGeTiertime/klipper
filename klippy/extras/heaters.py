@@ -68,6 +68,9 @@ class Heater:
         gcode.register_mux_command("SET_HEATER_MAXPOWER", "HEATER",
                                    short_name, self.cmd_SET_HEATER_MAXPOWER,
                                    desc=self.cmd_SET_HEATER_MAXPOWER_help)
+        gcode.register_mux_command("SET_HEATER_PID", "HEATER",
+                                   short_name, self.cmd_SET_HEATER_PID,
+                                   desc=self.cmd_SET_HEATER_PID_help)
         self.printer.register_event_handler("klippy:shutdown",
                                             self._handle_shutdown)
     def set_pwm(self, read_time, value):
@@ -169,6 +172,21 @@ class Heater:
         self.max_power = power
         self.control.set_max_power(power)
 
+    cmd_SET_HEATER_PID_help = "Set heater PID parameters (runtime only, not saved to config)"
+    def cmd_SET_HEATER_PID(self, gcmd):
+        if not isinstance(self.control, ControlPID):
+            raise gcmd.error("Heater %s is not PID control" % (self.short_name,))
+        kp = gcmd.get_float('KP', None, minval=0.)
+        ki = gcmd.get_float('KI', None, minval=0.)
+        kd = gcmd.get_float('KD', None, minval=0.)
+        if kp is None and ki is None and kd is None:
+            raise gcmd.error("At least one of Kp, Ki, Kd must be specified")
+        self.control.set_pid(Kp=kp, Ki=ki, Kd=kd)
+        # 回显当前 PID（与 config 同尺度）
+        c = self.control
+        gcmd.respond_info("PID: Kp=%.3f Ki=%.3f Kd=%.3f" % (
+            c.Kp * PID_PARAM_BASE, c.Ki * PID_PARAM_BASE, c.Kd * PID_PARAM_BASE))
+
 
 ######################################################################
 # Bang-bang control algo
@@ -256,6 +274,19 @@ class ControlPID:
         self.heater_max_power = self.heater.get_max_power()
         if self.Ki:
             self.temp_integ_max = self.heater_max_power / self.Ki
+
+    def set_pid(self, Kp=None, Ki=None, Kd=None):
+        """运行时更新 PID 参数（与 config 中 pid_Kp/pid_Ki/pid_Kd 同尺度）。"""
+        if Kp is not None:
+            self.Kp = Kp / PID_PARAM_BASE
+        if Ki is not None:
+            self.Ki = Ki / PID_PARAM_BASE
+        if Kd is not None:
+            self.Kd = Kd / PID_PARAM_BASE
+        if self.Ki:
+            self.temp_integ_max = self.heater_max_power / self.Ki
+        else:
+            self.temp_integ_max = 0.
 
 
 ######################################################################
