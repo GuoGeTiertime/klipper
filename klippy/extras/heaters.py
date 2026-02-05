@@ -61,6 +61,13 @@ class Heater:
         # Load additional modules
         self.printer.load_object(config, "verify_heater %s" % (short_name,))
         self.printer.load_object(config, "pid_calibrate")
+        # Sync heaters: when this heater's temp is set, also set these (without wait)
+        sync_heaters = config.get('sync_heaters', '')
+        if sync_heaters:
+            self.sync_heater_names = [h.strip() for h in sync_heaters.split(',')
+                                       if h.strip() and h.strip() != short_name]
+        else:
+            self.sync_heater_names = []
         gcode = self.printer.lookup_object("gcode")
         gcode.register_mux_command("SET_HEATER_TEMPERATURE", "HEATER",
                                    short_name, self.cmd_SET_HEATER_TEMPERATURE,
@@ -71,6 +78,9 @@ class Heater:
         gcode.register_mux_command("SET_HEATER_PID", "HEATER",
                                    short_name, self.cmd_SET_HEATER_PID,
                                    desc=self.cmd_SET_HEATER_PID_help)
+        gcode.register_mux_command("SET_HEATER_SYNC", "HEATER",
+                                   short_name, self.cmd_SET_HEATER_SYNC,
+                                   desc=self.cmd_SET_HEATER_SYNC_help)
         self.printer.register_event_handler("klippy:shutdown",
                                             self._handle_shutdown)
     def set_pwm(self, read_time, value):
@@ -159,8 +169,11 @@ class Heater:
             target_temp = self.target_temp
             smoothed_temp = self.smoothed_temp
             last_pwm_value = self.last_pwm_value
-        return {'temperature': round(smoothed_temp, 2), 'target': target_temp,
-                'power': last_pwm_value}
+        status = {'temperature': round(smoothed_temp, 2), 'target': target_temp,
+                  'power': last_pwm_value}
+        # if getattr(self, 'sync_heater_names', []):
+        #     status['sync_heaters'] = self.sync_heater_names
+        return status
     cmd_SET_HEATER_TEMPERATURE_help = "Sets a heater temperature"
     def cmd_SET_HEATER_TEMPERATURE(self, gcmd):
         temp = gcmd.get_float('TARGET', 0.)
@@ -186,6 +199,31 @@ class Heater:
         c = self.control
         gcmd.respond_info("PID: Kp=%.3f Ki=%.3f Kd=%.3f" % (
             c.Kp * PID_PARAM_BASE, c.Ki * PID_PARAM_BASE, c.Kd * PID_PARAM_BASE))
+
+    cmd_SET_HEATER_SYNC_help = "Set the list of heaters to sync with this heater"
+    def cmd_SET_HEATER_SYNC(self, gcmd):
+        heaters_param = gcmd.get('HEATERS', None)
+        pheaters = self.printer.lookup_object('heaters')
+        if heaters_param is None:
+            if not self.sync_heater_names:
+                gcmd.respond_info("Heater %s sync list is empty" % (self.short_name,))
+            else:
+                gcmd.respond_info("Heater %s sync list: %s" % (
+                    self.short_name, ', '.join(self.sync_heater_names)))
+            return
+        heater_list = [h.strip() for h in heaters_param.split(',') if h.strip()]
+        valid_heaters = []
+        for heater_name in heater_list:
+            if heater_name == self.short_name:
+                continue
+            if heater_name in pheaters.heaters:
+                valid_heaters.append(heater_name)
+            else:
+                gcmd.respond_info("Error: Heater '%s' not found" % heater_name)
+        self.sync_heater_names = valid_heaters
+        if valid_heaters:
+            gcmd.respond_info("Heater %s sync list set to: %s" % (
+                self.short_name, ', '.join(valid_heaters)))
 
 
 ######################################################################
@@ -421,6 +459,11 @@ class PrinterHeaters:
     def set_temperature(self, heater, temp, wait=False):
         toolhead = self.printer.lookup_object('toolhead')
         toolhead.register_lookahead_callback((lambda pt: None))
+        # Set sync heaters first (no wait) so they start heating together
+        for heater_name in getattr(heater, 'sync_heater_names', []):
+            other = self.heaters.get(heater_name)
+            if other is not None:
+                other.set_temp(temp)
         heater.set_temp(temp)
         if wait and temp:
             self._wait_for_temperature(heater)
