@@ -1,0 +1,17 @@
+[pid_table heaterbed1000]
+temperature1: 0
+Kp1: 10.0
+Ki1: 0.5
+Kd1: 80
+temperature2: 100
+Kp2: 18.0
+Ki2: 0.8
+Kd2: 100
+temperature3: 220
+Kp3: 22.2
+Ki3: 1.08
+Kd3: 114
+temperature4: 260
+Kp4: 26.2
+Ki4: 1.8
+Kd4: 134

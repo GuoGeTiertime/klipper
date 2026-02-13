@@ -50,6 +50,8 @@ class Heater:
         algos = {'watermark': ControlBangBang, 'pid': ControlPID}
         algo = config.getchoice('control', algos)
         self.control = algo(self, config)
+        # 动态 PID：引用共享的 pid_table 段（多个 heater 可复用同一表）
+        self.pid_table_name = config.get('pid_table', None)
         # Setup output heater pin
         heater_pin = config.get('heater_pin')
         ppins = self.printer.lookup_object('pins')
@@ -136,6 +138,17 @@ class Heater:
                 % (degrees, self.min_temp, self.max_temp))
         with self.lock:
             self.target_temp = min(degrees, self.max_target)
+            if degrees and self.pid_table_name and isinstance(
+                    self.control, ControlPID):
+                # 无后缀段为 "pid_table"，带后缀为 "pid_table 后缀"（如 [pid_table heaterbed700]）
+                name = self.pid_table_name
+                if name != "pid_table" and " " not in name:
+                    name = "pid_table " + name
+                table = self.printer.lookup_object(name)
+                kp, ki, kd = table.get_pid(degrees)
+                logging.info("set_temp: pid_table = %s, temp = %f, kp = %f, ki = %f, kd = %f",
+                             self.pid_table_name, degrees, kp, ki, kd)
+                self.control.set_pid(Kp=kp, Ki=ki, Kd=kd)
     def get_temp(self, eventtime):
         print_time = self.mcu_pwm.get_mcu().estimated_print_time(eventtime) - 5.
         with self.lock:
