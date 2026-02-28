@@ -53,6 +53,10 @@ class FilamentLightSensor:
 
         self.bInited = False # 是否已初始化
         self.bPresent = False # 当前是否存在丝材        
+        # 无丝延迟触发配置
+        self.runout_delay = config.getfloat('runout_delay', 3.0, minval=0.)  # 无丝延迟触发时间（秒），0=立即触发
+        self.reactor = self.printer.get_reactor()
+        self.runout_timer = None  # 无丝延迟触发定时器        
         # 丝材检测参数（使用光强阈值）
         self.lux_runout = config.getfloat('lux_runout', 30.0)  # 无材料光照度
         self.lux_present = config.getfloat('lux_present', 10.0)  # 有材料光照度
@@ -96,6 +100,14 @@ class FilamentLightSensor:
         
     def _format_lux_minmax(self):
         return "[%.2f-%.2f]Lux" % (self.lux_min, self.lux_max)
+    
+    def _runout_timer_callback(self, eventtime):
+        """无丝延迟定时器回调"""
+        if not self.bPresent:
+            self.runout_helper.note_filament_present(False)
+            logging.info("[%s] callback:note_filament_present: False" % self.name)
+        self.runout_timer = None
+        return self.reactor.NEVER
         
     def _reset_ema(self, lux):
         self.lux_ema_fast = lux
@@ -130,8 +142,8 @@ class FilamentLightSensor:
                     bJump = True
         # filament state change!
         if bJump:
-            logging.info(" ----- Lux jump, state changed, bPresent: %s, lux: %.2f, ema fast:%.1f slow:%.1f diff: %.1f ----- " % 
-                (self.bPresent, lux, self.lux_ema_fast, self.lux_ema_slow, diff) )
+            logging.info("[%s] ----- Lux jump, state changed, bPresent: %s, lux: %.2f, ema fast:%.1f slow:%.1f diff: %.1f ----- " % 
+                (self.name, self.bPresent, lux, self.lux_ema_fast, self.lux_ema_slow, diff) )
         self.lux_ema_diff = diff # record current ema diff        
         return bJump
     def _state_init(self, lux):
@@ -156,17 +168,30 @@ class FilamentLightSensor:
         #没有跳变，用绝对值进行校正，防止大幅度漂移
         if self.bPresent and self.lux_ema_fast > self.lux_runout:
             bJump = True
-            logging.info(" ---- Force set filament runout by light fast lux: %.2f" % self.lux_ema_fast )
+            logging.info("[%s] ---- Force set filament runout by light fast lux: %.2f" % (self.name, self.lux_ema_fast) )
         elif (not self.bPresent) and self.lux_ema_fast < self.lux_present:
             bJump = True
-            logging.info(" ---- Force set filament present by light fast lux: %.2f" % self.lux_ema_fast )
+            logging.info("[%s] ---- Force set filament present by light fast lux: %.2f" % (self.name, self.lux_ema_fast) )
 
         if bJump:
             self.bPresent = not self.bPresent
-            self.runout_helper.note_filament_present(self.bPresent)
             self._reset_ema(lux) #force reset ema to current lux value after state change
-            logging.info( "Filament light sensor jump, filament: %s, time: %.3f ", "Present" if self.bPresent else "Runout", read_time)
-
+            logging.info("[%s] Filament light sensor jump, filament: %s, time: %.3f" % 
+                (self.name, "Present" if self.bPresent else "Runout", read_time))
+            
+            # 处理状态变化
+            if self.runout_timer is not None:
+                self.reactor.unregister_timer(self.runout_timer)
+                logging.info("[%s] unregister_timer" % self.name)
+                self.runout_timer = None
+            if self.bPresent:  # 有丝，立即触发
+                self.runout_helper.note_filament_present(True)
+                logging.info("[%s] note_filament_present: True" % self.name)
+            else: # 无丝，延迟触发
+                waketime = self.reactor.monotonic() + self.runout_delay
+                self.runout_timer = self.reactor.register_timer(
+                    self._runout_timer_callback, waketime)
+                logging.info("[%s] register_timer: %.1f" % (self.name, self.runout_delay))
     def _get_pwm_value(self):
         power = self.led_power if self.led_enable else 0.0
         pwm_value = (1.0 - power) if self.led_invert else power
@@ -229,6 +254,7 @@ class FilamentLightSensor:
         gcmd.respond_info("  EMA_SLOW_TIME=<sec>  - Slow EMA time constant " )
         gcmd.respond_info("  JUMP_THRESHOLD=<lux> - jump detection threshold " )
         gcmd.respond_info("  JUMP_USE_ABS=<0|1>  - jump detection mode (0=single-sided, 1=both-sided)" )
+        gcmd.respond_info("  RUNOUT_DELAY=<sec>  - Runout delay time in seconds (0=immediate, current: %.1f)" % self.runout_delay)
         gcmd.respond_info("  RESET_LUX=x     - Reset lux min/max statistics " )
         gcmd.respond_info("  RESET_EMA=x     - Reset EMA values and clear jump statistics " )
         gcmd.respond_info("  RESET_ALL=x      - Reset all statistics (min/max, EMA, jump)" )
@@ -243,7 +269,7 @@ class FilamentLightSensor:
         # 所有支持的参数列表
         all_params = ['LED_POWER', 'LED_ENABLE', 'SENSOR_ENABLE', 'LUX_RUNOUT', 'LUX_PRESENT', 
                      'ALARM_COUNT', 'REPORT_TIME', 'EMA_FAST_TIME', 'EMA_SLOW_TIME', 'JUMP_THRESHOLD', 'JUMP_USE_ABS',
-                     'RESET_LUX', 'RESET_EMA', 'RESET_ALL']
+                     'RUNOUT_DELAY', 'RESET_LUX', 'RESET_EMA', 'RESET_ALL']
         # 检查是否有任何参数
         if not any(gcmd.get(param, None) is not None for param in all_params):
             self._show_set_help(gcmd)
@@ -276,6 +302,9 @@ class FilamentLightSensor:
             self.jump_use_abs = gcmd.get_int('JUMP_USE_ABS', 0) != 0
             mode_str = "both-sided for transparent filament" if self.jump_use_abs else "single-sided"
             gcmd.respond_info("JUMP_USE_ABS set to %s" % mode_str)
+        if gcmd.get('RUNOUT_DELAY', None) is not None:
+            self.runout_delay = gcmd.get_float('RUNOUT_DELAY', minval=0.)
+            gcmd.respond_info("Runout delay set to %.1f seconds (0=immediate)" % self.runout_delay)
         # REPORT_TIME（需要更新ADC回调和EMA权重）
         if gcmd.get('REPORT_TIME', None) is not None:
             self.report_time = gcmd.get_float('REPORT_TIME', above=0.)
