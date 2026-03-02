@@ -505,6 +505,7 @@ class BedMesh:
 
         except Exception as e:
             gcmd.respond_info(f"Failed to save bedmesh matrix data: {str(e)}")
+            self.printer.send_gcode_command("SET_ERROR_CODE CODE=-4111 MSG='Failed to save bedmesh matrix data'")
             logging.error(f"bed_mesh: Error saving bedmesh matrix data: {str(e)}")
 
     cmd_BED_MESH_LOAD_help = "Load bed mesh data from bedmesh matrix data file"
