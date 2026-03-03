@@ -261,6 +261,7 @@ class ProbeSessionHelper:
                                              minval=0)
         self.sample_retract_wait_time = config.getfloat('sample_retract_wait_time', 0.01, above=0.)
         self.weight_wait_time = config.getfloat('weight_wait_time', 0.1, above=0.)
+        self.stop_weight_threshold = config.getfloat('stop_weight_threshold', 1.5, above=0.5)
         # Session state
         self.multi_probe_pending = False
         self.results = []
@@ -411,7 +412,7 @@ class ProbeSessionHelper:
                 th_0 = self.hx71x.endstop_threshold * 0.1
                 th_1 = self.hx71x.endstop_threshold * 0.2
                 th_2 = self.hx71x.endstop_threshold * 0.5
-                th_3 = self.hx71x.endstop_threshold * 2.0
+                th_3 = self.hx71x.endstop_threshold * self.stop_weight_threshold # should be 0.5 ~ 2.0
                 # 获取当前高度的重量
                 weightStop, posStop = self._getWeightAtZ(probexy, None, probe_speed, waitTime)
                 if weightStop < th_3:
