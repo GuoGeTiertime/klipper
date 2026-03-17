@@ -181,7 +181,7 @@ class GCodeMacro:
         v = dict(self.variables)
         v[variable] = literal
         self.variables = v
-    cmd_SHOW_MACRO_help = "Show the source code of a G-Code macro"
+    cmd_SHOW_MACRO_help = "Show the source code of a G-Code macro, SHOW_MACRO MACRO=macro_name"
     def cmd_SHOW_MACRO(self, gcmd):
         # show the source code of the macro
         self.gcode.respond_info(self.template.source)
