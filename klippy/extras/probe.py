@@ -385,7 +385,6 @@ class ProbeSessionHelper:
         params = self.get_probe_params(gcmd)
         if self.toolhead is None:
             self.toolhead = self.printer.lookup_object('toolhead')
-        probexy = self.toolhead.get_position()[:2]
         retries = 0
         bFirst = True
         positions = []
@@ -414,16 +413,16 @@ class ProbeSessionHelper:
                 th_2 = self.hx71x.endstop_threshold * 0.5
                 th_3 = self.hx71x.endstop_threshold * self.stop_weight_threshold # should be 0.5 ~ 2.0
                 # 获取当前高度的重量
-                weightStop, posStop = self._getWeightAtZ(probexy, None, probe_speed, waitTime)
+                weightStop, posStop = self._getWeightAtZ(None, probe_speed, waitTime)
                 if weightStop < th_3:
                     gcmd.respond_info("Stop weight(%.2f) is too small, test probe failed ---------" % (weightStop))
                     break
 
                 # 获取预估高度的重量, 如果重量小于threshold的20%,则需要调整高度. 防止pos[2]在脱离接触的高度.
-                weightEst, posEst = self._getWeightAtZ(probexy, pos[2], probe_speed, waitTime)
+                weightEst, posEst = self._getWeightAtZ(pos[2], probe_speed, waitTime)
                 while weightEst < th_1:
                     adjustZ = posEst + (posStop - posEst) * 0.1 #取两点之间的某点重新测量.
-                    weightEst, posEst = self._getWeightAtZ(probexy, adjustZ, probe_speed, waitTime)
+                    weightEst, posEst = self._getWeightAtZ(adjustZ, probe_speed, waitTime)
                     adjustTimes += 1
                     if adjustTimes > 3:
                         break
@@ -476,12 +475,12 @@ class ProbeSessionHelper:
                     # 预测点必须位于[PosStop, PosStop+1]之间, 否则认为异常,退出.
                     if posEst < posStop or posEst > posStop+1:
                         break
-                    weightEst, posEst = self._getWeightAtZ(probexy, posEst, probe_speed, waitTime)
+                    weightEst, posEst = self._getWeightAtZ(posEst, probe_speed, waitTime)
 
                     # 如果重量小于minWeight, 并且前一个值比较大,需要微调.减小这两个值之间的差距.
                     if weightEst < th_0 and weights[0] > th_2: 
                         posEst = posEst + (testPositions[0] - posEst) * 0.2 #向前一个点移动一点.
-                        weightEst, posEst = self._getWeightAtZ(probexy, posEst, probe_speed, waitTime)
+                        weightEst, posEst = self._getWeightAtZ(posEst, probe_speed, waitTime)
                         adjustTimes += 1
                         if weightEst < th_0: #如果仍然小于minWeight, 认为重量异常,退出.
                             break
@@ -519,7 +518,7 @@ class ProbeSessionHelper:
                 if retries > 1: # if exceed 1 retries, double the lift distance and reduce speed to 1
                     liftdis *= 2
                     liftspeed = 1
-                self.toolhead.manual_move(probexy + [pos[2] + liftdis], liftspeed)
+                self.toolhead.manual_move([None, None, pos[2] + liftdis], liftspeed)
                 self.toolhead.dwell(self.sample_retract_wait_time)
                 self.toolhead.wait_moves()
         # Calculate result
@@ -556,11 +555,11 @@ class ProbeSessionHelper:
         #              (x, y, zz, nCol, nRow, z0, z1, z2, z3, ratio_x, ratio_y, zz0, zz1, zz) )
         return zz
     
-    def _getWeightAtZ(self, probexy, posZ=None, speed=4, waitTime=0.1):
+    def _getWeightAtZ(self, posZ=None, speed=4, waitTime=0.1):
         if posZ is None:
             posZ = self.toolhead.get_position()[2]
         else:
-            self.toolhead.manual_move(probexy + [posZ], speed)
+            self.toolhead.manual_move([None, None, posZ], speed)
             self.toolhead.wait_moves()
 
         self.toolhead.dwell(waitTime)
