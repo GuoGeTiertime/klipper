@@ -292,6 +292,11 @@ class ProbeSessionHelper:
             raise config.error("Probe corrections points are not correct, please check the config file, [probe] section, corrections item")
         self.hx71x = None
         self.toolhead = None
+        # 裂缝/障碍物避让配置, add by guoge
+        self.avoid_crack_x = config.getfloatlist('avoid_crack_x', [])
+        self.avoid_crack_y = config.getfloatlist('avoid_crack_y', [])
+        self.avoid_crack_tolerance = config.getfloat(
+            'avoid_crack_tolerance', 5., above=0.)
 
         # # Register z_virtual_endstop pin
         # self.printer.lookup_object('pins').register_chip('probe', self)
@@ -313,6 +318,24 @@ class ProbeSessionHelper:
                 self.end_probe_session()
             except:
                 logging.exception("Multi-probe end")
+    def _apply_crack_shift(self, bed_x, bed_y):
+        """检查床坐标是否在裂缝线附近，保持同侧偏移，最终位置=裂缝±tolerance"""
+        if not self.avoid_crack_x and not self.avoid_crack_y:
+            return bed_x, bed_y, False
+        new_x, new_y = bed_x, bed_y
+        shifted = False
+        tol = self.avoid_crack_tolerance
+        for cx in self.avoid_crack_x:
+            if abs(new_x - cx) <= tol:
+                new_x = cx + tol if new_x >= cx else cx - tol
+                shifted = True
+                break
+        for cy in self.avoid_crack_y:
+            if abs(new_y - cy) <= tol:
+                new_y = cy + tol if new_y >= cy else cy - tol
+                shifted = True
+                break
+        return new_x, new_y, shifted
     def _probe_state_error(self):
         raise self.printer.command_error(
             "Internal probe error - start/end probe session mismatch")
@@ -391,6 +414,24 @@ class ProbeSessionHelper:
         sample_count = params['samples']
         speed = params['probe_speed']
         sample_retract_dist = params['sample_retract_dist']
+        # 裂缝避让: 检查当前位置并偏移
+        crack_shifted = False
+        orig_nozzle_x = orig_nozzle_y = 0.
+        probe_obj = self.printer.lookup_object('probe', None)
+        if probe_obj is not None:
+            cur_pos = self.toolhead.get_position()
+            orig_nozzle_x, orig_nozzle_y = cur_pos[0], cur_pos[1]
+            x_off, y_off, _ = probe_obj.get_offsets()
+            bed_x, bed_y = orig_nozzle_x + x_off, orig_nozzle_y + y_off
+            new_bx, new_by, crack_shifted = self._apply_crack_shift(
+                bed_x, bed_y)
+            if crack_shifted:
+                gcmd.respond_info(
+                    "crack avoidance: shift from (%.1f,%.1f) to (%.1f,%.1f)"
+                    % (bed_x, bed_y, new_bx, new_by))
+                self.toolhead.manual_move(
+                    [new_bx - x_off, new_by - y_off, None], speed)
+                self.toolhead.wait_moves()
         while len(positions) < sample_count:
             # speed/retract for first probe is greater then for the rest
             probe_speed = speed if bFirst else speed / 2
@@ -465,6 +506,9 @@ class ProbeSessionHelper:
                             gcmd.respond_info("Tare weight is too large, reset tare weight")
 
                         pos[2] = estZ
+                        if crack_shifted:
+                            pos[0] = orig_nozzle_x
+                            pos[1] = orig_nozzle_y
                         self.results.append(pos)
                         gcmd.respond_info("probe at %.3f,%.3f is z=%.4f, verify by HX71X"% (pos[0], pos[1], pos[2]))
 
@@ -523,6 +567,9 @@ class ProbeSessionHelper:
                 self.toolhead.wait_moves()
         # Calculate result
         epos = calc_probe_z_average(positions, params['samples_result'])
+        if crack_shifted:
+            epos[0] = orig_nozzle_x
+            epos[1] = orig_nozzle_y
         self.results.append(epos)
     def pull_probed_results(self):
         res = self.results
