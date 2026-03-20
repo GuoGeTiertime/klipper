@@ -297,6 +297,8 @@ class ProbeSessionHelper:
         self.avoid_crack_y = config.getfloatlist('avoid_crack_y', [])
         self.avoid_crack_tolerance = config.getfloat(
             'avoid_crack_tolerance', 5., above=0.)
+        self.crack_shift_speed = config.getfloat(
+            'crack_shift_speed', 100., above=0.)
 
         # # Register z_virtual_endstop pin
         # self.printer.lookup_object('pins').register_chip('probe', self)
@@ -366,13 +368,16 @@ class ProbeSessionHelper:
         samples_retries = gcmd.get_int("SAMPLES_TOLERANCE_RETRIES",
                                        self.samples_retries, minval=0)
         samples_result = gcmd.get("SAMPLES_RESULT", self.samples_result)
+        crack_shift_speed = gcmd.get_float(
+            "CRACK_SHIFT_SPEED", self.crack_shift_speed, above=0.)
         return {'probe_speed': probe_speed,
                 'lift_speed': lift_speed,
                 'samples': samples,
                 'sample_retract_dist': sample_retract_dist,
                 'samples_tolerance': samples_tolerance,
                 'samples_tolerance_retries': samples_retries,
-                'samples_result': samples_result}
+                'samples_result': samples_result,
+                'crack_shift_speed': crack_shift_speed}
     def _probe(self, speed):
         toolhead = self.printer.lookup_object('toolhead')
         curtime = self.printer.get_reactor().monotonic()
@@ -430,7 +435,8 @@ class ProbeSessionHelper:
                     "crack avoidance: shift from (%.1f,%.1f) to (%.1f,%.1f)"
                     % (bed_x, bed_y, new_bx, new_by))
                 self.toolhead.manual_move(
-                    [new_bx - x_off, new_by - y_off, None], speed)
+                    [new_bx - x_off, new_by - y_off, None],
+                    params['crack_shift_speed'])
                 self.toolhead.wait_moves()
         while len(positions) < sample_count:
             # speed/retract for first probe is greater then for the rest
