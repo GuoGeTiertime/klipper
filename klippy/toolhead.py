@@ -316,6 +316,7 @@ class ToolHead:
         # add by guoge, 20240705, add for backlash compensation
         self.xbacklash = config.getfloat('x_backlash', default=0.00, minval=0.)
         self.ybacklash = config.getfloat('y_backlash', default=0.00, minval=0.)
+        self.enable_backlash = self.xbacklash > 0.0 or self.ybacklash > 0.0
         self.xbacklash_threshold = config.getfloat('x_backlash_threshold', default=self.xbacklash*0.5, minval=0.)
         self.ybacklash_threshold = config.getfloat('y_backlash_threshold', default=self.ybacklash*0.5, minval=0.)
         self.backlash_lenscale = config.getfloat('backlash_lenscale', default=5.0, above=0.1)
@@ -519,7 +520,7 @@ class ToolHead:
     def move(self, newpos, speed):
         #add by guoge, 20240705, add backlash compensation
         targetpos = newpos[:]
-        if self.special_queuing_state != "Drip":
+        if self.special_queuing_state != "Drip" and self.enable_backlash:
             self.xdir, self.x_backlash_extremum = self.cal_dir_extremum(self.xdir, self.x_backlash_extremum, newpos[0], self.xbacklash_threshold)
             self.ydir, self.y_backlash_extremum = self.cal_dir_extremum(self.ydir, self.y_backlash_extremum, newpos[1], self.ybacklash_threshold)
             # is rollback? if dir==1, target should add backlash, else dir==0, backlash is 0
