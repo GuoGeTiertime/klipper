@@ -290,6 +290,10 @@ class VirtualSD:
                 z_position = pos[2] if len(pos) > 2 else 0.0
                 
                 self.load_file_path = os.path.basename(file_path) if file_path else None
+                if not self.load_file_path:
+                    gcmd.respond_info("没有找到断电恢复数据")
+                    self.gcode.run_script_from_command("SAVE_VARIABLE VARIABLE=has_power_loss VALUE=0")
+                    return
 
                 gcmd.respond_info("发现断电恢复数据:")
                 gcmd.respond_info("  文件: %s" % file_path)
