@@ -196,32 +196,31 @@ class ZTilt:
             # Z stepper0 ----> O                             O <---- Z stepper3
             # verify steppers position, steppers 0/3 and 1/2 are on the same X coordinate.
             if abs(positions[0][0] - positions[3][0]) > 1 or abs(positions[1][0] - positions[2][0]) > 1:
-                raise error("Steppers 0/3 and 1/2 are not on the same X coordinate. Please check z_tilt config for quad gantry.")
-            
-            totalz = 0
-            for pos in positions:
-                totalz += pos[2]
-            averagez = totalz / len(positions)
-
-            # calc stepper0 / stepper3 adjustment.
-            def adjustfunc(y0, z0, y1, z1, y2):
-                k = (z1-z0) / (y1-y0)
-                adj = (y2-y0) * k + z0
-                return adj
-            adjustments[0] = adjustfunc( positions[0][1], positions[0][2], positions[3][1], positions[3][2], self.z_positions[0][1])
-            adjustments[1] = adjustfunc( positions[1][1], positions[1][2], positions[2][1], positions[2][2], self.z_positions[1][1])
-            adjustments[2] = adjustfunc( positions[1][1], positions[1][2], positions[2][1], positions[2][2], self.z_positions[2][1])
-            adjustments[3] = adjustfunc( positions[0][1], positions[0][2], positions[3][1], positions[3][2], self.z_positions[3][1])
-            logging.info("Calculating quad gantry adjustment: %.4f, %4f, %.4f, %4f", adjustments[0], adjustments[1], adjustments[2], adjustments[3] )
-
-            # adjustments = [ -(averagez - pos[2]) * 1.5
-            #                for pos in positions]
+                # Fallback for non-quad-gantry-like layouts: assume each probe
+                # point maps directly to a single Z stepper with no coupling.
+                adjustments[0] = positions[0][2]
+                adjustments[1] = positions[1][2]
+                adjustments[2] = positions[2][2]
+                adjustments[3] = positions[3][2]
+                logging.info("Calculating 4-point fallback adjustment: %.4f, %.4f, %.4f, %.4f",
+                             adjustments[0], adjustments[1], adjustments[2], adjustments[3])
+            else:
+                # calc stepper0 ~ stepper3 adjustment.
+                def adjustfunc(y0, z0, y1, z1, y2):
+                    k = (z1-z0) / (y1-y0)
+                    adj = (y2-y0) * k + z0
+                    return adj
+                adjustments[0] = adjustfunc( positions[0][1], positions[0][2], positions[3][1], positions[3][2], self.z_positions[0][1])
+                adjustments[1] = adjustfunc( positions[1][1], positions[1][2], positions[2][1], positions[2][2], self.z_positions[1][1])
+                adjustments[2] = adjustfunc( positions[1][1], positions[1][2], positions[2][1], positions[2][2], self.z_positions[2][1])
+                adjustments[3] = adjustfunc( positions[0][1], positions[0][2], positions[3][1], positions[3][2], self.z_positions[3][1])
+                logging.info("Calculating quad gantry adjustment: %.4f, %.4f, %.4f, %.4f", adjustments[0], adjustments[1], adjustments[2], adjustments[3] )
 
         self.z_helper.adjust_steppers(adjustments, speed)
         return self.z_status.check_retry_result(
             self.retry_helper.check_retry([p[2] for p in positions]))
     def get_status(self, eventtime):
-            return self.z_status.get_status(eventtime)
+        return self.z_status.get_status(eventtime)
 
 def load_config(config):
     return ZTilt(config)
