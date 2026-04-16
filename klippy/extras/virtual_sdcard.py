@@ -223,15 +223,15 @@ class VirtualSD:
             gcode_state = saved_data.get('gcode_state')
 
             # 保存XYZE位置到变量中
-            pos = gcode_state.get('position', [0.0, 0.0, 0.0, 0.0])
-            # pos = gcode_state.get('gcode_position', [0.0, 0.0, 0.0, 0.0])
+            # pos = gcode_state.get('position', [0.0, 0.0, 0.0, 0.0])
+            pos = gcode_state.get('gcode_position', [0.0, 0.0, 0.0, 0.0])
             self.gcode.run_script_from_command("SAVE_VARIABLE VARIABLE=power_loss_x VALUE=%f" % pos[0])
             self.gcode.run_script_from_command("SAVE_VARIABLE VARIABLE=power_loss_y VALUE=%f" % pos[1])
             self.gcode.run_script_from_command("SAVE_VARIABLE VARIABLE=power_loss_z VALUE=%f" % pos[2])
             self.gcode.run_script_from_command("SAVE_VARIABLE VARIABLE=power_loss_e VALUE=%f" % pos[3])
             #保存坐标系设置
             self.gcode.run_script_from_command("SAVE_VARIABLE VARIABLE=power_loss_coord VALUE=%d" % (1 if gcode_state.get('absolute_coordinates', False) else 0,))
-            self.gcode.run_script_from_command("SAVE_VARIABLE VARIABLE=power_loss_extrude VALUE=%d" % (1 if gcode_state.get('absolute_extrude', False) else 0,))
+            self.gcode.run_script_from_command("SAVE_VARIABLE VARIABLE=power_loss_extruder VALUE=%d" % (1 if gcode_state.get('absolute_extrude', False) else 0,))
 
             self.load_file_position = file_position
             gcmd.respond_info("开始恢复打印: %s, pos: %d" % (self.load_file_path, self.load_file_position))
