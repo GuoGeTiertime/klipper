@@ -508,8 +508,9 @@ class ProbeSessionHelper:
                         if abs(self.hx71x.curTriggerTareWeight) > ( 1.0 * self.hx71x.endstop_threshold):
                             time.sleep(0.5)
                             self.hx71x.cmd_TARE_WEIGHT(" ")
-                            time.sleep(0.5)
+                            time.sleep(1.0)
                             gcmd.respond_info("Tare weight is too large, reset tare weight")
+                            break #退出循环,重新测量.
 
                         pos[2] = estZ
                         if crack_shifted:
