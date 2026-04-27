@@ -21,11 +21,15 @@ AHT10_COMMANDS = {
     'RESET'             :[0xBA, 0x08, 0x00]
 }
 
+# AHT20/AHT21 init command (datasheet / ESPHome); measure/reset same as AHT10.
+AHT2X_INIT = [0xBE, 0x08, 0x00]
+
 AHT10_MAX_BUSY_CYCLES= 5
 
 class AHT10:
     def __init__(self, config):
         self.printer = config.get_printer()
+        self.chip = config.get('sensor_type')
         self.name = config.get_name().split()[-1]
         self.reactor = self.printer.get_reactor()
         self.i2c = bus.MCU_I2C_from_config(
@@ -91,8 +95,12 @@ class AHT10:
                                     " expected 6 [%d]"%len(data))
                     continue
 
-                self.is_calibrated = True if (data[0] & 0b00000100) else False
-                is_busy = True if (data[0] & 0b01000000) else False
+                if self.chip in ("AHT20", "AHT21"):
+                    self.is_calibrated = bool(data[0] & 0x08)
+                    is_busy = bool(data[0] & 0x80)
+                else:
+                    self.is_calibrated = True if (data[0] & 0b00000100) else False
+                    is_busy = True if (data[0] & 0b01000000) else False
 
             if is_busy:
                 return False
@@ -124,8 +132,9 @@ class AHT10:
         self.reactor.pause(self.reactor.monotonic() + .10)
 
     def _init_aht10(self):
-        # Init device
-        self.i2c.i2c_write(AHT10_COMMANDS['INIT'])
+        # Init device (AHT20/AHT21 use 0xBE per datasheet)
+        init_cmd = AHT2X_INIT if self.chip in ("AHT20", "AHT21") else AHT10_COMMANDS['INIT']
+        self.i2c.i2c_write(init_cmd)
         # Wait 100ms after init
         self.reactor.pause(self.reactor.monotonic() + .10)
         self.init_sent = True
@@ -141,8 +150,8 @@ class AHT10:
 
         if self.temp < self.min_temp or self.temp > self.max_temp:
             self.printer.invoke_shutdown(
-                "AHT10 temperature %0.1f outside range of %0.1f:%.01f"
-                % (self.temp, self.min_temp, self.max_temp))
+                "%s temperature %0.1f outside range of %0.1f:%.01f"
+                % (self.chip, self.temp, self.min_temp, self.max_temp))
 
         measured_time = self.reactor.monotonic()
         print_time = self.i2c.get_mcu().estimated_print_time(measured_time)
@@ -159,4 +168,5 @@ class AHT10:
 def load_config(config):
     # Register sensor
     pheater = config.get_printer().lookup_object("heaters")
-    pheater.add_sensor_factory("AHT10", AHT10)
+    for stype in ("AHT10", "AHT20", "AHT21"):
+        pheater.add_sensor_factory(stype, AHT10)
