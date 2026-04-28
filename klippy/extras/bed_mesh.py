@@ -85,6 +85,10 @@ def parse_gcmd_coord(gcmd, name):
 
 class BedMesh:
     FADE_DISABLE = 0x7FFFFFFF
+    TILE_SCREW_THREADS = {'CW-M3': 0, 'CCW-M3': 1, 'CW-M4': 2, 'CCW-M4': 3,
+                          'CW-M5': 4, 'CCW-M5': 5, 'CW-M6': 6, 'CCW-M6': 7}
+    TILE_THREAD_FACTORS = {0: 0.5, 1: 0.5, 2: 0.7, 3: 0.7,
+                           4: 0.8, 5: 0.8, 6: 1.0, 7: 1.0}
     def __init__(self, config):
         self.printer = config.get_printer()
         self.printer.register_event_handler("klippy:connect",
@@ -120,6 +124,13 @@ class BedMesh:
         self.save_profile = self.pmgr.save_profile
         self.verify_result = "none"
         self.max_diff = 0.0
+        self.tile_config = self._load_tile_adjust_config(config)
+        self.tile_adjust_results = {}
+        self.tile_adjust_points = []
+        self.tile_adjust_context = {}
+        self.tile_probe_helper = probe.ProbePointsHelper(
+            config, self.tile_adjust_finalize, [(0., 0.), (1., 0.), (0., 1.)])
+        self.tile_probe_helper.use_xy_offsets(True)
         # register gcodes
         self.gcode.register_command(
             'BED_MESH_OUTPUT', self.cmd_BED_MESH_OUTPUT,
@@ -136,6 +147,9 @@ class BedMesh:
         self.gcode.register_command(
             'BED_MESH_CHECK', self.cmd_BED_MESH_CHECK,
             desc=self.cmd_BED_MESH_CHECK_help)
+        self.gcode.register_command(
+            'BED_MESH_TILE_ADJUST', self.cmd_BED_MESH_TILE_ADJUST,
+            desc=self.cmd_BED_MESH_TILE_ADJUST_help)
         self.gcode.register_command(
             'BED_MESH_SAVE', self.cmd_BED_MESH_SAVE,
             desc=self.cmd_BED_MESH_SAVE_help)
@@ -264,7 +278,8 @@ class BedMesh:
             # 新增：基准mesh数据字段
             "base_mesh": None,               # 基准mesh数据，包含完整的mesh信息
             "base_check": self.base_check,   # base mesh检查状态
-            "base_mesh_temp": self.base_mesh_temp
+            "base_mesh_temp": self.base_mesh_temp,
+            "tile_adjust_results": self.tile_adjust_results
         }
         
         if self.z_mesh is not None:
@@ -319,8 +334,38 @@ class BedMesh:
                 self.status['base_mesh'] = None
         else:
             self.status['base_mesh'] = None
+        self.status['tile_adjust_results'] = self.tile_adjust_results
     def get_mesh(self):
         return self.z_mesh
+    def _load_tile_adjust_config(self, config):
+        tile_count = parse_config_pair(config, 'tile_count', 1, minval=1)
+        mesh_min = config.getfloatlist(
+            'tile_mesh_min', self.bmc.orig_config['mesh_min'], count=2)
+        mesh_max = config.getfloatlist(
+            'tile_mesh_max', self.bmc.orig_config['mesh_max'], count=2)
+        if mesh_max[0] <= mesh_min[0] or mesh_max[1] <= mesh_min[1]:
+            raise config.error("bed_mesh: invalid tile_mesh_min/tile_mesh_max")
+        screw_inset = config.getfloat('tile_screw_inset', 0., minval=0.)
+        reference = config.get('tile_reference', 'average').strip().lower()
+        if reference not in ['first', 'highest', 'lowest', 'average']:
+            raise config.error(
+                "bed_mesh: tile_reference must be first, highest, lowest, "
+                "or average")
+        screw_thread = config.get('tile_screw_thread', 'CW-M3').strip().upper()
+        if screw_thread not in self.TILE_SCREW_THREADS:
+            raise config.error(
+                "bed_mesh: unsupported tile_screw_thread '%s'"
+                % (screw_thread,))
+        max_deviation = config.getfloat('tile_max_deviation', None, minval=0.)
+        return {
+            'tile_count': tile_count,
+            'mesh_min': mesh_min,
+            'mesh_max': mesh_max,
+            'screw_inset': screw_inset,
+            'reference': reference,
+            'screw_thread': screw_thread,
+            'max_deviation': max_deviation
+        }
     
     def clear_base_mesh(self):
         """清理基准mesh数据"""
@@ -363,6 +408,190 @@ class BedMesh:
         else:
             self.set_mesh(None)
             gcmd.respond_info("Current mesh cleared")
+    cmd_BED_MESH_TILE_ADJUST_help = "Measure tiled bed plates and report corner screw adjustments"
+    def cmd_BED_MESH_TILE_ADJUST(self, gcmd):
+        """测量由多块小底板组成的大底板，并输出每块四角调整建议。"""
+        if self.bmc.orig_config['radius'] is not None:
+            raise gcmd.error(
+                "BED_MESH_TILE_ADJUST only supports rectangular beds")
+        params = gcmd.get_command_parameters()
+        if "TILE_COUNT" in params:
+            tile_count = parse_gcmd_pair(gcmd, 'TILE_COUNT', minval=1)
+        else:
+            tile_count = self.tile_config['tile_count']
+        if "MESH_MIN" in params:
+            mesh_min = parse_gcmd_coord(gcmd, 'MESH_MIN')
+        else:
+            mesh_min = self.tile_config['mesh_min']
+        if "MESH_MAX" in params:
+            mesh_max = parse_gcmd_coord(gcmd, 'MESH_MAX')
+        else:
+            mesh_max = self.tile_config['mesh_max']
+        if mesh_max[0] <= mesh_min[0] or mesh_max[1] <= mesh_min[1]:
+            raise gcmd.error("BED_MESH_TILE_ADJUST: invalid MESH_MIN/MESH_MAX")
+        screw_inset = gcmd.get_float(
+            'SCREW_INSET', self.tile_config['screw_inset'], minval=0.)
+        reference = gcmd.get(
+            'REFERENCE', self.tile_config['reference']).strip().lower()
+        if reference not in ['first', 'highest', 'lowest', 'average']:
+            raise gcmd.error(
+                "BED_MESH_TILE_ADJUST: REFERENCE must be first, highest, "
+                "lowest, or average")
+        screw_thread = gcmd.get(
+            'SCREW_THREAD', self.tile_config['screw_thread']).strip().upper()
+        if screw_thread not in self.TILE_SCREW_THREADS:
+            raise gcmd.error(
+                "BED_MESH_TILE_ADJUST: unsupported SCREW_THREAD '%s'"
+                % (screw_thread,))
+        max_deviation = gcmd.get_float(
+            'MAX_DEVIATION', self.tile_config['max_deviation'], minval=0.)
+        points, point_map = self._generate_tile_adjust_points(
+            tile_count, mesh_min, mesh_max, screw_inset, gcmd.error)
+        self.tile_adjust_points = point_map
+        self.tile_adjust_context = {
+            'tile_count': tile_count,
+            'mesh_min': mesh_min,
+            'mesh_max': mesh_max,
+            'screw_inset': screw_inset,
+            'reference': reference,
+            'screw_thread': screw_thread,
+            'max_deviation': max_deviation
+        }
+        self.tile_probe_helper.update_probe_points(points, 3)
+        gcmd.respond_info(
+            "bed_mesh: generated %d tile adjust points for %dx%d tiles"
+            % (len(points), tile_count[0], tile_count[1]))
+        self.tile_probe_helper.start_probe(gcmd)
+    def _generate_tile_adjust_points(self, tile_count, mesh_min, mesh_max,
+                                     screw_inset, error):
+        x_tiles, y_tiles = tile_count
+        min_x, min_y = mesh_min
+        max_x, max_y = mesh_max
+        tile_w = (max_x - min_x) / x_tiles
+        tile_h = (max_y - min_y) / y_tiles
+        if screw_inset * 2. >= min(tile_w, tile_h):
+            raise error(
+                "BED_MESH_TILE_ADJUST: SCREW_INSET is too large for tile size")
+        points = []
+        point_map = []
+        corners = [
+            ('front_left', 0, 0),
+            ('front_right', 1, 0),
+            ('rear_right', 1, 1),
+            ('rear_left', 0, 1)
+        ]
+        for row in range(y_tiles):
+            y0 = min_y + row * tile_h + screw_inset
+            y1 = min_y + (row + 1) * tile_h - screw_inset
+            for col in range(x_tiles):
+                x0 = min_x + col * tile_w + screw_inset
+                x1 = min_x + (col + 1) * tile_w - screw_inset
+                for corner, x_side, y_side in corners:
+                    x = x1 if x_side else x0
+                    y = y1 if y_side else y0
+                    points.append((x, y))
+                    point_map.append({
+                        'tile': 'tile_%d_%d' % (row + 1, col + 1),
+                        'row': row + 1,
+                        'column': col + 1,
+                        'corner': corner,
+                        'x': x,
+                        'y': y
+                    })
+        return points, point_map
+    def tile_adjust_finalize(self, offsets, positions):
+        if len(positions) != len(self.tile_adjust_points):
+            raise self.gcode.error(
+                "BED_MESH_TILE_ADJUST: invalid probed point count")
+        z_values = [pos[2] for pos in positions]
+        reference = self.tile_adjust_context['reference']
+        if reference == 'first':
+            target_z = z_values[0]
+        elif reference == 'highest':
+            target_z = max(z_values)
+        elif reference == 'lowest':
+            target_z = min(z_values)
+        else:
+            target_z = sum(z_values) / len(z_values)
+        tiles = collections.OrderedDict()
+        max_deviation = 0.
+        for info, pos in zip(self.tile_adjust_points, positions):
+            z = pos[2]
+            delta = target_z - z
+            max_deviation = max(max_deviation, abs(delta))
+            adjust = self._format_tile_screw_adjust(
+                delta, self.tile_adjust_context['screw_thread'])
+            point = {
+                'corner': info['corner'],
+                'x': round(info['x'], 3),
+                'y': round(info['y'], 3),
+                'z': round(z, 6),
+                'adjust_mm': round(delta, 6),
+                'direction': 'raise' if delta >= 0. else 'lower',
+                'turn_direction': adjust['sign'],
+                'turns': adjust['turns']
+            }
+            tile = tiles.setdefault(info['tile'], {
+                'tile': info['tile'],
+                'row': info['row'],
+                'column': info['column'],
+                'points': []
+            })
+            tile['points'].append(point)
+        for tile in tiles.values():
+            tile_z = [p['z'] for p in tile['points']]
+            tile['average_z'] = round(sum(tile_z) / len(tile_z), 6)
+            tile['range'] = round(max(tile_z) - min(tile_z), 6)
+            tile['average_adjust_mm'] = round(target_z - tile['average_z'], 6)
+        results = {
+            'target_z': round(target_z, 6),
+            'reference': reference,
+            'max_deviation': round(max_deviation, 6),
+            'screw_thread': self.tile_adjust_context['screw_thread'],
+            'tile_count': self.tile_adjust_context['tile_count'],
+            'tiles': list(tiles.values())
+        }
+        self.tile_adjust_results = results
+        self.update_status()
+        self._report_tile_adjust_results(results)
+        limit = self.tile_adjust_context['max_deviation']
+        if limit is not None and max_deviation > limit:
+            raise self.gcode.error(
+                "tile bed level exceeds configured limits (%.4fmm)"
+                % (limit,))
+    def _format_tile_screw_adjust(self, delta, screw_thread):
+        thread = self.TILE_SCREW_THREADS[screw_thread]
+        factor = self.TILE_THREAD_FACTORS[thread]
+        is_clockwise_thread = (thread & 1) == 0
+        adjust = 0. if abs(delta) < 0.001 else delta / factor
+        if is_clockwise_thread:
+            sign = "CW" if adjust >= 0. else "CCW"
+        else:
+            sign = "CCW" if adjust >= 0. else "CW"
+        adjust = abs(adjust)
+        full_turns = math.trunc(adjust)
+        minutes = int(round((adjust - full_turns) * 60., 0))
+        if minutes >= 60:
+            full_turns += 1
+            minutes = 0
+        return {'sign': sign, 'turns': "%02d:%02d" % (full_turns, minutes)}
+    def _report_tile_adjust_results(self, results):
+        self.gcode.respond_info(
+            "=== Bed Mesh Tile Adjust ===\n"
+            "reference=%s target_z=%.5f max_deviation=%.5f screw_thread=%s"
+            % (results['reference'], results['target_z'],
+               results['max_deviation'], results['screw_thread']))
+        for tile in results['tiles']:
+            self.gcode.respond_info(
+                "tile row=%d column=%d average_z=%.5f range=%.5f"
+                % (tile['row'], tile['column'],
+                   tile['average_z'], tile['range']))
+            for point in tile['points']:
+                self.gcode.respond_info(
+                    "  %s: x=%.1f y=%.1f z=%.5f %s %.5fmm adjust %s %s"
+                    % (point['corner'], point['x'], point['y'], point['z'],
+                       point['direction'], abs(point['adjust_mm']),
+                       point['turn_direction'], point['turns']))
     cmd_BED_MESH_OFFSET_help = "Add X/Y offsets to the mesh lookup"
     def cmd_BED_MESH_OFFSET(self, gcmd):
         if self.z_mesh is not None:

@@ -1,0 +1,12 @@
+# Test case for tiled bed plate adjustment helper
+CONFIG bltouch.cfg
+DICTIONARY atmega2560.dict
+
+# Start by homing the printer.
+G28
+
+# Measure a 2x2 tiled bed and calculate corner screw adjustments.
+BED_MESH_TILE_ADJUST TILE_COUNT=2,2 SCREW_INSET=5 MAX_DEVIATION=10
+
+# Also verify the command can run from the default config values.
+BED_MESH_TILE_ADJUST MAX_DEVIATION=10
