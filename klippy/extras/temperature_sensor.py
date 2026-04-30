@@ -32,11 +32,24 @@ class PrinterSensorGeneric:
     def stats(self, eventtime):
         return False, '%s: temp=%.1f' % (self.name, self.last_temp)
     def get_status(self, eventtime):
-        return {
+        status = {
             'temperature': round(self.last_temp, 2),
             'measured_min_temp': round(self.measured_min, 2),
             'measured_max_temp': round(self.measured_max, 2)
         }
+        # Pass-through extra environmental fields from underlying sensor
+        # (for example humidity/pressure/gas on AHT/BME/HTU/SHT sensors).
+        try:
+            sensor_status = self.sensor.get_status(eventtime)
+            if isinstance(sensor_status, dict):
+                for key in ('humidity', 'pressure', 'gas'):
+                    if key in sensor_status:
+                        status[key] = sensor_status[key]
+        except Exception:
+            # Keep generic temperature_sensor status robust even if a specific
+            # sensor implementation raises an exception in get_status().
+            pass
+        return status
 
 def load_config_prefix(config):
     return PrinterSensorGeneric(config)
