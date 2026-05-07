@@ -279,6 +279,16 @@ class VirtualSD:
     def cmd_QUERY_POWER_LOSS(self, gcmd):
         """Query whether power-loss recovery data exists"""
         self.load_file_path = None
+        # 仅当 has_power_loss == 1 时，才输出断电续打发现信息
+        try:
+            sv = self.printer.lookup_object('save_variables', None)
+            variables = getattr(sv, 'allVariables', {}) if sv is not None else {}
+            has_power_loss = 1 if int(variables.get('has_power_loss', 0)) == 1 else 0
+        except Exception:
+            has_power_loss = 0
+        if has_power_loss != 1:
+            gcmd.respond_info("No power-loss recovery data")
+            return
         if os.path.exists(self.power_loss_file):
             try:
                 with open(self.power_loss_file, 'r', encoding='utf-8') as f:
