@@ -35,7 +35,7 @@ class VirtualSD:
         self.on_error_gcode = gcode_macro.load_template(
             config, 'on_error_gcode', DEFAULT_ERROR_GCODE)
         # 文件位置保存配置
-        self.power_loss_file = os.path.join(self.sdcard_dirname, "print_position.json")  # 保存文件路径
+        self.power_loss_file = "/home/tier/printer_data/logs/print_position.json"  # 保存文件路径（固定到日志目录）
         self.save_interval = 100  # 每100行保存一次
         self.save_count = 0  # 保存计数
         self.count_line = 0  # 行计数器，用于保存间隔判断
@@ -200,14 +200,14 @@ class VirtualSD:
     #             pass
     #         self.work_timer = None
 
-    cmd_POWER_LOSS_RESUME_help = "恢复断电前的打印"
+    cmd_POWER_LOSS_RESUME_help = "Resume printing after power loss"
     def cmd_POWER_LOSS_RESUME(self, gcmd):
-        """恢复断电前的打印"""
+        """Resume printing after power loss"""
         if self.is_active():
-            raise gcmd.error("打印正在进行中，无法恢复")
+            raise gcmd.error("A print is already in progress; cannot resume")
         
         if not os.path.exists(self.power_loss_file):
-            raise gcmd.error("没有找到断电恢复数据")
+            raise gcmd.error("No power-loss recovery data found")
 
         try:
             with open(self.power_loss_file, 'r', encoding='utf-8') as f:
@@ -216,7 +216,7 @@ class VirtualSD:
                     saved_data = json.load(f)
                 except json.JSONDecodeError as e:
                     # JSON 解析失败，可能是文件不完整
-                    raise gcmd.error("断电恢复数据文件损坏（可能是断电时写入不完整）：%s" % str(e))
+                    raise gcmd.error("Power-loss recovery data is corrupted (possibly incomplete due to power cut): %s" % str(e))
             
             file_path = str(saved_data.get('file_path', ''))
             file_position = saved_data.get('file_position')
@@ -234,7 +234,7 @@ class VirtualSD:
             self.gcode.run_script_from_command("SAVE_VARIABLE VARIABLE=power_loss_extruder VALUE=%d" % (1 if gcode_state.get('absolute_extrude', False) else 0,))
 
             self.load_file_position = file_position
-            gcmd.respond_info("开始恢复打印: %s, pos: %d" % (self.load_file_path, self.load_file_position))
+            gcmd.respond_info("Starting power-loss resume: %s, pos: %d" % (self.load_file_path, self.load_file_position))
 
             filename = os.path.basename(file_path)
             self._load_file(gcmd, filename)
@@ -243,20 +243,20 @@ class VirtualSD:
             self.print_stats.note_start()
             
         except Exception as e:
-            logging.exception("恢复打印失败: %s" % e)
+            logging.exception("Failed to resume print: %s" % e)
             # 确保打印状态被取消
             try:
                 if self.print_stats:
                     self.print_stats.note_cancel()
             except:
                 pass
-            raise gcmd.error("恢复打印失败: %s" % str(e))
+            raise gcmd.error("Failed to resume print: %s" % str(e))
     
-    cmd_STOP_PRINT_ERROR_help = "触发 error 停止打印（保留状态）"
+    cmd_STOP_PRINT_ERROR_help = "Trigger an error to stop printing (keep state)"
     def cmd_STOP_PRINT_ERROR(self, gcmd):
-        """触发 error 停止打印（保留状态）"""
+        """Trigger an error to stop printing (keep state)"""
         if not self.is_active():
-            gcmd.respond_info("没有正在进行的打印任务")
+            gcmd.respond_info("No active print job")
             return
         
         error_msg = gcmd.get("MSG", "Print stopped by STOP_PRINT_ERROR command")
@@ -267,17 +267,17 @@ class VirtualSD:
         # 设置 must_pause_work 标志，让 work_handler 退出
         self.must_pause_work = True
         
-        gcmd.respond_info("已触发 error 停止打印: %s" % error_msg)
+        gcmd.respond_info("Triggered error stop: %s" % error_msg)
 
-    cmd_POWER_LOSS_WORK_HANDLER_help = "启动断电恢复工作处理"
+    cmd_POWER_LOSS_WORK_HANDLER_help = "Start power-loss recovery work handler"
     def cmd_POWER_LOSS_WORK_HANDLER(self, gcmd):
         self.must_pause_work = False
         self.work_timer = self.reactor.register_timer(
             self.work_handler, self.reactor.monotonic() + 0.1)
 
-    cmd_QUERY_POWER_LOSS_help = "查询是否有断电恢复数据"
+    cmd_QUERY_POWER_LOSS_help = "Query whether power-loss recovery data exists"
     def cmd_QUERY_POWER_LOSS(self, gcmd):
-        """查询是否有断电恢复数据"""
+        """Query whether power-loss recovery data exists"""
         self.load_file_path = None
         if os.path.exists(self.power_loss_file):
             try:
@@ -291,18 +291,18 @@ class VirtualSD:
                 
                 self.load_file_path = os.path.basename(file_path) if file_path else None
                 if not self.load_file_path:
-                    gcmd.respond_info("没有找到断电恢复数据")
+                    gcmd.respond_info("No power-loss recovery data found")
                     self.gcode.run_script_from_command("SAVE_VARIABLE VARIABLE=has_power_loss VALUE=0")
                     return
 
-                gcmd.respond_info("发现断电恢复数据:")
-                gcmd.respond_info("  文件: %s" % file_path)
-                gcmd.respond_info("  位置: %d 字节" % (file_position,))
-                gcmd.respond_info("  Z位置: %.2f mm" % z_position)
+                gcmd.respond_info("Power-loss recovery data found:")
+                gcmd.respond_info("  File: %s" % file_path)
+                gcmd.respond_info("  Position: %d bytes" % (file_position,))
+                gcmd.respond_info("  Z position: %.2f mm" % z_position)
             except Exception as e:
-                gcmd.respond_info("读取断电恢复数据失败: %s" % str(e))
+                gcmd.respond_info("Failed to read power-loss recovery data: %s" % str(e))
         else:
-            gcmd.respond_info("没有断电恢复数据")
+            gcmd.respond_info("No power-loss recovery data")
     
     # G-Code commands
     def cmd_error(self, gcmd):
