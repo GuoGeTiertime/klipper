@@ -200,6 +200,23 @@ class VirtualSD:
     #             pass
     #         self.work_timer = None
 
+    def _open_resume_file_absolute(self, gcmd, abs_path):
+        """直接用 JSON 中的绝对路径打开 G-code（与 print_position.json 中 file_path 一致）。"""
+        abs_path = os.path.normpath(abs_path)
+        f = io.open(abs_path, 'r', newline='')
+        f.seek(0, os.SEEK_END)
+        fsize = f.tell()
+        f.seek(0)
+        bn = os.path.basename(abs_path)
+        gcmd.respond_raw("File opened:%s Size:%d" % (bn, fsize))
+        gcmd.respond_raw("File selected")
+        self.current_file = f
+        self.file_position = 0
+        self.file_size = fsize
+        self.print_stats.set_current_file(bn)
+        if self.gcode_move is None:
+            self.gcode_move = self.printer.lookup_object('gcode_move', None)
+
     cmd_POWER_LOSS_RESUME_help = "Resume printing after power loss"
     def cmd_POWER_LOSS_RESUME(self, gcmd):
         """Resume printing after power loss"""
@@ -234,12 +251,25 @@ class VirtualSD:
             self.gcode.run_script_from_command("SAVE_VARIABLE VARIABLE=power_loss_extruder VALUE=%d" % (1 if gcode_state.get('absolute_extrude', False) else 0,))
 
             self.load_file_position = file_position
-            gcmd.respond_info("Starting power-loss resume: %s, pos: %d" % (self.load_file_path, self.load_file_position))
+            abs_saved = os.path.normpath(str(file_path).strip()) if file_path else ""
+            if not abs_saved:
+                raise gcmd.error("Invalid saved file_path in recovery data")
+            if not os.path.isfile(abs_saved):
+                raise gcmd.error(
+                    "Saved G-code not found (only json file_path is used): %s"
+                    % (abs_saved,))
+            self.load_file_path = os.path.basename(abs_saved)
+            gcmd.respond_info(
+                "Starting power-loss resume: %s, pos: %d"
+                % (abs_saved, self.load_file_position))
+            try:
+                self._open_resume_file_absolute(gcmd, abs_saved)
+            except Exception as e:
+                logging.exception(
+                    "Open saved file_path failed: %s", abs_saved)
+                raise gcmd.error("Unable to open file: %s" % (str(e),))
 
-            filename = os.path.basename(file_path)
-            self._load_file(gcmd, filename)
             self.file_position = self.load_file_position
-            self.print_stats.set_current_file(filename)
             self.print_stats.note_start()
             
         except Exception as e:
