@@ -11,7 +11,7 @@
 
 import math
 
-def calc_skew_factor(ac, bd, ad):
+def calc_skew_factor(ac, bd):
     # side = math.sqrt(2*ac*ac + 2*bd*bd - 4*ad*ad) / 2.
     # return math.tan(math.pi/2 - math.acos(
     #     (ac*ac - side*side - ad*ad) / (2*side*ad)))
@@ -121,7 +121,7 @@ class PrinterSkew:
         ac = gcmd.get_float("AC", above=0.)
         bd = gcmd.get_float("BD", above=0.)
         ad = gcmd.get_float("AD", above=0.)
-        factor = calc_skew_factor(ac, bd, ad)
+        factor = calc_skew_factor(ac, bd)
         gcmd.respond_info("Calculated Skew: %.6f radians, %.2f degrees"
                           % (factor, math.degrees(factor)))
     cmd_SET_SKEW_help = "Set skew based on lengths of measured object"
@@ -137,7 +137,7 @@ class PrinterSkew:
                 try:
                     lengths = lengths.strip().split(",", 2)
                     lengths = [float(l.strip()) for l in lengths]
-                    if len(lengths) != 3:
+                    if len(lengths) != 2:
                         raise Exception
                 except Exception:
                     raise gcmd.error(
