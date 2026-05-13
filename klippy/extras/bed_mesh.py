@@ -83,6 +83,29 @@ def parse_gcmd_coord(gcmd, name):
     return v1, v2
 
 
+def _tile_screw_turns_human(turn_direction, turns_str):
+    # turns_str 格式 "NN:MM"：NN 为整圈数；MM 为不足一圈的小数部分按一圈=60
+    # 个“钟面分”刻度表示（与分针在钟面上占的角度比例一致，30 即半圈≈180°）。
+    try:
+        h, m = turns_str.split(':')
+        n_full = int(h)
+        clock_min = int(m)
+    except (ValueError, IndexError):
+        return ""
+    if n_full < 0 or clock_min < 0 or clock_min > 59:
+        return ""
+    rot_zh = "顺时针" if turn_direction == "CW" else "逆时针"
+    angle = (clock_min / 60.0) * 360.0
+    segs = []
+    if n_full:
+        segs.append("%d整圈" % n_full)
+    if clock_min:
+        segs.append("钟面%d分刻度(不足一圈，约%.0f°)" % (clock_min, angle))
+    if not segs:
+        segs.append("约0圈")
+    return "[%s；从螺丝头上方俯视，%s拧]" % ("，".join(segs), rot_zh)
+
+
 class BedMesh:
     FADE_DISABLE = 0x7FFFFFFF
     TILE_SCREW_THREADS = {'CW-M3': 0, 'CCW-M3': 1, 'CW-M4': 2, 'CCW-M4': 3,
@@ -346,11 +369,11 @@ class BedMesh:
         if mesh_max[0] <= mesh_min[0] or mesh_max[1] <= mesh_min[1]:
             raise config.error("bed_mesh: invalid tile_mesh_min/tile_mesh_max")
         screw_inset = config.getfloat('tile_screw_inset', 0., minval=0.)
-        reference = config.get('tile_reference', 'average').strip().lower()
-        if reference not in ['first', 'highest', 'lowest', 'average']:
+        reference = config.get('tile_reference', 'zero').strip().lower()
+        if reference not in ['first', 'highest', 'lowest', 'average', 'zero']:
             raise config.error(
                 "bed_mesh: tile_reference must be first, highest, lowest, "
-                "or average")
+                "average, or zero")
         screw_thread = config.get('tile_screw_thread', 'CW-M3').strip().upper()
         if screw_thread not in self.TILE_SCREW_THREADS:
             raise config.error(
@@ -433,10 +456,10 @@ class BedMesh:
             'SCREW_INSET', self.tile_config['screw_inset'], minval=0.)
         reference = gcmd.get(
             'REFERENCE', self.tile_config['reference']).strip().lower()
-        if reference not in ['first', 'highest', 'lowest', 'average']:
+        if reference not in ['first', 'highest', 'lowest', 'average', 'zero']:
             raise gcmd.error(
                 "BED_MESH_TILE_ADJUST: REFERENCE must be first, highest, "
-                "lowest, or average")
+                "lowest, average, or zero")
         screw_thread = gcmd.get(
             'SCREW_THREAD', self.tile_config['screw_thread']).strip().upper()
         if screw_thread not in self.TILE_SCREW_THREADS:
@@ -511,6 +534,8 @@ class BedMesh:
             target_z = max(z_values)
         elif reference == 'lowest':
             target_z = min(z_values)
+        elif reference == 'zero':
+            target_z = 0.
         else:
             target_z = sum(z_values) / len(z_values)
         tiles = collections.OrderedDict()
@@ -559,6 +584,8 @@ class BedMesh:
             raise self.gcode.error(
                 "tile bed level exceeds configured limits (%.4fmm)"
                 % (limit,))
+    # 返回 turns 为 "NN:MM"：NN=整圈数；MM=不足一圈的小数部分，按一圈=60 个钟面分刻度
+    # 表示（等价于再拧 MM/60 圈，与钟面上分针走过 MM 小格的转角比例相同）。
     def _format_tile_screw_adjust(self, delta, screw_thread):
         thread = self.TILE_SCREW_THREADS[screw_thread]
         factor = self.TILE_THREAD_FACTORS[thread]
@@ -581,17 +608,27 @@ class BedMesh:
             "reference=%s target_z=%.5f max_deviation=%.5f screw_thread=%s"
             % (results['reference'], results['target_z'],
                results['max_deviation'], results['screw_thread']))
+        self.gcode.respond_info(
+            "圈数说明: 末尾为 整圈数:钟面分 。"
+            "冒号后是把不足一圈的部分按一圈=60个钟面刻度表示"
+            "（例如 02:30 为 2 整圈再加 30/60 圈，钟面约 180°）；"
+            "CW/CCW 为从螺丝头上方俯视时的旋转方向。")
         for tile in results['tiles']:
             self.gcode.respond_info(
                 "tile row=%d column=%d average_z=%.5f range=%.5f"
                 % (tile['row'], tile['column'],
                    tile['average_z'], tile['range']))
             for point in tile['points']:
-                self.gcode.respond_info(
+                hint = _tile_screw_turns_human(
+                    point['turn_direction'], point['turns'])
+                line = (
                     "  %s: x=%.1f y=%.1f z=%.5f %s %.5fmm adjust %s %s"
                     % (point['corner'], point['x'], point['y'], point['z'],
                        point['direction'], abs(point['adjust_mm']),
                        point['turn_direction'], point['turns']))
+                if hint:
+                    line += " " + hint
+                self.gcode.respond_info(line)
     cmd_BED_MESH_OFFSET_help = "Add X/Y offsets to the mesh lookup"
     def cmd_BED_MESH_OFFSET(self, gcmd):
         if self.z_mesh is not None:
