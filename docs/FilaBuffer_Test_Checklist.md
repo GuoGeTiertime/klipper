@@ -17,7 +17,7 @@
 |---|-----|------|------|
 | 0.1 | Klipper 启动 | `include sample-filabuffer.cfg` 或自有配置 | 无 `config_error`，`klippy:ready` 成功 |
 | 0.2 | 上电忽略窗 | Ready 后 **2s 内** 抖动各 IN | 不触发送进/报错（`STARTUP_IGNORE_TIME`） |
-| 0.3 | 状态基线 | `FILA_BUFFER_STATUS BUFFER=buffer0` | `mode=disabled`，各 unit `state=stop`，`active=None` |
+| 0.3 | 状态基线 | `FILA_BUFFER_STATUS BUFFER=buffer0` | `mode=disabled`，无丝 unit `state=empty`，`active=None` |
 | 0.4 | 引脚极性 | 核对 `^` 与传感器常开/常闭 | `inlet=1`/`buffer=1` 表示**有丝**（与 STATUS 一致） |
 | 0.5 | 双缓冲隔离 | 同时 STATUS `buffer0` / `buffer1` | 两套 `jam/low/full`、unit 互不影响 |
 
@@ -106,7 +106,7 @@
 | 模式 | 值 | 测试入口 | 核心期望 |
 |------|-----|----------|----------|
 | M0 | `disabled` | 上电默认 / STOP / RESET | 电机停；不响应 LOW 送料 |
-| M1 | `init_fila` | `FILA_BUFFER_INIT_FILAMENT` | 仅 `init_target_unit`；见 §6.1 |
+| M1 | `init` | 插入线材或 `INIT_FILAMENT` | 见 §6.1 |
 | M2 | `init_work` | `START MODE=init_work` | 送至 `full_pin` 上升沿 → 自动 `work` |
 | M3 | `work` | `START MODE=work` | LOW∧¬FULL 电平送料；FULL 或 ¬LOW 停 |
 | M4 | `error` | 各类故障 | `error_msg` 有值；RESET 回 disabled |
@@ -117,53 +117,64 @@
 | 4.2 | START 无 inlet | SELECT 后 inlet=0，`MODE=work` | `inlet has no filament` |
 | 4.3 | START 他路有 buffer 丝 | unit1 buffer=1，SELECT unit0 无 buffer | `Buffer filament on another unit` |
 | 4.4 | START 非法 MODE | `MODE=foo` | `Invalid MODE` |
-| 4.5 | START MODE=init_fila | 仅 G-code 设 mode | 应以 `INIT_FILAMENT` 为准 |
-| 4.6 | STOP | `FILA_BUFFER_STOP` | `disabled`，全部 unit `stop`，清 `init_substate` |
+| 4.5 | START MODE=init_fila | `MODE=init_fila` | `Invalid MODE`（已废弃） |
+| 4.6 | STOP | `FILA_BUFFER_STOP` | `disabled`，各 unit 按传感器 `sync`（通常 `empty`/`ready`），清 `init_phase` |
 | 4.7 | RESET | ERROR 后 `RESET` | 清 error，`disabled`，可重新 SELECT |
 
 ---
 
-## 5. 送进单元状态（`unit_state` + `init_substate`）
+## 5. 送进单元状态（`unit_state` + `init_phase`）
+
+**稳定态**（由 inlet/buffer + 是否 `active_unit` 推导）：
+
+| inlet | buffer | 选中 | `unit_state` |
+|-------|--------|------|--------------|
+| 0 | 0 | * | `empty` |
+| 1 | 0 | * | `ready` |
+| 1 | 1 | 是 | `active` |
+| 1 | 1 | 否 | `error` |
+| 0 | 1 | * | `error` |
+
+**运行态**（电机动作中，`init_phase` 仅 init 时有效）：
 
 | 状态 | 值 | 如何进入 | 验证 |
 |------|-----|----------|------|
-| U0 | `stop` | 上电、STOP、runout 等 | SELECT → ready |
-| U1 | `ready` | `FILA_BUFFER_SELECT`；init_fila 完成 | START work/init_work |
-| U2 | `running` | `_start_unit_feed` / init 送进 | 停送 → ready 或 stop |
-| S0 | `feed` | init_fila 进口有丝 | buffer 上升 → retract |
-| S1 | `retract` | buffer 有丝后 | buffer 下降 → ready |
+| `init` | `forward` / `retract` | empty 且 inlet 0→1（自动或 `INIT_FILAMENT`） | buffer 1→0 → `ready` |
+| `feed` | — | `SELECT_UNIT` 或 work/init_work 送料 | buffer 0→1 → `active` |
 
 | # | 项 | 期望 |
 |---|-----|------|
-| 5.1 | SELECT 后 | 仅被选单元 `ready` |
-| 5.2 | RUNNING 时 STATUS | `feed=1`，`len` 增加 |
-| 5.3 | 停送后 | `feed=0`，`len` 归零 |
+| 5.1 | SELECT 后 | 仅更新 `active`；`state` 由传感器决定（inlet=1 buffer=0 → `ready`） |
+| 5.2 | init/feed 时 STATUS | `state=init`/`feed`，`feed=1`，`len` 增加 |
+| 5.3 | 停送后 | `feed=0`，`len` 归零，`state` 回到稳定态 |
 
 ---
 
 ## 6. 工作流（端到端）
 
-### 6.1 线材初始化 `init_fila`
+### 6.1 线材初始化 `init`
 
-**前置**：`FILA_BUFFER_SELECT BUFFER=buffer0 UNIT=unit0`
+**前置**：unit 为 `empty`（inlet=0 buffer=0）
 
 | 步骤 | G-code / 操作 | 期望 |
 |------|----------------|------|
-| A1 | `FILA_BUFFER_INIT_FILAMENT BUFFER=buffer0 UNIT=unit0`，inlet=0 | `Waiting insert`；inlet 0→1 → `sub=feed`，电机转 |
+| A1 | inlet 0→1（或 `INIT_FILAMENT` 等待后插入） | `state=init`，`phase=forward`，电机转 |
 | A2 | 送进途中 | inlet 保持，buffer 未到 | 持续送进（至 init 限长/时或 buffer 到） |
-| A3 | buffer 0→1 | — | 停送 → `sub=retract`，回撤 `retract_len` |
-| A4 | buffer 1→0 | — | `state=ready`，`sub=None`，**mode 仍为 init_fila** |
-| A5 | 送进中拔 inlet | inlet 1→0 | `init_runout`，ERROR |
-| A6 | 开始时 inlet 已有 | INIT 命令 | 立即 feed，不等插入边沿 |
+| A3 | buffer 0→1 | — | 停送 → `phase=retract`，回撤 `retract_len` |
+| A4 | buffer 1→0 | — | `state=ready`，`phase=None` |
+| A4b | 回撤后 buffer 仍为 1 | — | `init_retract_fail`，`state=error` |
+| A5 | 送进中拔 inlet | inlet 1→0 | `init_runout`，`state=error` |
+| A6 | `INIT_FILAMENT` 且 inlet 已有 | INIT 命令 | 立即 `init`，不等插入边沿 |
 
-### 6.2 工作初始化 `init_work`
+### 6.2 选中单元 `SELECT_UNIT` + 工作初始化
 
-**前置**：A 完成，unit `ready`，inlet=1，buffer 互斥正确
+**前置**：A 完成，unit `ready`
 
 | 步骤 | G-code / 操作 | 期望 |
 |------|----------------|------|
-| B1 | `FILA_BUFFER_START BUFFER=buffer0 MODE=init_work` | 立即送进，`running` |
-| B2 | `full_pin` 0→1 | 停送，`mode=work`，unit `ready` |
+| B0 | `FILA_BUFFER_SELECT_UNIT BUFFER=buffer0 UNIT=unit0` | `state=feed` → buffer 1 → `active` |
+| B1 | `FILA_BUFFER_START BUFFER=buffer0 MODE=init_work` | 立即送进，`state=feed` |
+| B2 | `full_pin` 0→1 | 停送，`mode=work`，unit `active` |
 | B3 | 未满超时 | 极小 `init_max_feed_time` | `feed_timeout` + `low_timeout_gcode` |
 
 ### 6.3 正常工作 `work`
@@ -199,9 +210,11 @@
 ### 6.6 推荐启动顺序（参考）
 
 ```gcode
-FILA_BUFFER_SELECT BUFFER=buffer0 UNIT=unit0
+# 插入线材：empty + inlet 自动 init，或 INIT_FILAMENT
 FILA_BUFFER_INIT_FILAMENT BUFFER=buffer0 UNIT=unit0
-# 等待 init_fila 完成（unit ready）
+# 等待 state=ready
+FILA_BUFFER_SELECT_UNIT BUFFER=buffer0 UNIT=unit0
+# 等待 state=active
 FILA_BUFFER_START BUFFER=buffer0 MODE=init_work
 # 等待 full，自动进入 work
 FILA_BUFFER_START BUFFER=buffer0 MODE=work
@@ -213,10 +226,12 @@ FILA_BUFFER_START BUFFER=buffer0 MODE=work
 
 | 命令 | 参数 | 测试用例 | 期望 |
 |------|------|----------|------|
-| `FILA_BUFFER_SELECT` | `BUFFER`, `UNIT` | 合法/非法 UNIT | 设置 `active`；unit→`ready` |
+| `FILA_BUFFER_SYNC_SENSORS` | `BUFFER`, `CLEAR_ERROR` | ready 后 / RESET 后 | 从链接丝检读状态并 `sync` unit；默认清 error |
+| `FILA_BUFFER_SELECT` | `BUFFER`, `UNIT` | 合法/非法 UNIT | 设置 `active` 名称；`state` 由传感器推导 |
+| `FILA_BUFFER_SELECT_UNIT` | `BUFFER`, `UNIT` | unit 须 `ready` | 送进至 `active` |
 | `FILA_BUFFER_START` | `BUFFER`, `MODE` | disabled/init_work/work | §4、§6 |
 | `FILA_BUFFER_STOP` | `BUFFER` | 运行中停止 | §4.6 |
-| `FILA_BUFFER_INIT_FILAMENT` | `BUFFER`, `UNIT` | 指定 unit | §6.1 |
+| `FILA_BUFFER_INIT_FILAMENT` | `BUFFER`, `UNIT` | 指定 unit | §6.1（可选，与自动 init 等价） |
 | `FILA_BUFFER_RESET` | `BUFFER` | error 后 | §4.7 |
 | `FILA_BUFFER_STATUS` | `BUFFER` | 各阶段 | mode/active/jam/low/full/每 unit |
 
@@ -241,8 +256,10 @@ FILA_BUFFER_START BUFFER=buffer0 MODE=work
 | `jam` | jam 上升沿 | 全停 | `jam_gcode` |
 | `full_exclusive_violation` | full+jam/low | 全停 | 无专用模板 |
 | `multi_buffer_filament` | 两路 buffer=1 | 全停 | 无 |
-| `init_runout` | init_fila 送进中 inlet 断 | 停 | 无 |
-| `runout` | work/init_work active inlet 断 | 停 | `runout_gcode` |
+| `init_runout` | init 送进中 inlet 断 | 停 | 无 |
+| `init_retract_fail` | init 回撤后 buffer 仍为 1 | 停 | 无 |
+| error→empty | error 时用户拔光丝（inlet/buffer 均 0） | — | 自动 `empty`；否则需 `SYNC_SENSORS` |
+| `runout` | active unit inlet 断 | 停 | `runout_gcode` |
 | `break` | work/init_work active buffer 断 | 停 | `break_gcode` |
 | `feed_timeout` | 超 init/work 时间或长度 | 全停 | `low_timeout_gcode` |
 

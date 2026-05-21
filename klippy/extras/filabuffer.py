@@ -11,17 +11,31 @@ BUFF_LOW = 0x02
 BUFF_FULL = 0x04
 
 MODE_DISABLED = 'disabled'
-MODE_INIT_FILA = 'init_fila'
 MODE_INIT_WORK = 'init_work'
 MODE_WORK = 'work'
 MODE_ERROR = 'error'
 
-UNIT_STOP = 'stop'
+UNIT_EMPTY = 'empty'
 UNIT_READY = 'ready'
-UNIT_RUNNING = 'running'
+UNIT_ACTIVE = 'active'
+UNIT_ERROR = 'error'
+UNIT_INIT = 'init'
+UNIT_FEED = 'feed'
 
-INIT_SUB_FEED = 'feed'
-INIT_SUB_RETRACT = 'retract'
+UNIT_RUN_STATES = (UNIT_INIT, UNIT_FEED)
+
+INIT_PHASE_FORWARD = 'forward'
+INIT_PHASE_RETRACT = 'retract'
+
+
+def stable_state_from_sensors(inlet, buffer, is_selected):
+    if not inlet and not buffer:
+        return UNIT_EMPTY
+    if inlet and not buffer:
+        return UNIT_READY
+    if inlet and buffer:
+        return UNIT_ACTIVE if is_selected else UNIT_ERROR
+    return UNIT_ERROR
 
 STARTUP_IGNORE_TIME = 2.0
 # Min print_time gap between MCU digital_out/pwm events (avoid "Timer too close")
@@ -307,7 +321,7 @@ class FeedMotor:
         if remain > 0.:
             self.feed_chunk(self.last_feed_speed, min(remain, 50.), curtime)
 
-
+# unit class for filabuffer, include one motor and two signals for inlet and buffer.
 class FeedUnit:
     def __init__(self, fb, unit_name, unit_index, config):
         self.fb = fb
@@ -318,8 +332,8 @@ class FeedUnit:
             raise config.error(
                 "Duplicate unit '%s' on filabuffer '%s'"
                 % (self.name, fb.name))
-        self.unit_state = UNIT_STOP
-        self.init_substate = None
+        self.unit_state = UNIT_EMPTY
+        self._init_phase = None
         self._inlet_present = False
         self._buffer_present = False
         self.motor = FeedMotor(fb, unit_name, unit_index, config)
@@ -345,6 +359,34 @@ class FeedUnit:
     @property
     def buffer_present(self):
         return self._buffer_present
+
+    def is_running(self):
+        return self.unit_state in UNIT_RUN_STATES
+
+    def is_selected(self):
+        return self.fb.active_unit == self.name
+
+    def sync_stable_state(self, force=False):
+        if self.is_running():
+            return
+        if self.unit_state == UNIT_ERROR and not force:
+            if not self._inlet_present and not self._buffer_present:
+                self.unit_state = UNIT_EMPTY
+            return
+        self.unit_state = stable_state_from_sensors(
+            self._inlet_present, self._buffer_present, self.is_selected())
+
+    def set_run_state(self, state, init_phase=None):
+        self.unit_state = state
+        self._init_phase = init_phase
+
+    def set_error_state(self):
+        self.unit_state = UNIT_ERROR
+        self._init_phase = None
+
+    def clear_run_state(self):
+        self._init_phase = None
+        self.sync_stable_state()
 
     def update_sensor(self, role, eventtime, present):
         old_inlet = self._inlet_present
@@ -373,7 +415,7 @@ class FeedUnit:
             'state': self.unit_state,
             'inlet': self._inlet_present,
             'buffer': self._buffer_present,
-            'init_substate': self.init_substate,
+            'init_phase': self._init_phase,
             'cur_feed_len': self.motor.cur_feed_len,
             'is_feeding': self.motor.is_feeding,
             'gearing': self.motor.gearing,
@@ -415,7 +457,6 @@ class FilaBuffer:
         self.mode = MODE_DISABLED
         self.error_msg = None
         self.feed_session_start = 0.
-        self.init_target_unit = None
         self.min_event_time = 0.
         self.pinout_delay = config.getfloat(
             'pinout_delay', 0.025, minval=0.010, maxval=0.050)
@@ -476,6 +517,14 @@ class FilaBuffer:
             'FILA_BUFFER_STATUS', 'BUFFER', self.name,
             self.cmd_FILA_BUFFER_STATUS,
             desc=self.cmd_FILA_BUFFER_STATUS_help)
+        self.gcode.register_mux_command(
+            'FILA_BUFFER_SELECT_UNIT', 'BUFFER', self.name,
+            self.cmd_FILA_BUFFER_SELECT_UNIT,
+            desc=self.cmd_FILA_BUFFER_SELECT_UNIT_help)
+        self.gcode.register_mux_command(
+            'FILA_BUFFER_SYNC_SENSORS', 'BUFFER', self.name,
+            self.cmd_FILA_BUFFER_SYNC_SENSORS,
+            desc=self.cmd_FILA_BUFFER_SYNC_SENSORS_help)
         self.printer.register_event_handler('klippy:ready', self._handle_ready)
         self._load_units(config)
         _consume_unit_config_options(config)
@@ -510,6 +559,61 @@ class FilaBuffer:
                 "(need >= %.2f for speed %.1f)" % (
                     self.min_buffer_travel_mm, need, speed))
         self.reactor.update_timer(self._watchdog_timer, self.reactor.NOW)
+        self.reactor.register_timer(
+            self._startup_sync_event,
+            self.reactor.monotonic() + STARTUP_IGNORE_TIME)
+
+    def _startup_sync_event(self, eventtime):
+        self._sync_all_from_linked_sensors(force=True, clear_error=False)
+        return self.reactor.NEVER
+
+    def _read_linked_sensor_present(self, obj):
+        if hasattr(obj, 'bPresent'):
+            return bool(obj.bPresent)
+        runout = getattr(obj, 'runout_helper', None)
+        if runout is not None:
+            return bool(runout.filament_present)
+        return None
+
+    def _pull_linked_sensor_states(self):
+        for obj in self.printer.objects.values():
+            link = getattr(obj, 'filabuffer_link', None)
+            if link is None or link[0] != self.name:
+                continue
+            _, unit_name, role = link
+            unit = self.units.get(unit_name)
+            if unit is None:
+                continue
+            present = self._read_linked_sensor_present(obj)
+            if present is None:
+                continue
+            if role == 'inlet':
+                unit._inlet_present = present
+            elif role == 'buffer':
+                unit._buffer_present = present
+
+    def _sync_all_from_linked_sensors(self, force=False, clear_error=True):
+        self._pull_linked_sensor_states()
+        self._stop_all_motors()
+        self.feed_session_start = 0.
+        for u in self.units.values():
+            u._init_phase = None
+            u.sync_stable_state(force=force)
+        if clear_error:
+            self.error_msg = None
+            if self.mode == MODE_ERROR:
+                self.mode = MODE_DISABLED
+
+    def _verify_select_unit_peers(self, unit):
+        """Other units must be empty or ready before SELECT_UNIT."""
+        allowed = (UNIT_EMPTY, UNIT_READY)
+        for name, u in self.units.items():
+            if u is unit:
+                continue
+            if u.unit_state not in allowed:
+                raise self.gcode.error(
+                    "Unit %s state=%s, other units must be empty or ready"
+                    % (name, u.unit_state))
 
     def _get_unit(self, name):
         if name not in self.units:
@@ -526,8 +630,6 @@ class FilaBuffer:
             curtime = self.reactor.monotonic()
         for slot, u in enumerate(self.units.values()):
             u.motor.stop_immediate(curtime, slot=slot)
-            if u.unit_state == UNIT_RUNNING:
-                u.unit_state = UNIT_STOP
 
     def _check_buffer_exclusive(self):
         if self.sensors.state & BUFF_FULL:
@@ -550,7 +652,10 @@ class FilaBuffer:
     def _enter_error(self, msg, enqueue_break=False, curtime=None):
         self.mode = MODE_ERROR
         self.error_msg = msg
+        running = [u for u in self.units.values() if u.is_running()]
         self._stop_all_motors(curtime)
+        for u in running:
+            u.set_error_state()
         if msg == "jam":
             self.gcode_queue.enqueue(self.jam_gcode, self._pause_prefix())
         elif enqueue_break:
@@ -576,23 +681,25 @@ class FilaBuffer:
     def note_unit_change(self, unit, eventtime, old_inlet, old_buffer):
         if not self._check_unit_mutex():
             return
-        if self.mode == MODE_INIT_FILA:
-            if (self.init_target_unit is None
-                    or unit.name == self.init_target_unit):
-                if unit.init_substate is not None:
-                    self._handle_init_fila_edges(
-                        unit, eventtime, old_inlet, old_buffer)
-                elif unit.inlet_present and not old_inlet:
-                    self._start_init_fila_unit(unit, eventtime)
+        if unit.unit_state == UNIT_INIT:
+            self._handle_init_edges(unit, eventtime, old_inlet, old_buffer)
+            return
+        if unit.unit_state == UNIT_FEED:
+            self._handle_feed_edges(unit, eventtime, old_inlet, old_buffer)
+            return
+        unit.sync_stable_state()
+        if (self.mode != MODE_ERROR
+                and unit.unit_state == UNIT_EMPTY
+                and unit.inlet_present and not old_inlet):
+            self._start_unit_init(unit, eventtime)
             return
         unit_a = self._active()
-        if unit is not unit_a:
-            return
-        if old_inlet and not unit.inlet_present:
-            self._on_runout(eventtime)
-        elif old_buffer and not unit.buffer_present:
-            if self.mode in (MODE_WORK, MODE_INIT_WORK):
-                self._on_break(eventtime)
+        if unit is unit_a and unit.unit_state == UNIT_ACTIVE:
+            if old_inlet and not unit.inlet_present:
+                self._on_runout(eventtime)
+            elif old_buffer and not unit.buffer_present:
+                if self.mode in (MODE_WORK, MODE_INIT_WORK):
+                    self._on_break(eventtime)
 
     def _on_jam(self, eventtime):
         self._enter_error("jam", curtime=eventtime)
@@ -602,7 +709,7 @@ class FilaBuffer:
         if self.mode != MODE_WORK:
             return
         unit = self._active()
-        if unit is None or unit.unit_state != UNIT_READY:
+        if unit is None or unit.unit_state not in (UNIT_ACTIVE, UNIT_FEED):
             return
         state = self.sensors.state
         if state & BUFF_FULL or not (state & BUFF_LOW):
@@ -622,8 +729,8 @@ class FilaBuffer:
             return
         if self.full_stop_mode == 'host' or unit.motor.is_feeding:
             unit.motor.stop_immediate(eventtime)
-        if unit.unit_state == UNIT_RUNNING:
-            unit.unit_state = UNIT_READY
+        if unit.unit_state == UNIT_FEED:
+            unit.clear_run_state()
         self.feed_session_start = 0.
 
     def _on_init_work_full(self, eventtime):
@@ -632,7 +739,7 @@ class FilaBuffer:
             return
         if self.full_stop_mode == 'host' or unit.motor.is_feeding:
             unit.motor.stop_immediate(eventtime)
-        unit.unit_state = UNIT_READY
+        unit.clear_run_state()
         self.mode = MODE_WORK
         self.feed_session_start = 0.
         logging.info("filabuffer %s init_work done -> work", self.name)
@@ -642,7 +749,7 @@ class FilaBuffer:
         if unit is None:
             return
         unit.motor.stop_immediate(eventtime)
-        unit.unit_state = UNIT_STOP
+        unit.sync_stable_state()
         prefix = self._pause_prefix() if self.is_printing() else ""
         self.gcode_queue.enqueue(self.runout_gcode, prefix)
         if self.is_printing():
@@ -656,50 +763,81 @@ class FilaBuffer:
         if unit is None:
             return
         unit.motor.stop_immediate(eventtime)
+        unit.set_error_state()
         self._enter_error("break", enqueue_break=True)
 
     def _start_unit_feed(self, unit, speed, max_len, eventtime):
-        unit.unit_state = UNIT_RUNNING
+        unit.set_run_state(UNIT_FEED)
         unit.motor.start_continuous(speed, max_len, eventtime)
         if self.feed_session_start <= 0.:
             self.feed_session_start = eventtime
 
-    def _start_init_fila_unit(self, unit, eventtime):
+    def _start_unit_init(self, unit, eventtime):
         if not unit.inlet_present:
             return
-        unit.init_substate = INIT_SUB_FEED
-        unit.unit_state = UNIT_RUNNING
+        unit.set_run_state(UNIT_INIT, INIT_PHASE_FORWARD)
         unit.motor._withdraw = False
         unit.motor.start_continuous(
             self.feed_speed_init, self.init_max_feed_len, eventtime)
         self.feed_session_start = eventtime
-        logging.info("filabuffer %s init_fila %s feed start",
+        logging.info("filabuffer %s %s init forward start",
                      self.name, unit.name)
 
-    def _handle_init_fila_edges(self, unit, eventtime, old_inlet, old_buffer):
-        if unit.init_substate == INIT_SUB_FEED:
+    def _start_select_unit_feed(self, unit, eventtime):
+        unit.set_run_state(UNIT_FEED)
+        unit.motor._withdraw = False
+        unit.motor.start_continuous(
+            self.feed_speed_init, self.init_max_feed_len, eventtime)
+        self.feed_session_start = eventtime
+        logging.info("filabuffer %s %s select_unit feed start",
+                     self.name, unit.name)
+
+    def _handle_init_edges(self, unit, eventtime, old_inlet, old_buffer):
+        if unit._init_phase == INIT_PHASE_FORWARD:
             if unit.buffer_present and not old_buffer:
                 unit.motor.stop_immediate(eventtime)
-                unit.init_substate = INIT_SUB_RETRACT
+                unit.set_run_state(UNIT_INIT, INIT_PHASE_RETRACT)
                 unit.motor.start_continuous(
                     -self.retract_speed, self.retract_len, eventtime)
-                logging.info("filabuffer %s init_fila %s retract",
+                logging.info("filabuffer %s %s init retract",
                              self.name, unit.name)
             elif not unit.inlet_present and old_inlet:
                 unit.motor.stop_immediate(eventtime)
-                unit.init_substate = None
-                unit.unit_state = UNIT_STOP
-                self._enter_error("init_runout")
-        elif unit.init_substate == INIT_SUB_RETRACT:
+                unit.set_error_state()
+                self._enter_error("init_runout", curtime=eventtime)
+        elif unit._init_phase == INIT_PHASE_RETRACT:
             if not unit.buffer_present and old_buffer:
                 unit.motor.stop_immediate(eventtime)
                 unit.motor._withdraw = False
-                unit.init_substate = None
-                unit.unit_state = UNIT_READY
-                logging.info("filabuffer %s init_fila %s done",
+                unit.clear_run_state()
+                logging.info("filabuffer %s %s init done -> ready",
                              self.name, unit.name)
 
+    def _handle_feed_edges(self, unit, eventtime, old_inlet, old_buffer):
+        if unit.buffer_present and not old_buffer:
+            unit.motor.stop_immediate(eventtime)
+            unit.clear_run_state()
+            logging.info("filabuffer %s %s feed done -> active",
+                         self.name, unit.name)
+            return
+        if not unit.is_selected():
+            return
+        if old_inlet and not unit.inlet_present:
+            self._on_runout(eventtime)
+        elif old_buffer and not unit.buffer_present:
+            self._on_break(eventtime)
+
+    def _on_init_retract_fail(self, eventtime, unit):
+        unit.motor.stop_immediate(eventtime)
+        unit.set_error_state()
+        self._enter_error("init_retract_fail", curtime=eventtime)
+
     def _verify_active_for_start(self, unit):
+        unit.sync_stable_state()
+        if unit.unit_state not in (UNIT_READY, UNIT_ACTIVE):
+            raise self.gcode.error(
+                "Unit %s must be ready or active, state=%s"
+                % (unit.name, unit.unit_state))
         if not unit.inlet_present:
             raise self.gcode.error(
                 "Unit %s inlet has no filament" % (unit.name,))
@@ -724,7 +862,13 @@ class FilaBuffer:
         max_time = (self.init_max_feed_time if self.mode != MODE_WORK
                     else self.max_feed_time)
         for unit in self.units.values():
-            if unit.unit_state == UNIT_RUNNING:
+            if unit.unit_state == UNIT_INIT:
+                if (unit._init_phase == INIT_PHASE_RETRACT
+                        and not unit.motor.is_feeding
+                        and unit.buffer_present):
+                    self._on_init_retract_fail(eventtime, unit)
+                    return eventtime + self.watchdog_time
+            if unit.is_running():
                 unit.motor.maybe_extend_feed(max_len, eventtime)
                 if unit.motor.cur_feed_len > max_len:
                     self._feed_timeout(eventtime)
@@ -737,26 +881,43 @@ class FilaBuffer:
     def _feed_timeout(self, eventtime):
         self._enter_error("feed_timeout", curtime=eventtime)
 
-    cmd_FILA_BUFFER_SELECT_help = "Select active feed unit on a buffer"
+    cmd_FILA_BUFFER_SELECT_help = "Set default active feed unit name"
     def cmd_FILA_BUFFER_SELECT(self, gcmd):
         unit = self._get_unit(gcmd.get('UNIT'))
         self.active_unit = unit.name
-        unit.unit_state = UNIT_READY
-        gcmd.respond_info("filabuffer %s active unit: %s"
+        unit.sync_stable_state()
+        gcmd.respond_info("filabuffer %s active unit: %s state=%s"
+                          % (self.name, unit.name, unit.unit_state))
+
+    cmd_FILA_BUFFER_SELECT_UNIT_help = (
+        "Feed ready unit until buffer sensor, become active")
+    def cmd_FILA_BUFFER_SELECT_UNIT(self, gcmd):
+        unit = self._get_unit(gcmd.get('UNIT'))
+        self._pull_linked_sensor_states()
+        for u in self.units.values():
+            u.sync_stable_state()
+        self._verify_select_unit_peers(unit)
+        if unit.unit_state != UNIT_READY:
+            raise gcmd.error(
+                "Unit %s must be ready (inlet=1 buffer=0), state=%s"
+                % (unit.name, unit.unit_state))
+        self.active_unit = unit.name
+        self._start_select_unit_feed(
+            unit, self.reactor.monotonic())
+        gcmd.respond_info("filabuffer %s feeding %s to active"
                           % (self.name, unit.name))
 
     cmd_FILA_BUFFER_START_help = "Start filabuffer mode"
     def cmd_FILA_BUFFER_START(self, gcmd):
         mode = gcmd.get('MODE', MODE_DISABLED).lower()
-        if mode not in (MODE_DISABLED, MODE_INIT_FILA, MODE_INIT_WORK,
-                        MODE_WORK):
+        if mode not in (MODE_DISABLED, MODE_INIT_WORK, MODE_WORK):
             raise gcmd.error("Invalid MODE")
         if mode in (MODE_INIT_WORK, MODE_WORK):
             unit = self._active()
             if unit is None:
                 raise gcmd.error("FILA_BUFFER_SELECT required")
             self._verify_active_for_start(unit)
-            unit.unit_state = UNIT_READY
+            unit.sync_stable_state()
         if mode == MODE_INIT_WORK:
             self._start_unit_feed(
                 self._active(), self.feed_speed_init,
@@ -769,8 +930,8 @@ class FilaBuffer:
             self._stop_all_motors()
             self.feed_session_start = 0.
             for u in self.units.values():
-                u.unit_state = UNIT_STOP
-                u.init_substate = None
+                u._init_phase = None
+                u.sync_stable_state()
         gcmd.respond_info("filabuffer %s mode: %s" % (self.name, mode))
 
     cmd_FILA_BUFFER_STOP_help = "Stop filabuffer"
@@ -780,29 +941,35 @@ class FilaBuffer:
         self.feed_session_start = 0.
         self._stop_all_motors()
         for u in self.units.values():
-            u.unit_state = UNIT_STOP
-            u.init_substate = None
+            u._init_phase = None
+            u.sync_stable_state()
         gcmd.respond_info("filabuffer %s stopped" % (self.name,))
 
-    cmd_FILA_BUFFER_INIT_FILAMENT_help = "Init filament on one unit"
+    cmd_FILA_BUFFER_INIT_FILAMENT_help = (
+        "Init filament on one unit (optional; auto-init on insert)")
     def cmd_FILA_BUFFER_INIT_FILAMENT(self, gcmd):
         unit = self._get_unit(gcmd.get('UNIT'))
-        self.mode = MODE_INIT_FILA
-        self.init_target_unit = unit.name
-        if unit.inlet_present:
-            self._start_init_fila_unit(unit, self.reactor.monotonic())
-        else:
+        self._pull_linked_sensor_states()
+        unit.sync_stable_state()
+        if unit.unit_state == UNIT_EMPTY and unit.inlet_present:
+            self._start_unit_init(unit, self.reactor.monotonic())
+        elif unit.unit_state == UNIT_EMPTY:
             gcmd.respond_info("Waiting insert on %s" % (unit.name,))
+        else:
+            gcmd.respond_info("Unit %s state=%s" % (unit.name, unit.unit_state))
 
     cmd_FILA_BUFFER_RESET_help = "Clear error and disable"
     def cmd_FILA_BUFFER_RESET(self, gcmd):
-        self.error_msg = None
-        self.mode = MODE_DISABLED
-        self._stop_all_motors()
-        for u in self.units.values():
-            u.unit_state = UNIT_STOP
-            u.init_substate = None
+        self._sync_all_from_linked_sensors(force=True, clear_error=True)
         gcmd.respond_info("filabuffer %s reset" % (self.name,))
+
+    cmd_FILA_BUFFER_SYNC_SENSORS_help = (
+        "Read linked filament sensors and sync unit states")
+    def cmd_FILA_BUFFER_SYNC_SENSORS(self, gcmd):
+        clear_error = gcmd.get_int('CLEAR_ERROR', 1, minval=0, maxval=1)
+        self._sync_all_from_linked_sensors(
+            force=True, clear_error=bool(clear_error))
+        gcmd.respond_info("filabuffer %s sensors synced" % (self.name,))
 
     cmd_FILA_BUFFER_STATUS_help = "Report filabuffer status"
     def cmd_FILA_BUFFER_STATUS(self, gcmd):
@@ -813,9 +980,9 @@ class FilaBuffer:
                    self.full_stop_mode, bs['jam'], bs['low'], bs['full']))
         for name, unit in sorted(self.units.items()):
             st = unit.get_status()
-            msg += ("\n %s: %s inlet=%d buf=%d feed=%d len=%.1f sub=%s" % (
+            msg += ("\n %s: %s inlet=%d buf=%d feed=%d len=%.1f phase=%s" % (
                 name, st['state'], st['inlet'], st['buffer'],
-                st['is_feeding'], st['cur_feed_len'], st['init_substate']))
+                st['is_feeding'], st['cur_feed_len'], st['init_phase']))
         gcmd.respond_info(msg)
 
     def get_status(self, eventtime):
