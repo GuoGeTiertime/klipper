@@ -48,8 +48,11 @@ class FilamentLightSensor:
             self.printer.register_event_handler("klippy:ready", self._setup_led)
         
         # 使用RunoutHelper处理丝材检测逻辑
+        self.filabuffer_link = filament_switch_sensor.load_filabuffer_link(config)
+        default_enable = not self.filabuffer_link
         self.runout_helper = filament_switch_sensor.RunoutHelper(config)
-        self.runout_helper.sensor_enabled = config.getboolean('sensor_enable', True)
+        self.runout_helper.sensor_enabled = config.getboolean(
+            'sensor_enable', default_enable)
 
         self.bInited = False # 是否已初始化
         self.bPresent = False # 当前是否存在丝材        
@@ -146,11 +149,20 @@ class FilamentLightSensor:
                 (self.name, self.bPresent, lux, self.lux_ema_fast, self.lux_ema_slow, diff) )
         self.lux_ema_diff = diff # record current ema diff        
         return bJump
+    def _notify_filabuffer(self, eventtime):
+        if not self.filabuffer_link:
+            return
+        if self.runout_helper.sensor_enabled:
+            return
+        filament_switch_sensor.notify_filabuffer(
+            self.printer, self.filabuffer_link, eventtime, self.bPresent)
+
     def _state_init(self, lux):
         self.bInited = True
         # init state by lux value, detect the nearest lux to the runout or present lux
         self.bPresent = abs(lux - self.lux_present) < abs(lux - self.lux_runout)
         self.runout_helper.note_filament_present(self.bPresent)
+        self._notify_filabuffer(self.reactor.monotonic())
     def voltage_callback(self, read_time, voltage, resistance, lux):
         if not self.bInited:
             self._state_init(lux)
@@ -178,7 +190,7 @@ class FilamentLightSensor:
             self._reset_ema(lux) #force reset ema to current lux value after state change
             logging.info("[%s] Filament light sensor jump, filament: %s, time: %.3f" % 
                 (self.name, "Present" if self.bPresent else "Runout", read_time))
-            
+            self._notify_filabuffer(self.reactor.monotonic())
             # 处理状态变化
             if self.runout_timer is not None:
                 self.reactor.unregister_timer(self.runout_timer)

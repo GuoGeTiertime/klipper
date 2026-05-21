@@ -24,6 +24,8 @@ INIT_SUB_FEED = 'feed'
 INIT_SUB_RETRACT = 'retract'
 
 STARTUP_IGNORE_TIME = 2.0
+# Min print_time gap between MCU digital_out/pwm events (avoid "Timer too close")
+MCU_PIN_EVENT_GAP = 0.025 #stop after 25ms
 
 # Per-unit options use suffix _0, _1, _2. Shared mechanics (microstep,
 # rotate_distance, gear_ratio, max_speed, full_steps_per_rotation) fall back
@@ -31,7 +33,7 @@ STARTUP_IGNORE_TIME = 2.0
 UNIT_PIN_OPTIONS = ('inlet_pin', 'buffer_pin', 'step_pin', 'dir_pin',
                     'enable_pin')
 UNIT_SHARED_OPTIONS = ('microstep', 'full_steps_per_rotation',
-                       'rotate_distance', 'max_speed')
+                       'rotate_distance', 'gear_ratio', 'max_speed')
 
 
 def _option_keys(option, idx):
@@ -42,56 +44,76 @@ def _option_keys(option, idx):
     return keys
 
 
-def _has_unit_option(config, option, idx):
+def _has_unit_index(config, idx):
+    """True only when step_pin is defined for this unit index (no _0 fallback)."""
     section = config.get_name()
-    fileconfig = config.get_printer().lookup_object('configfile').config
-    return any(fileconfig.has_option(section, k)
-               for k in _option_keys(option, idx))
+    if config.fileconfig.has_option(section, 'step_pin_%d' % (idx,)):
+        return True
+    return idx == 0 and config.fileconfig.has_option(section, 'step_pin')
 
 
 def _get_unit_option(config, option, idx, default=None):
+    section = config.get_name()
     for key in _option_keys(option, idx):
-        if config.get_printer().lookup_object('configfile').config.has_option(
-                config.get_name(), key):
+        if config.fileconfig.has_option(section, key):
             return config.get(key)
     return default
 
 
 def _get_unit_int(config, option, idx, default, **kwargs):
+    section = config.get_name()
     for key in _option_keys(option, idx):
-        fc = config.get_printer().lookup_object('configfile').config
-        if fc.has_option(config.get_name(), key):
+        if config.fileconfig.has_option(section, key):
             return config.getint(key, **kwargs)
     return default
 
 
 def _get_unit_float(config, option, idx, default, **kwargs):
+    section = config.get_name()
     for key in _option_keys(option, idx):
-        fc = config.get_printer().lookup_object('configfile').config
-        if fc.has_option(config.get_name(), key):
+        if config.fileconfig.has_option(section, key):
             return config.getfloat(key, **kwargs)
     return default
 
 
+def _parse_gear_ratio_key(config, key):
+    ratios = config.getlists(key, (), seps=(':', ','), count=2,
+                             parser=float)
+    result = 1.
+    for g1, g2 in ratios:
+        result *= g1 / g2
+    return result
+
+
 def _get_unit_gear_ratio(config, idx):
+    section = config.get_name()
     for key in _option_keys('gear_ratio', idx):
-        fc = config.get_printer().lookup_object('configfile').config
-        section = config.get_name()
-        if not fc.has_option(section, key):
-            continue
-        try:
-            ratios = config.getlists(key, seps=(':', ','), count=2,
-                                     parser=float, note_valid=False)
-            result = 1.
-            for g1, g2 in ratios:
-                result *= g1 / g2
-            return result
-        except Exception:
-            val = config.get(key)
-            parts = val.split(':')
-            if len(parts) == 2:
-                return float(parts[0]) / float(parts[1])
+        if config.fileconfig.has_option(section, key):
+            return _parse_gear_ratio_key(config, key)
     return 1.
+
+
+def _consume_unit_config_options(config):
+    """Mark per-unit options read so check_unused_options passes."""
+    section = config.get_name()
+    fc = config.fileconfig
+    for key in config.get_prefix_options('gear_ratio'):
+        if fc.has_option(section, key):
+            _parse_gear_ratio_key(config, key)
+    for option in UNIT_SHARED_OPTIONS:
+        if option == 'gear_ratio':
+            continue
+        for key in config.get_prefix_options(option):
+            if not fc.has_option(section, key):
+                continue
+            if option in ('microstep', 'full_steps_per_rotation'):
+                config.getint(key)
+            else:
+                config.getfloat(key)
+    for option in UNIT_PIN_OPTIONS + ('unit_name',):
+        for key in config.get_prefix_options(option):
+            if fc.has_option(section, key):
+                config.get(key)
 
 
 class GcodeQueue:
@@ -254,20 +276,27 @@ class FeedMotor:
         self.enable_stepper(True, curtime)
         self.feed_chunk(abs(speed), min(max_len, 50.), curtime)
 
-    def stop_immediate(self, curtime=None):
+    def stop_immediate(self, curtime=None, slot=0):
         if curtime is None:
             curtime = self.reactor.monotonic()
-        pt = self._sched_print_time(curtime, 0.001)
+        slot_gap = 0 # slot * MCU_PIN_EVENT_GAP * 3
+        pt = self._sched_print_time(curtime, 0.001 + slot_gap)
         self._update_feed_len(pt)
+        pt_pwm = pt + MCU_PIN_EVENT_GAP
+        pt_pwm = max(pt_pwm, self.last_pulse_time + MCU_PIN_EVENT_GAP)
+        self._set_step_cycle_time(1.0)
+        self.step.set_pwm(pt_pwm, 0)
+        self.last_pulse_time = pt_pwm
         if self.stepenable is not None:
-            self.stepenable.set_digital(pt, 0)
-            self.last_enable_time = pt
-        self.set_pulse(pt, 0, 1.0)
+            pt_en = pt_pwm + MCU_PIN_EVENT_GAP
+            pt_en = max(pt_en, self.last_enable_time + MCU_PIN_EVENT_GAP)
+            self.stepenable.set_digital(pt_en, 0)
+            self.last_enable_time = pt_en
         self.is_feeding = False
         self.bfeeder_on = False
         self.last_feed_speed = 0.
         self.cur_feed_len = 0.
-        self.next_feed_time = pt + 0.05
+        self.next_feed_time = pt_pwm + 0.05
 
     def maybe_extend_feed(self, max_len, curtime):
         if not self.is_feeding or not self.bfeeder_on:
@@ -289,35 +318,61 @@ class FeedUnit:
             raise config.error(
                 "Duplicate unit '%s' on filabuffer '%s'"
                 % (self.name, fb.name))
-        inlet_pin = _get_unit_option(config, 'inlet_pin', unit_index)
-        buffer_pin = _get_unit_option(config, 'buffer_pin', unit_index)
-        if inlet_pin is None or buffer_pin is None:
-            raise config.error(
-                "filabuffer %s unit %d: inlet_pin_%d and buffer_pin_%d required"
-                % (fb.name, unit_index, unit_index, unit_index))
-        self.inlet_present = False
-        self.buffer_present = False
         self.unit_state = UNIT_STOP
         self.init_substate = None
+        self._inlet_present = False
+        self._buffer_present = False
         self.motor = FeedMotor(fb, unit_name, unit_index, config)
-        buttons = config.get_printer().load_object(config, 'buttons')
-        buttons.register_buttons([inlet_pin, buffer_pin], self._button_handler)
+        self._gpio_roles = []
+        gpio_pin_list = []
+        inlet_pin = _get_unit_option(config, 'inlet_pin', unit_index)
+        buffer_pin = _get_unit_option(config, 'buffer_pin', unit_index)
+        if inlet_pin is not None:
+            gpio_pin_list.append(inlet_pin)
+            self._gpio_roles.append('inlet')
+        if buffer_pin is not None:
+            gpio_pin_list.append(buffer_pin)
+            self._gpio_roles.append('buffer')
+        if gpio_pin_list:
+            buttons = config.get_printer().load_object(config, 'buttons')
+            buttons.register_buttons(gpio_pin_list, self._gpio_handler)
         fb.units[self.name] = self
 
-    def _button_handler(self, eventtime, state):
-        old_inlet, old_buffer = self.inlet_present, self.buffer_present
-        self.inlet_present = not not (state & 0x01)
-        self.buffer_present = not not (state & 0x02)
+    @property
+    def inlet_present(self):
+        return self._inlet_present
+
+    @property
+    def buffer_present(self):
+        return self._buffer_present
+
+    def update_sensor(self, role, eventtime, present):
+        old_inlet = self._inlet_present
+        old_buffer = self._buffer_present
+        if role == 'inlet':
+            self._inlet_present = bool(present)
+        elif role == 'buffer':
+            self._buffer_present = bool(present)
+        else:
+            return
+        if (old_inlet == self._inlet_present
+                and old_buffer == self._buffer_present):
+            return
         if eventtime < self.fb.min_event_time:
             return
-        self.fb.note_unit_change(self, eventtime, old_inlet, old_buffer)
+        self.fb.note_unit_change(
+            self, eventtime, old_inlet, old_buffer)
+
+    def _gpio_handler(self, eventtime, state):
+        for i, role in enumerate(self._gpio_roles):
+            self.update_sensor(role, eventtime, bool(state & (1 << i)))
 
     def get_status(self):
         return {
             'filabuffer': self.fb.name,
             'state': self.unit_state,
-            'inlet': self.inlet_present,
-            'buffer': self.buffer_present,
+            'inlet': self._inlet_present,
+            'buffer': self._buffer_present,
             'init_substate': self.init_substate,
             'cur_feed_len': self.motor.cur_feed_len,
             'is_feeding': self.motor.is_feeding,
@@ -423,15 +478,11 @@ class FilaBuffer:
             desc=self.cmd_FILA_BUFFER_STATUS_help)
         self.printer.register_event_handler('klippy:ready', self._handle_ready)
         self._load_units(config)
+        _consume_unit_config_options(config)
 
     def _load_units(self, config):
         idx = 0
-        while (_has_unit_option(config, 'step_pin', idx)
-               or _has_unit_option(config, 'inlet_pin', idx)):
-            if not _has_unit_option(config, 'step_pin', idx):
-                raise config.error(
-                    "filabuffer %s: step_pin_%d required when unit %d defined"
-                    % (self.name, idx, idx))
+        while _has_unit_index(config, idx):
             unit_name = _get_unit_option(config, 'unit_name', idx,
                                          default='unit%d' % (idx,))
             if unit_name in self.units:
@@ -473,8 +524,8 @@ class FilaBuffer:
     def _stop_all_motors(self, curtime=None):
         if curtime is None:
             curtime = self.reactor.monotonic()
-        for u in self.units.values():
-            u.motor.stop_immediate(curtime)
+        for slot, u in enumerate(self.units.values()):
+            u.motor.stop_immediate(curtime, slot=slot)
             if u.unit_state == UNIT_RUNNING:
                 u.unit_state = UNIT_STOP
 
@@ -496,10 +547,10 @@ class FilaBuffer:
     def _pause_prefix(self):
         return "PAUSE\n" if self.pause_on_error else ""
 
-    def _enter_error(self, msg, enqueue_break=False):
+    def _enter_error(self, msg, enqueue_break=False, curtime=None):
         self.mode = MODE_ERROR
         self.error_msg = msg
-        self._stop_all_motors()
+        self._stop_all_motors(curtime)
         if msg == "jam":
             self.gcode_queue.enqueue(self.jam_gcode, self._pause_prefix())
         elif enqueue_break:
@@ -544,8 +595,7 @@ class FilaBuffer:
                 self._on_break(eventtime)
 
     def _on_jam(self, eventtime):
-        self._stop_all_motors(eventtime)
-        self._enter_error("jam")
+        self._enter_error("jam", curtime=eventtime)
 
     def _sync_work_feed(self, eventtime):
         """Level-triggered work feed: LOW and not FULL -> run; else stop."""
@@ -685,8 +735,7 @@ class FilaBuffer:
         return eventtime + self.watchdog_time
 
     def _feed_timeout(self, eventtime):
-        self._stop_all_motors(eventtime)
-        self._enter_error("feed_timeout")
+        self._enter_error("feed_timeout", curtime=eventtime)
 
     cmd_FILA_BUFFER_SELECT_help = "Select active feed unit on a buffer"
     def cmd_FILA_BUFFER_SELECT(self, gcmd):
@@ -800,6 +849,22 @@ class FilaBufferManager:
             raise self.printer.config_error(
                 "Unknown filabuffer '%s'" % (name,))
         return self.buffers[name]
+
+    def note_sensor_change(self, buffer_name, unit_name, role, eventtime,
+                           present):
+        fb = self.buffers.get(buffer_name)
+        if fb is None:
+            logging.warning(
+                "filabuffer: sensor event for unknown buffer '%s'",
+                buffer_name)
+            return
+        unit = fb.units.get(unit_name)
+        if unit is None:
+            logging.warning(
+                "filabuffer: sensor event for unknown unit '%s' on '%s'",
+                unit_name, buffer_name)
+            return
+        unit.update_sensor(role, eventtime, present)
 
     def get_status(self, eventtime):
         return {n: b.get_status(eventtime) for n, b in self.buffers.items()}

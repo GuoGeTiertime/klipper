@@ -4,6 +4,7 @@
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
 import logging
+from . import filabuffer
 
 class RunoutHelper:
     def __init__(self, config):
@@ -103,16 +104,55 @@ class RunoutHelper:
     def cmd_SET_FILAMENT_SENSOR(self, gcmd):
         self.sensor_enabled = gcmd.get_int("ENABLE", 1)
 
+def load_filabuffer_link(config):
+    buffer_name = config.get('filabuffer', None)
+    if buffer_name is None:
+        return None
+    unit_name = config.get('filabuffer_unit', None)
+    role = config.get('filabuffer_role', None)
+    if unit_name is None or role is None:
+        raise config.error(
+            "filabuffer link on %s requires filabuffer_unit and filabuffer_role"
+            % (config.get_name(),))
+    role = role.lower()
+    if role not in ('inlet', 'buffer'):
+        raise config.error(
+            "filabuffer_role on %s must be 'inlet' or 'buffer'"
+            % (config.get_name(),))
+    filabuffer.get_filabuffer_manager(config.get_printer())
+    return (buffer_name, unit_name, role)
+
+
+def notify_filabuffer(printer, link, eventtime, present):
+    if link is None:
+        return
+    try:
+        filabuffer.get_filabuffer_manager(printer).note_sensor_change(
+            link[0], link[1], link[2], eventtime, bool(present))
+    except Exception:
+        logging.exception("filabuffer notify from sensor failed")
+
+
 class SwitchSensor:
     def __init__(self, config):
-        printer = config.get_printer()
-        buttons = printer.load_object(config, 'buttons')
+        self.printer = config.get_printer()
+        buttons = self.printer.load_object(config, 'buttons')
         switch_pin = config.get('switch_pin')
         buttons.register_buttons([switch_pin], self._button_handler)
+        self.filabuffer_link = load_filabuffer_link(config)
+        default_enable = not self.filabuffer_link
         self.runout_helper = RunoutHelper(config)
+        self.runout_helper.sensor_enabled = config.getboolean(
+            'sensor_enable', default_enable)
         self.get_status = self.runout_helper.get_status
+
     def _button_handler(self, eventtime, state):
-        self.runout_helper.note_filament_present(state)
+        present = bool(state)
+        # sensor_enable 时由 RunoutHelper 处理；否则推送给 filabuffer
+        if self.filabuffer_link and not self.runout_helper.sensor_enabled:
+            notify_filabuffer(
+                self.printer, self.filabuffer_link, eventtime, present)
+        self.runout_helper.note_filament_present(present)
 
 def load_config_prefix(config):
     return SwitchSensor(config)
