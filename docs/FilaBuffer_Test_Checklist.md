@@ -161,6 +161,7 @@
 | A1 | inlet 0→1（或 `INIT_FILAMENT` 等待后插入） | `state=init`，`phase=forward`，电机转 |
 | A2 | 送进途中 | inlet 保持，buffer 未到 | 持续送进（至 init 限长/时或 buffer 到） |
 | A3 | buffer 0→1 | — | 停送 → `phase=retract`，回撤 `retract_len` |
+| A3b | （已知问题，暂未修） | 看门狗续送上限为 `init_max_feed_len` 非 `retract_len` | 实际反转可能明显长于配置 `retract_len`；见 `filabuffer.py` 头 `TODO(init)` |
 | A4 | buffer 1→0 | — | `state=ready`，`phase=None` |
 | A4b | 回撤后 buffer 仍为 1 | — | `init_retract_fail`，`state=error` |
 | A5 | 送进中拔 inlet | inlet 1→0 | `init_runout`，`state=error` |

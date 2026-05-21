@@ -26,6 +26,8 @@ UNIT_RUN_STATES = (UNIT_INIT, UNIT_FEED)
 
 INIT_PHASE_FORWARD = 'forward'
 INIT_PHASE_RETRACT = 'retract'
+# TODO(init): 回撤阶段 maybe_extend_feed 仍用 init_max_feed_len 作上限，
+# 首段虽为 retract_len，续送可能远超 retract_len；待改为按 retract_len 限长。
 
 
 def stable_state_from_sensors(inlet, buffer, is_selected):
@@ -334,6 +336,7 @@ class FeedUnit:
                 % (self.name, fb.name))
         self.unit_state = UNIT_EMPTY
         self._init_phase = None
+        self._cmd_move_max = None
         self._inlet_present = False
         self._buffer_present = False
         self.motor = FeedMotor(fb, unit_name, unit_index, config)
@@ -457,6 +460,7 @@ class FilaBuffer:
         self.mode = MODE_DISABLED
         self.error_msg = None
         self.feed_session_start = 0.
+        self._cmd_move_max_time = None
         self.min_event_time = 0.
         self.pinout_delay = config.getfloat(
             'pinout_delay', 0.025, minval=0.010, maxval=0.050)
@@ -525,6 +529,10 @@ class FilaBuffer:
             'FILA_BUFFER_SYNC_SENSORS', 'BUFFER', self.name,
             self.cmd_FILA_BUFFER_SYNC_SENSORS,
             desc=self.cmd_FILA_BUFFER_SYNC_SENSORS_help)
+        self.gcode.register_mux_command(
+            'FILA_BUFFER_UNIT_MOVE', 'BUFFER', self.name,
+            self.cmd_FILA_BUFFER_UNIT_MOVE,
+            desc=self.cmd_FILA_BUFFER_UNIT_MOVE_help)
         self.printer.register_event_handler('klippy:ready', self._handle_ready)
         self._load_units(config)
         _consume_unit_config_options(config)
@@ -594,6 +602,7 @@ class FilaBuffer:
 
     def _sync_all_from_linked_sensors(self, force=False, clear_error=True):
         self._pull_linked_sensor_states()
+        self._clear_cmd_moves()
         self._stop_all_motors()
         self.feed_session_start = 0.
         for u in self.units.values():
@@ -649,9 +658,15 @@ class FilaBuffer:
     def _pause_prefix(self):
         return "PAUSE\n" if self.pause_on_error else ""
 
+    def _clear_cmd_moves(self):
+        for u in self.units.values():
+            u._cmd_move_max = None
+        self._cmd_move_max_time = None
+
     def _enter_error(self, msg, enqueue_break=False, curtime=None):
         self.mode = MODE_ERROR
         self.error_msg = msg
+        self._clear_cmd_moves()
         running = [u for u in self.units.values() if u.is_running()]
         self._stop_all_motors(curtime)
         for u in running:
@@ -797,6 +812,7 @@ class FilaBuffer:
             if unit.buffer_present and not old_buffer:
                 unit.motor.stop_immediate(eventtime)
                 unit.set_run_state(UNIT_INIT, INIT_PHASE_RETRACT)
+                # 见文件头 TODO(init)：续送上限未按 retract_len 限制
                 unit.motor.start_continuous(
                     -self.retract_speed, self.retract_len, eventtime)
                 logging.info("filabuffer %s %s init retract",
@@ -852,7 +868,32 @@ class FilaBuffer:
         idle = self.printer.lookup_object('idle_timeout')
         return idle.get_status(self.reactor.monotonic())['state'] == 'Printing'
 
+    def _watchdog_cmd_moves(self, eventtime):
+        """UNIT_MOVE: always run (even when mode is disabled/error)."""
+        for unit in self.units.values():
+            move_max = unit._cmd_move_max
+            if move_max is None:
+                continue
+            if unit.motor.is_feeding or unit.motor.bfeeder_on:
+                unit.motor.maybe_extend_feed(move_max, eventtime)
+                if unit.motor.cur_feed_len >= move_max:
+                    unit.motor.stop_immediate(eventtime)
+                    unit._cmd_move_max = None
+                    self.feed_session_start = 0.
+                    self._cmd_move_max_time = None
+            else:
+                unit._cmd_move_max = None
+        if self.feed_session_start > 0. and self._cmd_move_max_time is not None:
+            if eventtime - self.feed_session_start > self._cmd_move_max_time:
+                for u in self.units.values():
+                    if u._cmd_move_max is not None:
+                        u.motor.stop_immediate(eventtime)
+                self._clear_cmd_moves()
+                self.feed_session_start = 0.
+                logging.error("filabuffer %s unit_move timeout", self.name)
+
     def _watchdog_event(self, eventtime):
+        self._watchdog_cmd_moves(eventtime)
         if self.mode in (MODE_ERROR, MODE_DISABLED):
             return eventtime + self.watchdog_time
         if self.mode == MODE_WORK:
@@ -869,13 +910,15 @@ class FilaBuffer:
                     self._on_init_retract_fail(eventtime, unit)
                     return eventtime + self.watchdog_time
             if unit.is_running():
+                # init 回撤时 max_len=init_max_feed_len，非 retract_len（TODO(init)）
                 unit.motor.maybe_extend_feed(max_len, eventtime)
                 if unit.motor.cur_feed_len > max_len:
                     self._feed_timeout(eventtime)
                     return eventtime + self.watchdog_time
-        if self.feed_session_start > 0.:
-            if eventtime - self.feed_session_start > max_time:
-                self._feed_timeout(eventtime)
+        if (self.feed_session_start > 0.
+                and self._cmd_move_max_time is None
+                and eventtime - self.feed_session_start > max_time):
+            self._feed_timeout(eventtime)
         return eventtime + self.watchdog_time
 
     def _feed_timeout(self, eventtime):
@@ -907,6 +950,42 @@ class FilaBuffer:
         gcmd.respond_info("filabuffer %s feeding %s to active"
                           % (self.name, unit.name))
 
+    cmd_FILA_BUFFER_UNIT_MOVE_help = (
+        "Move unit motor: SPEED mm/s, LENGTH mm (negative=reverse)")
+    def cmd_FILA_BUFFER_UNIT_MOVE(self, gcmd):
+        unit = self._get_unit(gcmd.get('UNIT'))
+        speed = gcmd.get_float('SPEED', 5., above=0.)
+        length = gcmd.get_float('LENGTH')
+        if length == 0.:
+            raise gcmd.error("LENGTH must be non-zero")
+        dist = abs(length)
+        move_len_cap = max(self.init_max_feed_len, self.max_feed_len)
+        if dist > move_len_cap:
+            raise gcmd.error(
+                "LENGTH %.2f exceeds max move length %.2f"
+                % (dist, move_len_cap))
+        if unit.is_running():
+            raise gcmd.error("Unit %s is busy (state=%s)"
+                             % (unit.name, unit.unit_state))
+        for u in self.units.values():
+            if u._cmd_move_max is not None:
+                raise gcmd.error("Unit %s manual move in progress"
+                                 % (u.name,))
+        eventtime = self.reactor.monotonic()
+        unit._cmd_move_max = dist
+        if length < 0.:
+            unit.motor.start_continuous(-speed, dist, eventtime)
+        else:
+            unit.motor._withdraw = False
+            unit.motor.start_continuous(speed, dist, eventtime)
+        move_time = dist / speed + 5.
+        self.feed_session_start = eventtime
+        self._cmd_move_max_time = move_time
+        gcmd.respond_info(
+            "filabuffer %s %s move %s %.2f mm @ %.2f mm/s"
+            % (self.name, unit.name,
+               "reverse" if length < 0. else "forward", dist, speed))
+
     cmd_FILA_BUFFER_START_help = "Start filabuffer mode"
     def cmd_FILA_BUFFER_START(self, gcmd):
         mode = gcmd.get('MODE', MODE_DISABLED).lower()
@@ -927,6 +1006,7 @@ class FilaBuffer:
         if mode == MODE_WORK:
             self._sync_work_feed(self.reactor.monotonic())
         if mode == MODE_DISABLED:
+            self._clear_cmd_moves()
             self._stop_all_motors()
             self.feed_session_start = 0.
             for u in self.units.values():
@@ -938,6 +1018,7 @@ class FilaBuffer:
     def cmd_FILA_BUFFER_STOP(self, gcmd):
         self.mode = MODE_DISABLED
         self.error_msg = None
+        self._clear_cmd_moves()
         self.feed_session_start = 0.
         self._stop_all_motors()
         for u in self.units.values():
