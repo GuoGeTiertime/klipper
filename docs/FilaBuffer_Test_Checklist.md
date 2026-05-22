@@ -233,7 +233,6 @@ FILA_BUFFER_START BUFFER=buffer0 MODE=work
 | `FILA_BUFFER_START` | `BUFFER`, `MODE` | disabled/init_work/work | §4、§6 |
 | `FILA_BUFFER_STOP` | `BUFFER` | 运行中停止 | §4.6 |
 | `FILA_BUFFER_INIT_FILAMENT` | `BUFFER`, `UNIT` | 指定 unit | §6.1（可选，与自动 init 等价） |
-| `FILA_BUFFER_RESET` | `BUFFER` | error 后 | §4.7 |
 | `FILA_BUFFER_STATUS` | `BUFFER` | 各阶段 | mode/active/jam/low/full/每 unit |
 
 ---
