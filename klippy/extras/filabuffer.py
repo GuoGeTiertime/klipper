@@ -41,7 +41,9 @@ def stable_state_from_sensors(inlet, buffer, is_selected):
 
 STARTUP_IGNORE_TIME = 2.0
 # Min print_time gap between MCU digital_out/pwm events (avoid "Timer too close")
-MCU_PIN_EVENT_GAP = 0.025 #stop after 25ms
+MCU_PIN_EVENT_GAP = 0.025
+# Renew software-PWM queue this many seconds before chunk ends (print_time)
+FEED_RENEW_MARGIN = 0.15
 
 # Per-unit options use suffix _0, _1, _2. Shared mechanics (microstep,
 # rotate_distance, gear_ratio, max_speed, full_steps_per_rotation) fall back
@@ -176,6 +178,7 @@ class FeedMotor:
                 % (fb.name, unit_index, unit_index))
         self.step = ppins.setup_pin('pwm', step_pin)
         self.step.setup_cycle_time(0.0002)
+        self.step.setup_max_duration(0.)
         self.dir = None
         dir_pin = _get_unit_option(config, 'dir_pin', unit_index)
         if dir_pin is not None:
@@ -201,6 +204,7 @@ class FeedMotor:
         self.bfeeder_on = False
         self.is_feeding = False
         self.cur_feed_len = 0.
+        self.scheduled_len = 0.
         self.last_feed_speed = 0.
         self.last_feed_time = 0.
         self.next_feed_time = 0.
@@ -226,6 +230,7 @@ class FeedMotor:
         self.cur_cycle_time = cycle_time
         mcu = self.step.get_mcu()
         cycle_ticks = mcu.seconds_to_clock(cycle_time)
+        self.step._pwm_max = float(cycle_ticks)
         mcu._serial.send("set_digital_out_pwm_cycle oid=%d cycle_ticks=%d"
                          % (self.step._oid, cycle_ticks))
 
@@ -245,28 +250,29 @@ class FeedMotor:
         self.stepenable.set_digital(pt, 1 if on else 0)
         self.last_enable_time = pt
 
-    def set_pulse(self, print_time, value, cycle_time):
-        self._set_step_cycle_time(cycle_time)
+    def set_pulse(self, print_time, value, cycle_time, update_cycle=True):
+        # MCU rejects set_digital_out_pwm_cycle while queue_digital_out pending
+        if update_cycle:
+            self._set_step_cycle_time(cycle_time)
         self.step.set_pwm(print_time, value)
         self.last_pulse_time = print_time
-
-    def _update_feed_len(self, print_time):
-        if self.last_feed_time > 0. and self.last_feed_speed > 0.:
-            self.cur_feed_len += (
-                (print_time - self.last_feed_time) * self.last_feed_speed)
 
     def feed_chunk(self, speed, length, curtime=None):
         if curtime is None:
             curtime = self.reactor.monotonic()
         if not self.bfeeder_on and not self.is_feeding:
             return 0.
-        pt = self._sched_print_time(curtime, self.cur_cycle_time)
-        if pt < self.next_feed_time:
-            return 0.
-        self._update_feed_len(pt)
+        was_feeding = self.is_feeding
+        if was_feeding:
+            pt = max(self._sched_print_time(curtime, 0.001),
+                     self.next_feed_time)
+        else:
+            pt = self._sched_print_time(curtime, self.cur_cycle_time)
+            if pt < self.next_feed_time:
+                return 0.
         if length <= 0.:
             self.is_feeding = False
-            self.set_pulse(pt, 0, 1.0)
+            self.set_pulse(pt, 0, self.cur_cycle_time, update_cycle=False)
             self.last_feed_speed = 0.
             self.last_feed_time = pt
             self.next_feed_time = pt + 0.05
@@ -279,16 +285,19 @@ class FeedMotor:
         feed_time = abs(length) / speed
         self.set_dir(pt, forward)
         self.is_feeding = True
-        self.set_pulse(pt, 0.5, cycle_time)
+        self.set_pulse(pt, 0.1, cycle_time, update_cycle=not was_feeding)
         self.last_feed_speed = speed
         self.last_feed_time = pt
         self.next_feed_time = pt + feed_time
+        self.scheduled_len += abs(length)
         return abs(length)
 
     def start_continuous(self, speed, max_len, curtime=None):
         if curtime is None:
             curtime = self.reactor.monotonic()
         self._withdraw = speed < 0
+        self.scheduled_len = 0.
+        self.cur_feed_len = 0.
         self.enable_stepper(True, curtime)
         self.feed_chunk(abs(speed), min(max_len, 50.), curtime)
 
@@ -297,10 +306,8 @@ class FeedMotor:
             curtime = self.reactor.monotonic()
         slot_gap = 0 # slot * MCU_PIN_EVENT_GAP * 3
         pt = self._sched_print_time(curtime, 0.001 + slot_gap)
-        self._update_feed_len(pt)
         pt_pwm = pt + MCU_PIN_EVENT_GAP
         pt_pwm = max(pt_pwm, self.last_pulse_time + MCU_PIN_EVENT_GAP)
-        self._set_step_cycle_time(1.0)
         self.step.set_pwm(pt_pwm, 0)
         self.last_pulse_time = pt_pwm
         if self.stepenable is not None:
@@ -312,16 +319,24 @@ class FeedMotor:
         self.bfeeder_on = False
         self.last_feed_speed = 0.
         self.cur_feed_len = 0.
+        self.scheduled_len = 0.
         self.next_feed_time = pt_pwm + 0.05
 
     def maybe_extend_feed(self, max_len, curtime):
         if not self.is_feeding or not self.bfeeder_on:
             return
-        if curtime + 0.05 < self.next_feed_time:
+        print_time = self.step.get_mcu().estimated_print_time(curtime)
+        if print_time + FEED_RENEW_MARGIN < self.next_feed_time:
             return
-        remain = max_len - self.cur_feed_len
-        if remain > 0.:
-            self.feed_chunk(self.last_feed_speed, min(remain, 50.), curtime)
+        remain = max_len - self.scheduled_len
+        if remain <= 0.:
+            return
+        scheduled_ahead = max(
+            0., (self.next_feed_time - print_time) * self.last_feed_speed)
+        chunk_len = remain - scheduled_ahead
+        if chunk_len < 0.01:
+            return
+        self.feed_chunk(self.last_feed_speed, min(chunk_len, 50.), curtime)
 
 # unit class for filabuffer, include one motor and two signals for inlet and buffer.
 class FeedUnit:
@@ -876,7 +891,10 @@ class FilaBuffer:
                 continue
             if unit.motor.is_feeding or unit.motor.bfeeder_on:
                 unit.motor.maybe_extend_feed(move_max, eventtime)
-                if unit.motor.cur_feed_len >= move_max:
+                print_time = unit.motor.step.get_mcu().estimated_print_time(
+                    eventtime)
+                if (unit.motor.scheduled_len >= move_max
+                        and print_time >= unit.motor.next_feed_time - 0.05):
                     unit.motor.stop_immediate(eventtime)
                     unit._cmd_move_max = None
                     self.feed_session_start = 0.
@@ -951,7 +969,7 @@ class FilaBuffer:
                           % (self.name, unit.name))
 
     cmd_FILA_BUFFER_UNIT_MOVE_help = (
-        "Move unit motor: SPEED mm/s, LENGTH mm (negative=reverse)")
+        "Move unit motor: SPEED mm/s, LENGTH mm (negative=reverse), eg: FILA_BUFFER_UNIT_MOVE BUFFER=buffer0 UNIT=0 SPEED=5.0 LENGTH=10.0")
     def cmd_FILA_BUFFER_UNIT_MOVE(self, gcmd):
         unit = self._get_unit(gcmd.get('UNIT'))
         speed = gcmd.get_float('SPEED', 5., above=0.)
