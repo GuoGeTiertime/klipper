@@ -41,9 +41,12 @@ def stable_state_from_sensors(inlet, buffer, is_selected):
 
 STARTUP_IGNORE_TIME = 2.0
 # Min print_time gap between MCU digital_out/pwm events (avoid "Timer too close")
-MCU_PIN_EVENT_GAP = 0.025
+MCU_PIN_EVENT_DELAY = 0.025
 # Renew software-PWM queue this many seconds before chunk ends (print_time)
 FEED_RENEW_MARGIN = 0.15
+# FilaMotor fixed timing (not from config)
+MOTOR_MAX_CHUNK_TIME = 4.0
+
 
 # Per-unit options use suffix _0, _1, _2. Shared mechanics (microstep,
 # rotate_distance, gear_ratio, max_speed, full_steps_per_rotation) fall back
@@ -162,6 +165,189 @@ class GcodeQueue:
         if self._queue:
             self.reactor.register_callback(self._process_queue)
 
+
+
+class FilaMotor:
+    """PWM step/dir/enable driver. start/stop only; on_stop_cb from __init__."""
+
+    def __init__(self, reactor, config, unit_index, mm_per_pulse,
+                 on_stop_cb=None, name=''):
+        self.reactor = reactor
+        self.name = name or ('motor_%d' % unit_index)
+        self.mm_per_pulse = mm_per_pulse
+        self._on_stop_cb = on_stop_cb
+        self.total_mm = 0.
+        self._gen = 0
+        self._timer = None
+        self._active = False
+        self._fired = True
+        self._remain = 0.
+        self._move_mm = 0.
+        self._chunk_mm = 0.
+        self._chunk_start_pt = 0.
+        self._speed = 0.
+        self._forward = True
+        self._act_type = None
+        self.cycle_time = 0.1
+        self.last_pt = 0.
+        self.chunk_end_pt = 0.
+        fb_name = config.get_name().split()[-1]
+        ppins = config.get_printer().lookup_object('pins')
+        step_pin = _get_unit_option(config, 'step_pin', unit_index)
+        if step_pin is None:
+            raise config.error(
+                "filabuffer %s unit %d: step_pin_%d is required"
+                % (fb_name, unit_index, unit_index))
+        self.step = ppins.setup_pin('pwm', step_pin)
+        self.step.setup_cycle_time(0.0002)
+        self.step.setup_max_duration(0.)
+        self.dir = None
+        dir_pin = _get_unit_option(config, 'dir_pin', unit_index)
+        if dir_pin is not None:
+            self.dir = ppins.setup_pin('digital_out', dir_pin)
+            self.dir.setup_max_duration(0.)
+        self.enable = None
+        enable_pin = _get_unit_option(config, 'enable_pin', unit_index)
+        if enable_pin is not None:
+            self.enable = ppins.setup_pin('digital_out', enable_pin)
+            self.enable.setup_max_duration(0.)
+
+    def is_moving(self):
+        return self._active
+
+    def start(self, distance, speed, act_type):
+        if distance == 0.:
+            return
+        if self._active:
+            self._gen += 1
+            self._cancel_timer()
+            self._halt_pwm()
+            self.total_mm += self._move_mm
+        self._gen += 1
+        move_gen = self._gen
+        self._active = True
+        self._fired = False
+        self._move_mm = 0.
+        self._remain = abs(distance)
+        self._forward = distance > 0
+        self._speed = max(0.01, abs(speed))
+        self._act_type = act_type
+        self.chunk_end_pt = 0.
+        curtime = self.reactor.monotonic()
+        if self.enable is not None:
+            pt = self._sched_print_time(curtime, 0.001)
+            self.enable.set_digital(pt, 1)
+            self.last_pt = pt
+        self._run_chunk(curtime, move_gen)
+
+    def stop(self, act_type, call_stop_cb=False):
+        if not self._active:
+            return
+        self._gen += 1
+        self._end_move(act_type, 'stopped', call_stop_cb)
+
+    def _end_move(self, act_type, reason, call_stop_cb=True):
+        self._cancel_timer()
+        self._halt_pwm()
+        if self._fired:
+            return
+        self._fired = True
+        self._active = False
+        self._remain = 0.
+        self.total_mm += self._move_mm
+        if call_stop_cb and (self._on_stop_cb is not None):
+            self._on_stop_cb(act_type, self._move_mm, reason)
+
+    def _cancel_timer(self):
+        if self._timer is not None:
+            self.reactor.unregister_timer(self._timer)
+            self._timer = None
+
+    def _flush_current_chunk(self, halt_pt=None):
+        """Add current chunk to _move_mm; halt_pt=None means chunk finished."""
+        if self._chunk_mm <= 0.:
+            return
+        if halt_pt is None:
+            self._move_mm += self._chunk_mm
+        else:
+            end_pt = self._chunk_start_pt + self._chunk_mm / self._speed
+            if halt_pt <= self._chunk_start_pt:
+                partial = 0.
+            elif halt_pt >= end_pt:
+                partial = self._chunk_mm
+            else:
+                partial = (halt_pt - self._chunk_start_pt) * self._speed
+            self._move_mm += partial
+        self._chunk_mm = 0.
+
+    def _halt_pwm(self):
+        curtime = self.reactor.monotonic()
+        pt = self._sched_print_time(curtime, 0.001)
+        pt_pwm = max(pt + MCU_PIN_EVENT_DELAY, self.last_pt + MCU_PIN_EVENT_DELAY)
+        self._flush_current_chunk(halt_pt_pwm)
+        self.step.set_pwm(pt_pwm, 0)
+        self.last_pt = pt_pwm
+        self.chunk_end_pt = pt_pwm + 0.05
+
+    def _sched_print_time(self, curtime, gap=0.):
+        mcu = self.step.get_mcu()
+        return max(mcu.estimated_print_time(curtime) + MCU_PIN_EVENT_DELAY,
+                   self.last_pt + gap)
+
+    def _run_chunk(self, curtime, move_gen):
+        if not self._active or move_gen != self._gen:
+            return
+        if self._remain <= 0.:
+            self._flush_current_chunk()
+            self._end_move(self._act_type, 'complete')
+            return
+        length = min(self._remain, self._speed * MOTOR_MAX_CHUNK_TIME)
+        pt = max(self._sched_print_time(curtime, 0.001), self.chunk_end_pt)
+        ct = 1.0 / (self._speed / self.mm_per_pulse)
+        if self.cycle_time != ct:
+            self.cycle_time = ct
+            mcu = self.step.get_mcu()
+            ticks = mcu.seconds_to_clock(ct)
+            self.step._pwm_max = float(ticks)
+            mcu._serial.send(
+                "set_digital_out_pwm_cycle oid=%d cycle_ticks=%d"
+                % (self.step._oid, ticks))
+        if self.dir is not None:
+            self.dir.set_digital(pt, 1 if self._forward else 0)
+        self.step.set_pwm(pt, 0.333)
+        self.last_pt = pt
+        self.chunk_end_pt = pt + length / self._speed
+        self._chunk_start_pt = pt
+        self._chunk_mm = length
+        self._remain -= length
+        if move_gen != self._gen:
+            return
+        mcu = self.step.get_mcu()
+        margin = FEED_RENEW_MARGIN if self._remain > 0. else 0.05
+        delay = max(0.001, self.chunk_end_pt - margin
+                    - mcu.estimated_print_time(curtime))
+        self._chunk_gen = move_gen
+        self._cancel_timer()
+        self._timer = self.reactor.register_timer(
+            self._timer_event, curtime + delay)
+
+    def _timer_event(self, eventtime):
+        self._timer = None
+        if not self._active or self._chunk_gen != self._gen:
+            return self.reactor.NEVER
+        mcu = self.step.get_mcu()
+        pt = mcu.estimated_print_time(eventtime)
+        if self._remain > 0.:
+            if pt + FEED_RENEW_MARGIN < self.chunk_end_pt:
+                return eventtime + 0.01
+            self._flush_current_chunk()
+            self._run_chunk(eventtime, self._chunk_gen)
+            return self.reactor.NEVER
+        if pt < self.chunk_end_pt - 0.05:
+            return eventtime + 0.01
+        self._flush_current_chunk()
+        self._end_move(self._act_type, 'complete')
+        return self.reactor.NEVER
 
 class FeedMotor:
     def __init__(self, fb, unit_name, unit_index, config):
@@ -336,15 +522,15 @@ class FeedMotor:
             self.reactor.unregister_timer(self._after_stop_timer)
             self._after_stop_timer = None
             self._pending_after_stop = None
-        slot_gap = 0 # slot * MCU_PIN_EVENT_GAP * 3
+        slot_gap = 0 # slot * MCU_PIN_EVENT_DELAY * 3
         pt = self._sched_print_time(curtime, 0.001 + slot_gap)
-        pt_pwm = pt + MCU_PIN_EVENT_GAP
-        pt_pwm = max(pt_pwm, self.last_pulse_time + MCU_PIN_EVENT_GAP)
+        pt_pwm = pt + MCU_PIN_EVENT_DELAY
+        pt_pwm = max(pt_pwm, self.last_pulse_time + MCU_PIN_EVENT_DELAY)
         self.step.set_pwm(pt_pwm, 0)
         self.last_pulse_time = pt_pwm
         if self.stepenable is not None:
-            pt_en = pt_pwm + MCU_PIN_EVENT_GAP
-            pt_en = max(pt_en, self.last_enable_time + MCU_PIN_EVENT_GAP)
+            pt_en = pt_pwm + MCU_PIN_EVENT_DELAY
+            pt_en = max(pt_en, self.last_enable_time + MCU_PIN_EVENT_DELAY)
             self.stepenable.set_digital(pt_en, 0)
             self.last_enable_time = pt_en
         self.is_feeding = False
