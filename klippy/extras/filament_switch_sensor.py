@@ -108,19 +108,19 @@ def load_filabuffer_link(config):
     buffer_name = config.get('filabuffer', None)
     if buffer_name is None:
         return None
-    unit_name = config.get('filabuffer_unit', None)
+    feeder_name = config.get('filabuffer_feeder', None)
     role = config.get('filabuffer_role', None)
-    if unit_name is None or role is None:
+    if feeder_name is None or role is None:
         raise config.error(
-            "filabuffer link on %s requires filabuffer_unit and filabuffer_role"
-            % (config.get_name(),))
+            "filabuffer link on %s requires filabuffer_feeder and "
+            "filabuffer_role" % (config.get_name(),))
     role = role.lower()
     if role not in ('inlet', 'buffer'):
         raise config.error(
             "filabuffer_role on %s must be 'inlet' or 'buffer'"
             % (config.get_name(),))
     filabuffer.get_filabuffer_manager(config.get_printer())
-    return (buffer_name, unit_name, role)
+    return (buffer_name, feeder_name, role)
 
 
 def notify_filabuffer(printer, link, eventtime, present):
