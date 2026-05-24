@@ -154,8 +154,7 @@ class FilamentLightSensor:
             return
         if self.runout_helper.sensor_enabled:
             return
-        filament_switch_sensor.notify_filabuffer(
-            self.printer, self.filabuffer_link, eventtime, self.bPresent)
+        self.filabuffer_link.notify(eventtime, self.bPresent)
 
     def _state_init(self, lux):
         self.bInited = True

@@ -105,32 +105,7 @@ class RunoutHelper:
         self.sensor_enabled = gcmd.get_int("ENABLE", 1)
 
 def load_filabuffer_link(config):
-    buffer_name = config.get('filabuffer', None)
-    if buffer_name is None:
-        return None
-    feeder_name = config.get('filabuffer_feeder', None)
-    role = config.get('filabuffer_role', None)
-    if feeder_name is None or role is None:
-        raise config.error(
-            "filabuffer link on %s requires filabuffer_feeder and "
-            "filabuffer_role" % (config.get_name(),))
-    role = role.lower()
-    if role not in ('inlet', 'buffer'):
-        raise config.error(
-            "filabuffer_role on %s must be 'inlet' or 'buffer'"
-            % (config.get_name(),))
-    filabuffer.get_filabuffer_manager(config.get_printer())
-    return (buffer_name, feeder_name, role)
-
-
-def notify_filabuffer(printer, link, eventtime, present):
-    if link is None:
-        return
-    try:
-        filabuffer.get_filabuffer_manager(printer).note_sensor_change(
-            link[0], link[1], link[2], eventtime, bool(present))
-    except Exception:
-        logging.exception("filabuffer notify from sensor failed")
+    return filabuffer.load_sensor_link(config)
 
 
 class SwitchSensor:
@@ -150,8 +125,7 @@ class SwitchSensor:
         present = bool(state)
         # sensor_enable 时由 RunoutHelper 处理；否则推送给 filabuffer
         if self.filabuffer_link and not self.runout_helper.sensor_enabled:
-            notify_filabuffer(
-                self.printer, self.filabuffer_link, eventtime, present)
+            self.filabuffer_link.notify(eventtime, present)
         self.runout_helper.note_filament_present(present)
 
 def load_config_prefix(config):
