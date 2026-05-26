@@ -258,10 +258,9 @@ class FilaMotor:
         self._forward = distance > 0
         self._speed = max(0.01, abs(speed))
         self._act_type = act_type
-        self.chunk_end_pt = 0.
         curtime = self.reactor.monotonic()
         if self.enable is not None:
-            pt = self._sched_print_time(curtime, 0.001)
+            pt = self._sched_print_time(curtime, MCU_PIN_EVENT_DELAY)
             self.enable.set_digital(pt, 1)
             self.last_pt = pt
         self._run_chunk(curtime, move_gen)
@@ -308,7 +307,7 @@ class FilaMotor:
 
     def _halt_pwm(self):
         curtime = self.reactor.monotonic()
-        pt = self._sched_print_time(curtime, 0.001)
+        pt = self._sched_print_time(curtime, MCU_PIN_EVENT_DELAY)
         pt_pwm = max(pt + MCU_PIN_EVENT_DELAY, self.last_pt + MCU_PIN_EVENT_DELAY)
         self._flush_current_chunk(pt_pwm)
         # Keep enable asserted after stopping pulses so the motor holds torque.
@@ -329,7 +328,8 @@ class FilaMotor:
             self._end_move(self._act_type, 'complete')
             return
         length = min(self._remain, self._speed * MOTOR_MAX_CHUNK_TIME)
-        pt = max(self._sched_print_time(curtime, 0.001), self.chunk_end_pt)
+        pt = max(self._sched_print_time(curtime, MCU_PIN_EVENT_DELAY),
+                 self.chunk_end_pt)
         ct = 1.0 / (self._speed / self.mm_per_pulse)
         if self.cycle_time != ct:
             self.cycle_time = ct
