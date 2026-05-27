@@ -766,6 +766,7 @@ class FilaBuffer:
         retracted = self._withdraw_retracted_mm(feeder)
         target = self._withdraw_target_mm(feeder)
         self._reset_withdraw_state()
+        self.feed_session_start = 0.
         if self.active_feeder == feeder.name:
             self.active_feeder = None
         feeder.clear_run_state()
@@ -785,6 +786,9 @@ class FilaBuffer:
         if self._withdraw_retracted_mm(feeder) >= self._withdraw_target_mm(feeder):
             feeder.motor_halt()
             self._finish_withdraw(feeder, 'ok')
+
+    def _buffer_sensors_idle(self):
+        return not (self.sensors.state & (BUFF_JAM | BUFF_LOW | BUFF_FULL))
 
     def _check_buffer_exclusive(self):
         if self.sensors.state & BUFF_FULL:
@@ -949,9 +953,9 @@ class FilaBuffer:
             feeder.clear_run_state()
             self.feed_session_start = 0.
             return
-        if state & BUFF_LOW:
-            self._start_feeder_feed(feeder, self.feed_speed, self.max_feed_len,eventtime)
-            return
+        if state & BUFF_LOW or self._buffer_sensors_idle():
+            self._start_feeder_feed(feeder, self.feed_speed, self.max_feed_len,
+                                    eventtime)
 
     def _on_runout(self, feeder, eventtime):
         feeder.motor_halt()
@@ -1074,6 +1078,28 @@ class FilaBuffer:
         idle = self.printer.lookup_object('idle_timeout')
         return idle.get_status(self.reactor.monotonic())['state'] == 'Printing'
 
+    def _feed_sess_limit(self):
+        for u in self.feeders.values():
+            if u.feeder_state == FEEDER_INIT:
+                if u._init_phase == INIT_PHASE_RETRACT:
+                    limit = (self.retract_len
+                             / max(0.01, self.retract_speed) + 5.)
+                else:
+                    limit = self.init_max_feed_time
+                return limit, "init_feed_fail"
+            if u.motor.is_moving():
+                act = u.motor.get_act_type()
+                if act == ACT_TYPE_RETRACT:
+                    return (self.max_prefeed_len / self.retract_speed + 5.,
+                            "feed_timeout")
+                if (act == ACT_TYPE_FEED
+                        and u.motor._remain + abs(u.motor.get_move_mm())
+                        > self.max_feed_len + 1.):
+                    return (self.max_prefeed_len / self.feed_speed + 5.,
+                            "feed_timeout")
+                break
+        return self.max_feed_time, "feed_timeout"
+
     def _watchdog_event(self, eventtime):
         self._check_withdraw_distance()
         if self.mode in (MODE_ERROR, MODE_DISABLED):
@@ -1082,18 +1108,7 @@ class FilaBuffer:
             if not self._enforce_single_buffer_filament():
                 return eventtime + self.watchdog_time
             self._sync_work_feed(eventtime)
-        max_time = self.max_feed_time
-        sess_max_time = max_time
-        timeout_msg = "feed_timeout"
-        for u in self.feeders.values():
-            if u.feeder_state == FEEDER_INIT:
-                timeout_msg = "init_feed_fail"
-                if u._init_phase == INIT_PHASE_RETRACT:
-                    sess_max_time = (self.retract_len
-                                     / max(0.01, self.retract_speed) + 5.)
-                else:
-                    sess_max_time = self.init_max_feed_time
-                break
+        sess_max_time, timeout_msg = self._feed_sess_limit()
         if (self.feed_session_start > 0.
                 and eventtime - self.feed_session_start > sess_max_time):
             self._feed_timeout(eventtime, timeout_msg)
@@ -1127,8 +1142,10 @@ class FilaBuffer:
         feeder.set_run_state(FEEDER_ACTIVE)
         gcmd.respond_info("filabuffer %s active feeder: %s"
                           % (self.name, feeder.name))
-        # if buffer is low and not full, start feed immediately
-        if self.sensors.state & BUFF_LOW and (not self.sensors.state & BUFF_FULL):
+        state = self.sensors.state
+        if state & BUFF_FULL:
+            return
+        if state & BUFF_LOW or self._buffer_sensors_idle():
             self._start_feeder_feed(feeder, self.feed_speed, self.max_prefeed_len,
                                   self.reactor.monotonic())
 
@@ -1146,7 +1163,7 @@ class FilaBuffer:
             return
         len_mm = self._withdraw_len(feeder)
         speed = gcmd.get_float('SPEED', self.retract_speed, above=0.)
-        max_len = gcmd.get_float('MAX_LEN', self.max_preload_len, above=1.)
+        max_len = gcmd.get_float('MAX_LEN', self.max_prefeed_len, above=1.)
         margin = gcmd.get_float('MARGIN', self.withdraw_margin, above=0.)
         if self.active_feeder == feeder.name:
             self.active_feeder = None
@@ -1155,6 +1172,7 @@ class FilaBuffer:
         self._withdraw_count_start = 0.
         self._withdraw_margin = margin
         feeder.motor.start(-max_len, speed, ACT_TYPE_RETRACT)
+        self.feed_session_start = self.reactor.monotonic()
         target = len_mm + margin
         src = "rec" if feeder.buf_len > 0. else "def"
         gcmd.respond_info(
