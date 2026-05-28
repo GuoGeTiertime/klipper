@@ -626,6 +626,10 @@ class FilaBuffer:
             self.cmd_FILA_BUFFER_SYNC_SENSORS,
             desc=self.cmd_FILA_BUFFER_SYNC_SENSORS_help)
         self.gcode.register_mux_command(
+            'FILA_BUFFER_RESET_FEEDER', 'BUFFER', self.name,
+            self.cmd_FILA_BUFFER_RESET_FEEDER,
+            desc=self.cmd_FILA_BUFFER_RESET_FEEDER_help)
+        self.gcode.register_mux_command(
             'FILA_BUFFER_FEEDER_MOVE', 'BUFFER', self.name,
             self.cmd_FILA_BUFFER_FEEDER_MOVE,
             desc=self.cmd_FILA_BUFFER_FEEDER_MOVE_help)
@@ -732,6 +736,41 @@ class FilaBuffer:
         if name is None:
             raise gcmd.error("FEEDER parameter is required")
         return self._get_feeder(name)
+
+    def _derive_feeder_state_from_sensors(self, feeder, gcmd):
+        if not feeder.inlet_present and feeder.buffer_present:
+            raise gcmd.error(
+                "Feeder %s invalid sensors inlet=0 buf=1, retract first"
+                % (feeder.name,))
+        if not feeder.inlet_present and not feeder.buffer_present:
+            return FEEDER_EMPTY
+        if feeder.inlet_present and not feeder.buffer_present:
+            if feeder.buf_len > 0.:
+                return FEEDER_READY
+            return FEEDER_INSERT
+        for u in self.feeders.values():
+            if u is feeder:
+                continue
+            if u.buffer_present and u.feeder_state != FEEDER_INIT:
+                raise gcmd.error(
+                    "Feeder %s buf=1 conflicts with %s"
+                    % (feeder.name, u.name))
+        return FEEDER_BUFFERED
+
+    def _reset_feeder(self, feeder, gcmd):
+        self._pull_linked_sensor_states()
+        if feeder.motor.is_moving():
+            raise gcmd.error("Feeder %s is busy" % (feeder.name,))
+        if (feeder.feeder_state == FEEDER_INIT
+                and feeder._init_phase is not None):
+            raise gcmd.error("Feeder %s init in progress" % (feeder.name,))
+        feeder.motor_halt()
+        feeder._init_phase = None
+        if self.active_feeder == feeder.name:
+            self.active_feeder = None
+        state = self._derive_feeder_state_from_sensors(feeder, gcmd)
+        feeder.set_run_state(state)
+        return state
 
     def _active(self):
         if self.active_feeder is None:
@@ -1239,6 +1278,17 @@ class FilaBuffer:
         self._sync_all_from_linked_sensors(
             force=True, clear_error=bool(clear_error))
         gcmd.respond_info("filabuffer %s sensors synced" % (self.name,))
+
+    cmd_FILA_BUFFER_RESET_FEEDER_help = (
+        "Clear feeder error/init lock and set state from sensors")
+    def cmd_FILA_BUFFER_RESET_FEEDER(self, gcmd):
+        feeder = self._get_gcmd_feeder(gcmd)
+        state = self._reset_feeder(feeder, gcmd)
+        gcmd.respond_info(
+            "filabuffer %s %s reset -> %s (inlet=%d buf=%d buf_len=%.1f)"
+            % (self.name, feeder.name, state,
+               int(feeder.inlet_present), int(feeder.buffer_present),
+               feeder.buf_len))
 
     cmd_FILA_BUFFER_STATUS_help = "Report filabuffer status"
     def cmd_FILA_BUFFER_STATUS(self, gcmd):
