@@ -826,9 +826,6 @@ class FilaBuffer:
             feeder.motor_halt()
             self._finish_withdraw(feeder, 'ok')
 
-    def _buffer_sensors_idle(self):
-        return not (self.sensors.state & (BUFF_JAM | BUFF_LOW | BUFF_FULL))
-
     def _check_buffer_exclusive(self):
         if self.sensors.state & BUFF_FULL:
             if self.sensors.state & (BUFF_JAM | BUFF_LOW):
@@ -992,7 +989,7 @@ class FilaBuffer:
             feeder.clear_run_state()
             self.feed_session_start = 0.
             return
-        if state & BUFF_LOW or self._buffer_sensors_idle():
+        if state & BUFF_LOW:
             self._start_feeder_feed(feeder, self.feed_speed, self.max_feed_len,
                                     eventtime)
 
@@ -1184,7 +1181,7 @@ class FilaBuffer:
         state = self.sensors.state
         if state & BUFF_FULL:
             return
-        if state & BUFF_LOW or self._buffer_sensors_idle():
+        if not (state & BUFF_FULL):
             self._start_feeder_feed(feeder, self.feed_speed, self.max_prefeed_len,
                                   self.reactor.monotonic())
 
