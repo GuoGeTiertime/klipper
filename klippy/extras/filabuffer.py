@@ -22,8 +22,9 @@ FEEDER_ACTIVE = 'active'
 FEEDER_ERROR = 'error'
 FEEDER_INIT = 'init'
 FEEDER_RUNOUT = 'runout'
+FEEDER_RETRACT = 'retract'
 
-FEEDER_RUN_STATES = (FEEDER_INIT,)
+FEEDER_RUN_STATES = (FEEDER_INIT, FEEDER_RETRACT)
 
 INIT_PHASE_FORWARD = 'forward'
 INIT_PHASE_RETRACT = 'retract'
@@ -455,6 +456,8 @@ class FilaFeeder:
     def _stable_state_from_sensors(self):
         if self.feeder_state == FEEDER_INIT: # init phase is not stable state, NOT CHANG STATUS
             return FEEDER_INIT  #keep init state
+        if self.feeder_state == FEEDER_RETRACT:
+            return FEEDER_RETRACT
         if not self._inlet_present and not self._buffer_present:
             return FEEDER_EMPTY #empty can cover all other states
         if self.feeder_state == FEEDER_ERROR:
@@ -579,10 +582,6 @@ class FilaBuffer:
             'retract_speed', self.feed_speed, above=0.)
         self.withdraw_margin = config.getfloat('withdraw_margin', 5., above=0.)
         self.withdraw_len = config.getfloat('withdraw_len', 200., above=1.)
-        self._withdraw_feeder = None
-        self._withdraw_counting = False
-        self._withdraw_count_start = 0.
-        self._withdraw_margin = self.withdraw_margin
         self.min_buffer_travel_mm = config.getfloat(
             'min_buffer_travel_mm', 6., above=0.)
         self.button_latency = config.getfloat('button_latency', 0.010, above=0.)
@@ -783,14 +782,7 @@ class FilaBuffer:
             return None
         return self.feeders.get(self.active_feeder)
 
-    def _reset_withdraw_state(self):
-        self._withdraw_feeder = None
-        self._withdraw_counting = False
-        self._withdraw_count_start = 0.
-        self._withdraw_margin = self.withdraw_margin
-
     def _stop_all_motors(self):
-        self._reset_withdraw_state()
         for u in self.feeders.values():
             u.motor_halt()
 
@@ -804,33 +796,6 @@ class FilaBuffer:
             return feeder.buf_len
         return self.withdraw_len
 
-    def _withdraw_target_mm(self, feeder):
-        return self._withdraw_len(feeder) + self._withdraw_margin
-
-    def _finish_withdraw(self, feeder, status):
-        retracted = self._withdraw_retracted_mm(feeder)
-        target = self._withdraw_target_mm(feeder)
-        self._reset_withdraw_state()
-        self.feed_session_start = 0.
-        if self.active_feeder == feeder.name:
-            self.active_feeder = None
-        feeder.clear_run_state()
-        self.gcode.respond_info(
-            "filabuffer %s %s withdraw %s "
-            "(inlet=%d buf=%d len=%.1f tgt=%.1f)"
-            % (self.name, feeder.name, status,
-               int(feeder.inlet_present), int(feeder.buffer_present),
-               retracted, target))
-
-    def _check_withdraw_distance(self):
-        if not self._withdraw_feeder or not self._withdraw_counting:
-            return
-        feeder = self.feeders.get(self._withdraw_feeder)
-        if feeder is None or not feeder.motor.is_moving():
-            return
-        if self._withdraw_retracted_mm(feeder) >= self._withdraw_target_mm(feeder):
-            feeder.motor_halt()
-            self._finish_withdraw(feeder, 'ok')
 
     def _check_buffer_exclusive(self):
         if self.sensors.state & BUFF_FULL:
@@ -897,15 +862,13 @@ class FilaBuffer:
             self._enter_error(ERROR_INIT_FEED_FAIL)
         elif act_type == ACT_TYPE_INIT_RETRACT:
             self._complete_init_retract_check(feeder)
-        elif (act_type == ACT_TYPE_RETRACT
-              and self._withdraw_feeder == feeder.name):
-            if self._withdraw_counting:
-                status = ('ok' if self._withdraw_retracted_mm(feeder)
-                          >= self._withdraw_target_mm(feeder)
-                          else 'incomplete')
+        elif (act_type == ACT_TYPE_RETRACT):
+            if feeder.buffer_present:
+                feeder.set_error_state()
+            elif feeder.inlet_present:
+                feeder.feeder_state = FEEDER_INSERT
             else:
-                status = 'incomplete'
-            self._finish_withdraw(feeder, status)
+                feeder.feeder_state = FEEDER_EMPTY
         elif act_type == ACT_TYPE_FEED: # not trigger FULL after max feed length
             if feeder.feeder_state == FEEDER_RUNOUT:
                 return
@@ -937,22 +900,11 @@ class FilaBuffer:
                   int(old_buffer), int(feeder.buffer_present),
                   old_state, self.mode))
         self.log_sensor_msg(msg)
-        if (self._withdraw_feeder == feeder.name
-                and not self._withdraw_counting
-                and old_buffer and not feeder.buffer_present):
-            self._withdraw_counting = True
-            self._withdraw_count_start = feeder.motor.get_move_mm()
-            logging.info(
-                "filabuffer %s %s withdraw count buf=0 @ %.1f tgt=%.1f",
-                self.name, feeder.name, self._withdraw_count_start,
-                self._withdraw_target_mm(feeder))
-        if feeder.feeder_state == FEEDER_INIT:
-            self._handle_init_edges(feeder, eventtime, old_inlet, old_buffer)
-            if old_buffer != feeder.buffer_present:
-                self._enforce_single_buffer_filament()
-            return
         feeder.sync_stable_state()
         self.log_sensor_msg("feeder %s state %s -> %s" % (feeder.name, old_state, feeder.feeder_state))
+        if feeder.feeder_state in (FEEDER_INIT, FEEDER_RETRACT):
+            self._handle_init_edges(feeder, eventtime, old_inlet, old_buffer)
+            return
         # feeder from empty to ready, start init.
         if (self.mode == MODE_WORK
                 and old_state == FEEDER_EMPTY
@@ -964,18 +916,13 @@ class FilaBuffer:
         if feeder.is_selected():
             if feeder.feeder_state == FEEDER_RUNOUT and old_state == FEEDER_ACTIVE:
                 self.log_sensor_msg("feeder %s runout from active to runout" % (feeder.name))
-            if feeder.feeder_state == FEEDER_EMPTY and old_state == FEEDER_RUNOUT:
+            elif feeder.feeder_state == FEEDER_EMPTY and old_state == FEEDER_RUNOUT:
                 self.log_sensor_msg("feeder %s empty from runout to empty" % (feeder.name))
                 feeder.motor_halt()
                 self.active_feeder = None
-        if (self._withdraw_feeder != feeder.name
-                and feeder.is_selected() and old_state == FEEDER_ACTIVE):
-            if old_inlet and not feeder.inlet_present:
-                self._on_runout(feeder, eventtime)
             elif old_buffer and not feeder.buffer_present:
                 self._on_break(feeder, eventtime)
-        if old_buffer != feeder.buffer_present:
-            self._enforce_single_buffer_filament()
+
         if feeder.feeder_state != old_state:
             self._log_feeder_state_change(feeder, old_state)
 
@@ -1051,28 +998,32 @@ class FilaBuffer:
                      self.name, feeder.name)
 
     def _handle_init_edges(self, feeder, eventtime, old_inlet, old_buffer):
-        if feeder._init_phase == INIT_PHASE_FORWARD:
-            if feeder.buffer_present and not old_buffer:
-                feeder.buf_len = feeder.motor.get_move_mm()
-                logging.info(
-                    "filabuffer %s %s init fwd %.1fmm (net after retract)",
-                    self.name, feeder.name, feeder.buf_len)
-                feeder.motor_halt()
-                feeder.set_run_state(FEEDER_INIT, INIT_PHASE_RETRACT)
-                self.feed_session_start = eventtime
-                feeder.motor.start(-self.retract_len, self.retract_speed,
-                                   ACT_TYPE_INIT_RETRACT)
-                logging.info("filabuffer %s %s init retract start",
-                             self.name, feeder.name)
-            elif not feeder.inlet_present and old_inlet:
-                feeder.motor_halt()
-                feeder.set_error_state()
-                self._enter_error(ERROR_INIT_RUNOUT)
-        elif feeder._init_phase == INIT_PHASE_RETRACT:
-            if not feeder.inlet_present and old_inlet:
-                feeder.motor_halt()
-                feeder.set_error_state()
-                self._enter_error(ERROR_INIT_RUNOUT)
+        if feeder.feeder_state == FEEDER_RETRACT:
+            if old_buffer and not feeder.buffer_present:
+                feeder.motor.start(-self.withdraw_margin, self.retract_speed, ACT_TYPE_RETRACT)
+        elif feeder.feeder_state == FEEDER_INIT:
+            if feeder._init_phase == INIT_PHASE_FORWARD:
+                if feeder.buffer_present and not old_buffer:
+                    feeder.buf_len = feeder.motor.get_move_mm()
+                    logging.info(
+                        "filabuffer %s %s init fwd %.1fmm (net after retract)",
+                        self.name, feeder.name, feeder.buf_len)
+                    feeder.motor_halt()
+                    feeder.set_run_state(FEEDER_INIT, INIT_PHASE_RETRACT)
+                    self.feed_session_start = eventtime
+                    feeder.motor.start(-self.retract_len, self.retract_speed,
+                                    ACT_TYPE_INIT_RETRACT)
+                    logging.info("filabuffer %s %s init retract start",
+                                self.name, feeder.name)
+                elif not feeder.inlet_present and old_inlet:
+                    feeder.motor_halt()
+                    feeder.set_error_state()
+                    self._enter_error(ERROR_INIT_RUNOUT)
+            elif feeder._init_phase == INIT_PHASE_RETRACT:
+                if not feeder.inlet_present and old_inlet:
+                    feeder.motor_halt()
+                    feeder.set_error_state()
+                    self._enter_error(ERROR_INIT_RUNOUT)
 
     def _complete_init_retract_check(self, feeder):
         """After full retract distance: buffer false -> ready, true -> fail."""
@@ -1152,7 +1103,6 @@ class FilaBuffer:
         return self.max_feed_time, "feed_timeout"
 
     def _watchdog_event(self, eventtime):
-        self._check_withdraw_distance()
         if self.mode in (MODE_ERROR, MODE_DISABLED):
             return eventtime + self.watchdog_time
         if self.mode == MODE_WORK:
@@ -1237,25 +1187,12 @@ class FilaBuffer:
             gcmd.respond_info("filabuffer %s %s already empty"
                               % (self.name, feeder.name))
             return
-        len_mm = self._withdraw_len(feeder)
         speed = gcmd.get_float('SPEED', self.retract_speed, above=0.)
         max_len = gcmd.get_float('MAX_LEN', self.max_prefeed_len, above=1.)
         margin = gcmd.get_float('MARGIN', self.withdraw_margin, above=0.)
-        if self.active_feeder == feeder.name:
-            self.active_feeder = None
-        self._withdraw_feeder = feeder.name
-        self._withdraw_counting = not feeder.buffer_present
-        self._withdraw_count_start = 0.
-        self._withdraw_margin = margin
-        feeder.motor.start(-max_len, speed, ACT_TYPE_RETRACT)
-        self.feed_session_start = self.reactor.monotonic()
-        target = len_mm + margin
-        src = "rec" if feeder.buf_len > 0. else "def"
-        gcmd.respond_info(
-            "filabuffer %s %s withdraw: buf=0 then %.1fmm "
-            "(%s %.1f+margin %.1f) @ %.1fmm/s"
-            % (self.name, feeder.name, target,
-               src, len_mm, margin, speed))
+        len = max_len if feeder.buffer_present else margin
+        feeder.feeder_state = FEEDER_RETRACT
+        feeder.motor.start(-len, speed, ACT_TYPE_RETRACT)
 
     cmd_FILA_BUFFER_FEEDER_MOVE_help = (
         "Move feeder motor: SPEED mm/s, LENGTH mm (negative=reverse), eg: FILA_BUFFER_FEEDER_MOVE BUFFER=buffer0 FEEDER=feeder0 SPEED=5.0 LENGTH=10.0")
@@ -1453,7 +1390,7 @@ def load_sensor_link(config):
         return None
     feeder_name = config.get('filabuffer_feeder', None)
     role = config.get('filabuffer_role', None)
-    if feeder_name is None or role is None:
+    if role is None or (feeder_name is None and role != 'runout'):
         raise config.error(
             "filabuffer link on %s requires filabuffer_feeder and "
             "filabuffer_role" % (config.get_name(),))
