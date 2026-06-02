@@ -21,6 +21,7 @@ FEEDER_BUFFERED = 'buffered'
 FEEDER_ACTIVE = 'active'
 FEEDER_ERROR = 'error'
 FEEDER_INIT = 'init'
+FEEDER_RUNOUT = 'runout'
 
 FEEDER_RUN_STATES = (FEEDER_INIT,)
 
@@ -464,6 +465,9 @@ class FilaFeeder:
             if self.is_selected():
                 return FEEDER_ACTIVE
             return FEEDER_BUFFERED
+        if not self._inlet_present and self._buffer_present:
+            if self.is_selected():
+                return FEEDER_RUNOUT
         return FEEDER_ERROR
 
     def sync_stable_state(self, force=False):
@@ -732,6 +736,8 @@ class FilaBuffer:
         return self.feeders[name]
 
     def _get_gcmd_feeder(self, gcmd):
+        if gcmd is None:
+            return None
         name = gcmd.get('FEEDER', None)
         if name is None:
             raise gcmd.error("FEEDER parameter is required")
@@ -901,6 +907,8 @@ class FilaBuffer:
                 status = 'incomplete'
             self._finish_withdraw(feeder, status)
         elif act_type == ACT_TYPE_FEED: # not trigger FULL after max feed length
+            if feeder.feeder_state == FEEDER_RUNOUT:
+                return
             self._enter_error(ERROR_FEED_TIMEOUT)
 
     def note_buffer_change(self, eventtime, old, new):
@@ -953,6 +961,13 @@ class FilaBuffer:
             self._start_feeder_init(feeder, eventtime)
             self._log_feeder_state_change(feeder, old_state)
             return
+        if feeder.is_selected():
+            if feeder.feeder_state == FEEDER_RUNOUT and old_state == FEEDER_ACTIVE:
+                self.log_sensor_msg("feeder %s runout from active to runout" % (feeder.name))
+            if feeder.feeder_state == FEEDER_EMPTY and old_state == FEEDER_RUNOUT:
+                self.log_sensor_msg("feeder %s empty from runout to empty" % (feeder.name))
+                feeder.motor_halt()
+                self.active_feeder = None
         if (self._withdraw_feeder != feeder.name
                 and feeder.is_selected() and old_state == FEEDER_ACTIVE):
             if old_inlet and not feeder.inlet_present:
@@ -1154,6 +1169,39 @@ class FilaBuffer:
     def _feed_timeout(self, eventtime, msg=ERROR_FEED_TIMEOUT):
         self._enter_error(msg)
 
+    def _buffered_feeders(self):
+        return [u for u in self.feeders.values() if u.buffer_present]
+
+    # get the optional feeder to send filament.
+    def _get_optional_feeder(self):
+        #can't 2 feeders be buffered at the same time.
+        buffered = self._buffered_feeders()
+        if len(buffered) > 1:
+            return None
+        for u in self.feeders.values():
+            if u.feeder_state == FEEDER_BUFFERED:
+                return u
+        for u in self.feeders.values():
+            if u.feeder_state == FEEDER_READY:
+                return u
+        for u in self.feeders.values():
+            if u.feeder_state == FEEDER_INSERT:
+                return u
+        return None
+
+    def _select_feeder(self, feeder):
+        if feeder is None:
+            feeder = self._get_optional_feeder()
+            if feeder is None:
+                return False
+        self.active_feeder = feeder.name
+        feeder.set_run_state(FEEDER_ACTIVE)
+        state = self.sensors.state
+        if not (state & BUFF_FULL):
+            self._start_feeder_feed(feeder, self.feed_speed, self.max_prefeed_len,
+                                  self.reactor.monotonic())
+        return True
+
     cmd_FILA_BUFFER_SELECT_FEEDER_help = (
         "Feed ready feeder until buffer sensor, become active")
     def cmd_FILA_BUFFER_SELECT_FEEDER(self, gcmd):
@@ -1162,7 +1210,7 @@ class FilaBuffer:
         self._pull_linked_sensor_states()
         for u in self.feeders.values():
             u.sync_stable_state()
-        buffered = [u for u in self.feeders.values() if u.buffer_present]
+        buffered = self._buffered_feeders()
         if len(buffered) > 1:
             raise gcmd.error("Over one feeder buffer filament detected")
         if buffered and buffered[0] is not feeder:
@@ -1174,16 +1222,8 @@ class FilaBuffer:
             raise gcmd.error(
                 "Feeder %s must be ready (inlet=1 buffer=0) or buffered (inlet=1 buffer=1), state=%s"
                 % (feeder.name, feeder.feeder_state))
-        self.active_feeder = feeder.name
-        feeder.set_run_state(FEEDER_ACTIVE)
-        gcmd.respond_info("filabuffer %s active feeder: %s"
-                          % (self.name, feeder.name))
-        state = self.sensors.state
-        if state & BUFF_FULL:
-            return
-        if not (state & BUFF_FULL):
-            self._start_feeder_feed(feeder, self.feed_speed, self.max_prefeed_len,
-                                  self.reactor.monotonic())
+        self._select_feeder(feeder)
+
 
     cmd_FILA_BUFFER_RETRACT_FILAMENT_help = (
         "Retract until buffer sensor clears, then by recorded/default "
@@ -1347,16 +1387,14 @@ class FilaBufferSensorLink:
         self.feeder_name = feeder_name
         self.role = role
         self._feeder = None
+        self._buffer = None
 
     def _resolve_feeder(self):
         if self._feeder is not None:
             return self._feeder
         manager = get_filabuffer_manager(self.printer)
-        fb = manager.buffers.get(self.buffer_name)
+        fb = self._resolve_buffer()
         if fb is None:
-            logging.warning(
-                "filabuffer: sensor event for unknown buffer '%s'",
-                self.buffer_name)
             return None
         feeder = fb.feeders.get(self.feeder_name)
         if feeder is None:
@@ -1367,8 +1405,34 @@ class FilaBufferSensorLink:
         self._feeder = feeder
         return feeder
 
+    def _resolve_buffer(self):
+        if self._buffer is not None:
+            return self._buffer
+        manager = get_filabuffer_manager(self.printer)
+        fb = manager.buffers.get(self.buffer_name)
+        if fb is None:
+            logging.warning(
+                "filabuffer: sensor event for unknown buffer '%s'",
+                self.buffer_name)
+            return None
+        self._buffer = fb
+        return fb
+
     def notify(self, eventtime, present):
         try:
+            if self.role == 'runout':
+                fb = self._resolve_buffer()
+                if fb is None:
+                    return
+                if not present:
+                    # add code to select feeder to send filament.
+                    logging.info("filabuffer: runout sensor %s present, selecting feeder to send filament", self.buffer_name)
+                    bSelected = fb._select_feeder(None)
+                    if not bSelected:
+                        logging.error("filabuffer: failed to select feeder to send filament")
+                        fb._enter_error(ERROR_RUNOUT)
+                        return
+                return
             feeder = self._resolve_feeder()
             if feeder is None:
                 return
@@ -1394,9 +1458,9 @@ def load_sensor_link(config):
             "filabuffer link on %s requires filabuffer_feeder and "
             "filabuffer_role" % (config.get_name(),))
     role = role.lower()
-    if role not in ('inlet', 'buffer'):
+    if role not in ('inlet', 'buffer', 'runout'):
         raise config.error(
-            "filabuffer_role on %s must be 'inlet' or 'buffer'"
+            "filabuffer_role on %s must be 'inlet', 'buffer' or 'runout'"
             % (config.get_name(),))
     get_filabuffer_manager(config.get_printer())
     return FilaBufferSensorLink(
