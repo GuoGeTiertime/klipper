@@ -41,6 +41,7 @@ ERROR_INIT_RETRACT_FAIL = "init_retract_fail"
 ERROR_INIT_RUNOUT = "init_runout"
 ERROR_MULTI_BUFFER_FILAMENT = "multi_buffer_filament"
 ERROR_INIT_SENSOR_INVALID = "init_sensor_invalid"
+ERROR_RETRACT_FAIL = "retract_fail"
 
 
 # Min print_time gap between MCU digital_out/pwm events (avoid "Timer too close")
@@ -402,6 +403,7 @@ class FilaFeeder:
         self._init_phase = None
         self._inlet_present = False
         self._buffer_present = False
+        self._error_msg = None
         gearing = _get_feeder_gear_ratio(config, feeder_index)
         microstep = _get_feeder_int(
             config, 'microstep', feeder_index, 16, minval=1, maxval=256)
@@ -477,10 +479,12 @@ class FilaFeeder:
 
     def set_run_state(self, state, init_phase=None):
         self.feeder_state = state
+        self._error_msg = None
         self._init_phase = init_phase
 
-    def set_error_state(self):
+    def set_error_state(self, errmsg):
         self.feeder_state = FEEDER_ERROR
+        self._error_msg = errmsg
         self._init_phase = None
 
     def clear_run_state(self):
@@ -517,6 +521,7 @@ class FilaFeeder:
         return {
             'filabuffer': self.fb.name,
             'state': self.feeder_state,
+            'errmsg': self._error_msg,
             'inlet': self._inlet_present,
             'buffer': self._buffer_present,
             'init_phase': self._init_phase,
@@ -795,10 +800,7 @@ class FilaBuffer:
         self.mode = MODE_ERROR
         self.error_msg = msg
         self._deactivate_all_feeders()
-        running = [u for u in self.feeders.values() if u.is_running()]
         self._stop_all_motors()
-        for u in running:
-            u.set_error_state()
         if msg == ERROR_JAM:
             self.gcode_queue.enqueue(self.jam_gcode, self._pause_prefix())
         elif msg == ERROR_FEED_TIMEOUT:
@@ -817,13 +819,12 @@ class FilaBuffer:
         if act_type == ACT_TYPE_CMD_MOVE:
             return
         if act_type == ACT_TYPE_INIT_FORWARD:
-            feeder.set_error_state()
-            self._enter_error(ERROR_INIT_FEED_FAIL)
+            feeder.set_error_state(ERROR_INIT_FEED_FAIL)
         elif act_type == ACT_TYPE_INIT_RETRACT:
             self._complete_init_retract_check(feeder)
         elif (act_type == ACT_TYPE_RETRACT):
             if feeder.buffer_present:
-                feeder.set_error_state()
+                feeder.set_error_state(ERROR_RETRACT_FAIL)
             elif feeder.inlet_present:
                 feeder.feeder_state = FEEDER_INSERT
             else:
@@ -924,7 +925,7 @@ class FilaBuffer:
 
     def _on_break(self, feeder):
         feeder.motor_halt()
-        feeder.set_error_state()
+        feeder.set_error_state(ERROR_BREAK)
         if feeder.is_selected():
             self.active_feeder = None  # clear active feeder
             if self.is_printing():
@@ -944,8 +945,6 @@ class FilaBuffer:
 
     def _start_feeder_init(self, feeder):
         if not feeder.inlet_present or feeder.buffer_present:
-            feeder.set_error_state()
-            self._enter_error(ERROR_INIT_SENSOR_INVALID)
             return
         feeder.set_run_state(FEEDER_INIT, INIT_PHASE_FORWARD)
         feeder.motor.start(self.len2buffer, self.init_speed, ACT_TYPE_INIT_FORWARD)
@@ -964,13 +963,11 @@ class FilaBuffer:
                     logging.info("filabuffer %s %s init retract start",self.name, feeder.name)
                 elif not feeder.inlet_present and old_inlet:
                     feeder.motor_halt()
-                    feeder.set_error_state()
-                    self._enter_error(ERROR_INIT_RUNOUT)
+                    feeder.set_error_state(ERROR_INIT_RUNOUT)
             elif feeder._init_phase == INIT_PHASE_RETRACT:
                 if not feeder.inlet_present and old_inlet:
                     feeder.motor_halt()
-                    feeder.set_error_state()
-                    self._enter_error(ERROR_INIT_RUNOUT)
+                    feeder.set_error_state(ERROR_INIT_RUNOUT)
 
     def _complete_init_retract_check(self, feeder):
         """After full retract distance: buffer false -> ready, true -> fail."""
@@ -979,8 +976,7 @@ class FilaBuffer:
             feeder.set_run_state(FEEDER_READY)
             logging.info("filabuffer %s %s init done" % (self.name, feeder.name ))
         else:
-            feeder.set_error_state()
-            self._enter_error(ERROR_INIT_RETRACT_FAIL)
+            feeder.set_error_state(ERROR_INIT_RETRACT_FAIL)
             logging.info("filabuffer %s %s init retract fail" % (self.name, feeder.name ))
 
     def _require_work_mode(self):
