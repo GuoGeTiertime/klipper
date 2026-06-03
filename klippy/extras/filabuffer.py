@@ -681,7 +681,6 @@ class FilaBuffer:
 
     def _sync_all_from_linked_sensors(self, force=False, clear_error=True):
         self._pull_linked_sensor_states()
-        self._stop_all_motors()
         for u in self.feeders.values():
             u._init_phase = None
             u.sync_stable_state(force=force)
@@ -1051,6 +1050,8 @@ class FilaBuffer:
         return None
 
     def _select_feeder(self, feeder):
+        if self.mode != MODE_WORK: 
+            return False
         if feeder is None:
             feeder = self._get_optional_feeder()
             if feeder is None:
@@ -1127,6 +1128,7 @@ class FilaBuffer:
         self.mode = MODE_WORK
         self.error_msg = None
         self._sync_work_feed()
+        self._select_feeder(None) #自动选择一个feeder
         gcmd.respond_info("filabuffer %s mode: %s" % (self.name, self.mode))
 
     cmd_FILA_BUFFER_STOP_help = "Stop filabuffer"
