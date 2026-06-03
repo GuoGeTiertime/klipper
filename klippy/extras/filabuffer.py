@@ -5,6 +5,8 @@
 # This file may be distributed under the terms of the GNU GPLv3 license.
 import logging
 
+from . import pwm_cycle_time
+
 # Buffer sensor bits (pin order: jam, low, full)
 BUFF_JAM = 0x01
 BUFF_LOW = 0x02
@@ -50,6 +52,10 @@ MCU_PIN_EVENT_DELAY = 0.025
 FEED_RENEW_MARGIN = 0.15
 # FilaMotor fixed timing (not from config)
 MOTOR_MAX_CHUNK_TIME = 4.0
+MOTOR_ACCEL_SEGMENT_TIME = 0.100
+MOTOR_ACCEL_FRACTION = 0.25
+MOTOR_STEP_DUTY = 0.333
+MOTOR_DISTANCE_EPS = 0.000001
 
 
 # Per-feeder options use suffix _0, _1, _2. Shared mechanics (microstep,
@@ -202,12 +208,15 @@ class FilaMotor:
         self._move_mm = 0.
         self._chunk_mm = 0.
         self._chunk_start_pt = 0.
+        self._chunk_speed = 0.
         self._speed = 0.
+        self._target_speed = 0.
         self._forward = True
         self._act_type = None
         self.cycle_time = 0.1
         self.last_pt = 0.
         self.chunk_end_pt = 0.
+        self._chunk_renew_margin = 0.
         self._chunk_gen = 0
         fb_name = config.get_name().split()[-1]
         ppins = config.get_printer().lookup_object('pins')
@@ -216,9 +225,10 @@ class FilaMotor:
             raise config.error(
                 "filabuffer %s feeder %d: step_pin_%d is required"
                 % (fb_name, feeder_index, feeder_index))
-        self.step = ppins.setup_pin('pwm', step_pin)
-        self.step.setup_cycle_time(0.0002)
-        self.step.setup_max_duration(0.)
+        pin_params = ppins.lookup_pin(step_pin, can_invert=True)
+        self.mcu = pin_params['chip']
+        self.step = pwm_cycle_time.MCU_pwm_cycle(
+            pin_params, self.cycle_time, 0., 0.)
         self.dir = None
         dir_pin = _get_feeder_option(config, 'dir_pin', feeder_index)
         if dir_pin is not None:
@@ -244,6 +254,33 @@ class FilaMotor:
             return None
         return self._act_type
 
+    @staticmethod
+    def build_speed_segments(distance, target_speed,
+                             segment_time=MOTOR_ACCEL_SEGMENT_TIME,
+                             accel_fraction=MOTOR_ACCEL_FRACTION):
+        remain = abs(distance)
+        target_speed = max(0.01, abs(target_speed))
+        cur_speed = 0.
+        segments = []
+        while remain > MOTOR_DISTANCE_EPS:
+            if cur_speed < target_speed:
+                speed = min(target_speed,
+                            cur_speed + target_speed * accel_fraction)
+                max_time = segment_time
+            else:
+                speed = target_speed
+                max_time = MOTOR_MAX_CHUNK_TIME
+            duration = min(max_time, remain / speed)
+            segments.append((duration, speed))
+            remain -= speed * duration
+            cur_speed = speed
+        return segments
+
+    @staticmethod
+    def get_renew_margin(duration, has_more):
+        base_margin = FEED_RENEW_MARGIN if has_more else 0.05
+        return min(base_margin, duration * 0.25)
+
     def start(self, distance, speed, act_type):
         if distance == 0.:
             return
@@ -259,7 +296,8 @@ class FilaMotor:
         self._move_mm = 0.
         self._remain = abs(distance)
         self._forward = distance > 0
-        self._speed = max(0.01, abs(speed))
+        self._target_speed = max(0.01, abs(speed))
+        self._speed = 0.
         self._act_type = act_type
         curtime = self.reactor.monotonic()
         if self.enable is not None:
@@ -306,15 +344,16 @@ class FilaMotor:
         if halt_pt is None:
             self._add_move_mm(self._chunk_mm)
         else:
-            end_pt = self._chunk_start_pt + self._chunk_mm / self._speed
+            end_pt = self._chunk_start_pt + self._chunk_mm / self._chunk_speed
             if halt_pt <= self._chunk_start_pt:
                 partial = 0.
             elif halt_pt >= end_pt:
                 partial = self._chunk_mm
             else:
-                partial = (halt_pt - self._chunk_start_pt) * self._speed
+                partial = (halt_pt - self._chunk_start_pt) * self._chunk_speed
             self._add_move_mm(partial)
         self._chunk_mm = 0.
+        self._chunk_speed = 0.
 
     def _halt_pwm(self):
         curtime = self.reactor.monotonic()
@@ -322,46 +361,57 @@ class FilaMotor:
         pt_pwm = max(pt + MCU_PIN_EVENT_DELAY, self.last_pt + MCU_PIN_EVENT_DELAY)
         self._flush_current_chunk(pt_pwm)
         # Keep enable asserted after stopping pulses so the motor holds torque.
-        self.step.set_pwm(pt_pwm, 0)
+        self.step.set_pwm_cycle(pt_pwm, 0., self.cycle_time)
         self.last_pt = pt_pwm
         self.chunk_end_pt = pt_pwm + 0.05
+        self._chunk_renew_margin = 0.
 
     def _sched_print_time(self, curtime, gap=0.):
-        mcu = self.step.get_mcu()
+        mcu = self.mcu
         return max(mcu.estimated_print_time(curtime) + MCU_PIN_EVENT_DELAY,
                    self.last_pt + gap)
+
+    def _get_next_chunk(self):
+        if self._speed < self._target_speed:
+            speed = min(self._target_speed,
+                        self._speed + self._target_speed
+                        * MOTOR_ACCEL_FRACTION)
+            max_time = MOTOR_ACCEL_SEGMENT_TIME
+        else:
+            speed = self._target_speed
+            max_time = MOTOR_MAX_CHUNK_TIME
+        duration = min(max_time, self._remain / speed)
+        return speed * duration, speed
 
     def _run_chunk(self, curtime, move_gen):
         if not self._active or move_gen != self._gen:
             return
-        if self._remain <= 0.:
+        if self._remain <= MOTOR_DISTANCE_EPS:
             self._flush_current_chunk()
             self._end_move(self._act_type, 'complete')
             return
-        length = min(self._remain, self._speed * MOTOR_MAX_CHUNK_TIME)
+        length, speed = self._get_next_chunk()
         pt = max(self._sched_print_time(curtime, MCU_PIN_EVENT_DELAY),
                  self.chunk_end_pt)
-        ct = 1.0 / (self._speed / self.mm_per_pulse)
+        ct = self.mm_per_pulse / speed
         if self.cycle_time != ct:
             self.cycle_time = ct
-            mcu = self.step.get_mcu()
-            ticks = mcu.seconds_to_clock(ct)
-            self.step._pwm_max = float(ticks)
-            mcu._serial.send(
-                "set_digital_out_pwm_cycle oid=%d cycle_ticks=%d"
-                % (self.step._oid, ticks))
         if self.dir is not None:
             self.dir.set_digital(pt, 1 if self._forward else 0)
-        self.step.set_pwm(pt, 0.333)
+        self.step.set_pwm_cycle(pt, MOTOR_STEP_DUTY, self.cycle_time)
         self.last_pt = pt
-        self.chunk_end_pt = pt + length / self._speed
+        self.chunk_end_pt = pt + length / speed
+        duration = self.chunk_end_pt - pt
         self._chunk_start_pt = pt
         self._chunk_mm = length
+        self._chunk_speed = speed
         self._remain -= length
+        self._speed = speed
         if move_gen != self._gen:
             return
-        mcu = self.step.get_mcu()
-        margin = FEED_RENEW_MARGIN if self._remain > 0. else 0.05
+        mcu = self.mcu
+        margin = self.get_renew_margin(duration, self._remain > 0.)
+        self._chunk_renew_margin = margin
         delay = max(0.01, self.chunk_end_pt - margin
                     - mcu.estimated_print_time(curtime))
         self._chunk_gen = move_gen
@@ -373,10 +423,10 @@ class FilaMotor:
         self._timer = None
         if not self._active or self._chunk_gen != self._gen:
             return self.reactor.NEVER
-        mcu = self.step.get_mcu()
+        mcu = self.mcu
         pt = mcu.estimated_print_time(eventtime)
         if self._remain > 0.:
-            if pt + FEED_RENEW_MARGIN < self.chunk_end_pt:
+            if pt + self._chunk_renew_margin < self.chunk_end_pt:
                 return eventtime + 0.01
             self._flush_current_chunk()
             self._run_chunk(eventtime, self._chunk_gen)
