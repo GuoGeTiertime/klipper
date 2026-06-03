@@ -1234,53 +1234,35 @@ class FilaBufferSensorLink:
         self._buffer = None
 
     def _resolve_feeder(self):
-        if self._feeder is not None:
-            return self._feeder
-        manager = get_filabuffer_manager(self.printer)
-        fb = self._resolve_buffer()
-        if fb is None:
-            return None
-        feeder = fb.feeders.get(self.feeder_name)
-        if feeder is None:
-            logging.warning(
-                "filabuffer: sensor event for unknown feeder '%s' on '%s'",
-                self.feeder_name, self.buffer_name)
-            return None
-        self._feeder = feeder
-        return feeder
+        if self._feeder is None:
+            fb = self._resolve_buffer()
+            self._feeder = fb.feeders.get(self.feeder_name)
+            if self._feeder is None:
+                gcode = self.printer.lookup_object('gcode')
+                raise gcode.error("Unknown feeder: '%s' on buffer: '%s'" % (self.feeder_name, self.buffer_name))
+        return self._feeder
 
     def _resolve_buffer(self):
-        if self._buffer is not None:
-            return self._buffer
-        manager = get_filabuffer_manager(self.printer)
-        fb = manager.buffers.get(self.buffer_name)
-        if fb is None:
-            logging.warning(
-                "filabuffer: sensor event for unknown buffer '%s'",
-                self.buffer_name)
-            return None
-        self._buffer = fb
-        return fb
+        if self._buffer is None:
+            manager = get_filabuffer_manager(self.printer)
+            self._buffer = manager.buffers.get(self.buffer_name)
+            if self._buffer is None:
+                gcode = self.printer.lookup_object('gcode')
+                raise gcode.error("Unknown filabuffer '%s'" % (self.buffer_name,))
+        return self._buffer
 
     def notify(self, eventtime, present):
         try:
             if self.role == 'runout':
-                fb = self._resolve_buffer()
-                if fb is None:
-                    return
-                if not present:
-                    # add code to select feeder to send filament.
+                if not present: # filament runout. 
                     logging.info("filabuffer: runout sensor %s present, selecting feeder to send filament", self.buffer_name)
+                    fb = self._resolve_buffer()
                     bSelected = fb._select_feeder(None)
                     if not bSelected:
-                        logging.error("filabuffer: failed to select feeder to send filament")
+                        logging.error("filabuffer: failed to select feeder to refill filament")
                         fb._enter_error(ERROR_RUNOUT)
-                        return
-                return
-            feeder = self._resolve_feeder()
-            if feeder is None:
-                return
-            feeder.update_sensor(self.role, eventtime, bool(present))
+            else:
+                self._resolve_feeder().update_sensor(self.role, eventtime, bool(present))
         except Exception:
             logging.exception("filabuffer notify from sensor failed")
 
