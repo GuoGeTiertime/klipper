@@ -255,28 +255,6 @@ class FilaMotor:
         return self._act_type
 
     @staticmethod
-    def build_speed_segments(distance, target_speed,
-                             segment_time=MOTOR_ACCEL_SEGMENT_TIME,
-                             accel_fraction=MOTOR_ACCEL_FRACTION):
-        remain = abs(distance)
-        target_speed = max(0.01, abs(target_speed))
-        cur_speed = 0.
-        segments = []
-        while remain > MOTOR_DISTANCE_EPS:
-            if cur_speed < target_speed:
-                speed = min(target_speed,
-                            cur_speed + target_speed * accel_fraction)
-                max_time = segment_time
-            else:
-                speed = target_speed
-                max_time = MOTOR_MAX_CHUNK_TIME
-            duration = min(max_time, remain / speed)
-            segments.append((duration, speed))
-            remain -= speed * duration
-            cur_speed = speed
-        return segments
-
-    @staticmethod
     def get_renew_margin(duration, has_more):
         base_margin = FEED_RENEW_MARGIN if has_more else 0.05
         return min(base_margin, duration * 0.25)
