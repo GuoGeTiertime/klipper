@@ -429,7 +429,8 @@ class FilaMotor:
             if pt + self._chunk_renew_margin < self.chunk_end_pt:
                 return eventtime + 0.01
             self._flush_current_chunk()
-            self._run_chunk(eventtime, self._chunk_gen)
+            # self._run_chunk(eventtime, self._chunk_gen)
+            self._run_chunk(self.reactor.monotonic(), self._chunk_gen)
             return self.reactor.NEVER
         if pt < self.chunk_end_pt - 0.05:
             return eventtime + 0.01
@@ -1027,7 +1028,8 @@ class FilaBuffer:
             logging.info("filabuffer %s %s init done" % (self.name, feeder.name ))
         else:
             feeder.set_error_state(ERROR_INIT_RETRACT_FAIL)
-            logging.info("filabuffer %s %s init retract fail" % (self.name, feeder.name ))
+            logging.info("filabuffer %s %s init retract fail, inlet=%d buffer=%d" % 
+                (self.name, feeder.name, int(feeder.inlet_present), int(feeder.buffer_present)))
 
     def _require_work_mode(self):
         if self.mode != MODE_WORK:
