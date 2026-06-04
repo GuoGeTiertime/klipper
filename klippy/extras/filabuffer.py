@@ -1140,6 +1140,12 @@ class FilaBuffer:
 
     cmd_FILA_BUFFER_START_help = "Start filabuffer work mode"
     def cmd_FILA_BUFFER_START(self, gcmd):
+        if self.mode == MODE_WORK:
+            gcmd.respond_info("filabuffer %s already in work mode" % (self.name,))
+            feeder = self._active()
+            if feeder is None:
+                self._select_feeder(None)
+            return
         self._pull_linked_sensor_states()
         for u in self.feeders.values():
             u.sync_stable_state()
