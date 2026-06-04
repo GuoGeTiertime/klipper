@@ -303,7 +303,6 @@ class FilaMotor:
         if self.enable is not None:
             pt = self._sched_print_time(curtime, MCU_PIN_EVENT_DELAY)
             self.enable.set_digital(pt, 1)
-            self.last_pt = pt
         self._run_chunk(curtime, move_gen)
 
     def stop(self, act_type, call_stop_cb=False):
@@ -358,7 +357,7 @@ class FilaMotor:
     def _halt_pwm(self):
         curtime = self.reactor.monotonic()
         pt = self._sched_print_time(curtime, MCU_PIN_EVENT_DELAY)
-        pt_pwm = max(pt + MCU_PIN_EVENT_DELAY, self.last_pt + MCU_PIN_EVENT_DELAY)
+        pt_pwm = max(pt, self.last_pt + MCU_PIN_EVENT_DELAY)
         self._flush_current_chunk(pt_pwm)
         # Keep enable asserted after stopping pulses so the motor holds torque.
         self.step.set_pwm_cycle(pt_pwm, 0., self.cycle_time)
@@ -367,8 +366,7 @@ class FilaMotor:
         self._chunk_renew_margin = 0.
 
     def _sched_print_time(self, curtime, gap=0.):
-        mcu = self.mcu
-        return max(mcu.estimated_print_time(curtime) + MCU_PIN_EVENT_DELAY,
+        return max(self.mcu.estimated_print_time(curtime) + MCU_PIN_EVENT_DELAY,
                    self.last_pt + gap)
 
     def _get_next_chunk(self):
@@ -394,8 +392,7 @@ class FilaMotor:
         pt = max(self._sched_print_time(curtime, MCU_PIN_EVENT_DELAY),
                  self.chunk_end_pt)
         ct = self.mm_per_pulse / speed
-        if self.cycle_time != ct:
-            self.cycle_time = ct
+        self.cycle_time = ct
         if self.dir is not None:
             self.dir.set_digital(pt, 1 if self._forward else 0)
         self.step.set_pwm_cycle(pt, MOTOR_STEP_DUTY, self.cycle_time)
@@ -423,8 +420,7 @@ class FilaMotor:
         self._timer = None
         if not self._active or self._chunk_gen != self._gen:
             return self.reactor.NEVER
-        mcu = self.mcu
-        pt = mcu.estimated_print_time(eventtime)
+        pt = self.mcu.estimated_print_time(eventtime)
         if self._remain > 0.:
             if pt + self._chunk_renew_margin < self.chunk_end_pt:
                 return eventtime + 0.01
@@ -617,7 +613,7 @@ class FilaBuffer:
         self.mode = MODE_DISABLED
         self.error_msg = None
         self.pinout_delay = config.getfloat('pinout_delay', 0.025, minval=0.010, maxval=0.050)
-        self.watchdog_time = config.getfloat('watchdog_time', 0.25, above=0.05)
+        self.watchdog_time = config.getfloat('watchdog_time', 0.5, above=0.05)
 
         #define length of fila tube, 2 segments, 1. inlet to buffer, 2. buffer to extruder.
         self.len2buffer = config.getfloat('len2buffer', 1000., above=10.) # inlet to buffer. 
@@ -1069,8 +1065,6 @@ class FilaBuffer:
         return idle.get_status(self.reactor.monotonic())['state'] == 'Printing'
 
     def _watchdog_event(self, eventtime):
-        if self.mode in (MODE_ERROR, MODE_DISABLED):
-            return eventtime + self.watchdog_time
         if self.mode == MODE_WORK:
             if not self._enforce_single_buffer_filament():
                 return eventtime + self.watchdog_time
