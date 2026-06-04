@@ -838,12 +838,12 @@ class FilaBuffer:
         if not self._check_buffer_exclusive():
             self._enter_error(ERROR_FULL_EXCLUSIVE_VIOLATION)
             return
-        # jump to jam state, handle jam error.
-        if new & BUFF_JAM and not (old & BUFF_JAM):
-            self._on_jam()
-            return
         # work mode, sync work feed.
         if self.mode == MODE_WORK:
+            # jump to jam state, handle jam error.
+            if new & BUFF_JAM and not (old & BUFF_JAM):
+                self._on_jam()
+                return
             self._sync_work_feed()
 
     def log_sensor_msg(self, msg):
@@ -906,7 +906,7 @@ class FilaBuffer:
             return
         feeder = self._active()
         if feeder is None or feeder.feeder_state not in (
-                FEEDER_READY, FEEDER_ACTIVE):
+                FEEDER_READY, FEEDER_ACTIVE, FEEDER_RUNOUT):
             return
         
         if state & BUFF_FULL:
@@ -1253,10 +1253,11 @@ class FilaBufferSensorLink:
                 if not present: # filament runout. 
                     logging.info("filabuffer: runout sensor %s present, selecting feeder to send filament", self.buffer_name)
                     fb = self._resolve_buffer()
-                    bSelected = fb._select_feeder(None)
-                    if not bSelected:
-                        logging.error("filabuffer: failed to select feeder to refill filament")
-                        fb._enter_error(ERROR_RUNOUT)
+                    if fb.mode == MODE_WORK:
+                        bSelected = fb._select_feeder(None)
+                        if not bSelected:
+                            logging.error("filabuffer: failed to select feeder to refill filament")
+                            fb._enter_error(ERROR_RUNOUT)
             else:
                 self._resolve_feeder().update_sensor(self.role, eventtime, bool(present))
         except Exception:
