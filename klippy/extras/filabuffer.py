@@ -46,8 +46,7 @@ ERROR_INIT_SENSOR_INVALID = "init_sensor_invalid"
 ERROR_RETRACT_FAIL = "retract_fail"
 
 
-# Min print_time gap between MCU digital_out/pwm events (avoid "Timer too close")
-MCU_PIN_EVENT_DELAY = 0.025
+# Min print_time gap between MCU digital_out/pwm events: [filabuffer] pinout_delay
 # Renew software-PWM queue this many seconds before chunk ends (print_time)
 FEED_RENEW_MARGIN = 0.15
 # FilaMotor fixed timing (not from config)
@@ -194,8 +193,9 @@ class FilaMotor:
     """PWM step/dir/enable driver. start/stop only; on_stop_cb from __init__."""
 
     def __init__(self, reactor, config, feeder_index, mm_per_pulse,
-                 on_stop_cb=None, name=''):
+                 pinout_delay, on_stop_cb=None, name=''):
         self.reactor = reactor
+        self.pinout_delay = pinout_delay
         self.name = name or ('motor_%d' % feeder_index)
         self.mm_per_pulse = mm_per_pulse
         self._on_stop_cb = on_stop_cb
@@ -301,7 +301,7 @@ class FilaMotor:
         self._act_type = act_type
         curtime = self.reactor.monotonic()
         if self.enable is not None:
-            pt = self._sched_print_time(curtime, MCU_PIN_EVENT_DELAY)
+            pt = self._sched_print_time(curtime, self.pinout_delay)
             self.enable.set_digital(pt, 1)
         self._run_chunk(curtime, move_gen)
 
@@ -356,8 +356,8 @@ class FilaMotor:
 
     def _halt_pwm(self):
         curtime = self.reactor.monotonic()
-        pt = self._sched_print_time(curtime, MCU_PIN_EVENT_DELAY)
-        pt_pwm = max(pt, self.last_pt + MCU_PIN_EVENT_DELAY)
+        pt = self._sched_print_time(curtime, self.pinout_delay)
+        pt_pwm = max(pt, self.last_pt + self.pinout_delay)
         self._flush_current_chunk(pt_pwm)
         # Keep enable asserted after stopping pulses so the motor holds torque.
         self.step.set_pwm_cycle(pt_pwm, 0., self.cycle_time)
@@ -366,7 +366,7 @@ class FilaMotor:
         self._chunk_renew_margin = 0.
 
     def _sched_print_time(self, curtime, gap=0.):
-        return max(self.mcu.estimated_print_time(curtime) + MCU_PIN_EVENT_DELAY,
+        return max(self.mcu.estimated_print_time(curtime) + self.pinout_delay,
                    self.last_pt + gap)
 
     def _get_next_chunk(self):
@@ -389,7 +389,7 @@ class FilaMotor:
             self._end_move(self._act_type, 'complete')
             return
         length, speed = self._get_next_chunk()
-        pt = max(self._sched_print_time(curtime, MCU_PIN_EVENT_DELAY),
+        pt = max(self._sched_print_time(curtime, self.pinout_delay),
                  self.chunk_end_pt)
         ct = self.mm_per_pulse / speed
         self.cycle_time = ct
@@ -461,7 +461,7 @@ class FilaFeeder:
         mm_per_pulse = rotate_distance / (microstep * full_steps * gearing)
         self.gearing = gearing
         self.motor = FilaMotor(
-            fb.reactor, config, feeder_index, mm_per_pulse,
+            fb.reactor, config, feeder_index, mm_per_pulse, fb.pinout_delay,
             on_stop_cb=self._on_motor_stop, name=feeder_name)
         self._gpio_roles = []
         gpio_pin_list = []

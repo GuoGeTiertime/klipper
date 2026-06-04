@@ -237,7 +237,7 @@ FILA_BUFFER_SELECT_FEEDER BUFFER=buffer0 FEEDER=unit0
 
 | # | 项 | 操作 | 期望 |
 |---|-----|------|------|
-| 8.1 | `pinout_delay` / `MCU_PIN_EVENT_DELAY` | 改模块常量或板级延迟 | step/enable 相对调度有足够间隔 |
+| 8.1 | `pinout_delay` | 改 `[filabuffer]` 段内 `pinout_delay`（0.010~0.050） | step/enable 相对调度有足够间隔 |
 | 8.2 | 急停 | FULL 或 jam | `motor_halt`，PWM 停 |
 | 8.3 | 分段 PWM | work 长时 LOW | 每段 ≤ `MOTOR_MAX_CHUNK_TIME`（4s），定时续段 |
 | 8.4 | 无 enable | 省略 enable_pin | PWM 仍输出 |
