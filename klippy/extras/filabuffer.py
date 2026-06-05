@@ -592,6 +592,8 @@ class FilaBuffer:
         self.error_msg = None
         self.pinout_delay = config.getfloat('pinout_delay', 0.025, minval=0.010, maxval=0.050)
         self.watchdog_time = config.getfloat('watchdog_time', 0.5, above=0.05)
+        self.feed_idle_time = config.getfloat('feed_idle_time', 10., above=0.)
+        self._not_full_idle_since = 0.
 
         #define length of fila tube, 2 segments, 1. inlet to buffer, 2. buffer to extruder.
         self.len2buffer = config.getfloat('len2buffer', 1000., above=10.) # inlet to buffer. 
@@ -945,16 +947,29 @@ class FilaBuffer:
         if state & BUFF_FULL:
             feeder.motor_halt()
             feeder.clear_run_state()
+            self._not_full_idle_since = self.reactor.monotonic()
         elif state & BUFF_LOW:
             self._start_feeder_feed(feeder, self.feed_speed, self.feed_len)
 
-    # def _on_runout(self, feeder, eventtime):
-    #     feeder.motor_halt()
-    #     feeder.set_error_state()
-    #     if feeder.is_selected():
-    #         self.active_feeder = None  # clear active feeder
-    #         if self.is_printing():
-    #             self._enter_error(ERROR_RUNOUT)
+    def _check_not_full_idle_feed(self, eventtime):
+        if self.mode != MODE_WORK:
+            self._not_full_idle_since = eventtime
+        else:
+            feeder = self._active()
+            if feeder is not None and feeder.feeder_state == FEEDER_ACTIVE:
+                state = self.sensors.state
+                if state & BUFF_FULL:
+                    self._not_full_idle_since = eventtime
+                elif feeder.motor.is_moving():
+                    self._not_full_idle_since = eventtime
+                elif eventtime - self._not_full_idle_since > self.feed_idle_time:
+                    self._start_feeder_feed(feeder, self.feed_speed, self.feed_len)
+                    self._not_full_idle_since = eventtime
+                    self.log_sensor_msg(
+                        "buffer %s force feed %s after max idle time"
+                        % (self.name, feeder.name))
+            else:
+                self._not_full_idle_since = eventtime
 
     def _on_break(self, feeder):
         feeder.motor_halt()
@@ -1055,6 +1070,7 @@ class FilaBuffer:
             if not self._enforce_single_buffer_filament():
                 return eventtime + self.watchdog_time
             self._sync_work_feed()
+            self._check_not_full_idle_feed(eventtime)
         return eventtime + self.watchdog_time
 
     def _buffered_feeders(self):
