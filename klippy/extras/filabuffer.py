@@ -660,6 +660,12 @@ class FilaBuffer:
         self._load_feeders(config)
         _consume_feeder_config_options(config)
 
+    def log_sensor_msg(self, msg):
+        if not self.sensor_log:
+            return
+        logging.info(msg)
+        self.gcode.respond_info(msg)
+
     def _load_feeders(self, config):
         idx = 0
         while _has_feeder_index(config, idx):
@@ -871,12 +877,6 @@ class FilaBuffer:
                 return
             self._sync_work_feed()
 
-    def log_sensor_msg(self, msg):
-        if not self.sensor_log:
-            return
-        logging.info(msg)
-        self.gcode.respond_info(msg)
-
     # 核心处理函数, 传感器数据变化处理,状态机更新,执行都在这里.
     def note_feeder_change(self, feeder, eventtime, old_inlet, old_buffer):
         old_state = feeder.feeder_state
@@ -887,12 +887,18 @@ class FilaBuffer:
                   int(old_buffer), int(feeder.buffer_present),
                   old_state, self.mode))
         self.log_sensor_msg(msg)
+        # 1. update feeder state from sensors.
         feeder.sync_stable_state()
         self.log_sensor_msg("feeder %s state %s -> %s" % (feeder.name, old_state, feeder.feeder_state))
+        # 2. verify feeder state is valid for select.
+        if feeder.is_selected() and feeder.feeder_state not in (FEEDER_ACTIVE, FEEDER_RUNOUT):
+            self.log_sensor_msg("feeder %s state %s is not valid for select, clear active feeder" % (feeder.name, feeder.feeder_state))
+            self.active_feeder = None
+        # 3. handle init / retract edges.
         if feeder.feeder_state in (FEEDER_INIT, FEEDER_RETRACT):
             self._handle_init_edges(feeder, eventtime, old_inlet, old_buffer)
             return
-        # feeder from empty to ready, start init.
+        # 4. feeder from empty to ready, start init.
         if (self.mode == MODE_WORK
                 and old_state == FEEDER_EMPTY
                 and feeder.feeder_state == FEEDER_INSERT):
@@ -900,6 +906,7 @@ class FilaBuffer:
             self._start_feeder_init(feeder)
             self._log_feeder_state_change(feeder, old_state)
             return
+        # 5. handle other feeder state changes.
         if feeder.is_selected():
             if feeder.feeder_state == FEEDER_RUNOUT and old_state == FEEDER_ACTIVE:
                 self.log_sensor_msg("feeder %s runout from active to runout" % (feeder.name))
@@ -910,6 +917,7 @@ class FilaBuffer:
             elif old_buffer and not feeder.buffer_present:
                 self._on_break(feeder)
 
+        # 6. log feeder state change.
         if feeder.feeder_state != old_state:
             self._log_feeder_state_change(feeder, old_state)
 
