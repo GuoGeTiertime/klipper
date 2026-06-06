@@ -44,6 +44,8 @@ ERROR_INIT_RUNOUT = "init_runout"
 ERROR_MULTI_BUFFER_FILAMENT = "multi_buffer_filament"
 ERROR_INIT_SENSOR_INVALID = "init_sensor_invalid"
 ERROR_RETRACT_FAIL = "retract_fail"
+ERROR_FEED_EXTRUDER_JAM = "extruder_jam"
+ERROR_FEED_SLIP = "feed_slip"
 
 
 # Min print_time gap between MCU digital_out/pwm events: [filabuffer] pinout_delay
@@ -249,6 +251,24 @@ class FilaMotor:
     def get_total_mm(self):
         return self.total_mm
 
+    def get_position_mm(self):
+        """累计净位置 mm，含当前进行中行程（含未 flush 的 chunk）"""
+        pos = self.total_mm + self._move_mm
+        if not self._active or self._chunk_mm <= 0.:
+            return pos
+        curtime = self.reactor.monotonic()
+        pt = self.mcu.estimated_print_time(curtime)
+        end_pt = self._chunk_start_pt + self._chunk_mm / self._chunk_speed
+        if pt <= self._chunk_start_pt:
+            partial = 0.
+        elif pt >= end_pt:
+            partial = self._chunk_mm
+        else:
+            partial = (pt - self._chunk_start_pt) * self._chunk_speed
+        if self._forward:
+            return pos + partial
+        return pos - partial
+
     def get_act_type(self):
         if not self._active:
             return None
@@ -258,6 +278,22 @@ class FilaMotor:
     def get_renew_margin(duration, has_more):
         base_margin = FEED_RENEW_MARGIN if has_more else 0.05
         return min(base_margin, duration * 0.25)
+
+    @staticmethod
+    def build_speed_segments(distance, target_speed,
+                             segment_time=MOTOR_ACCEL_SEGMENT_TIME,
+                             accel_fraction=MOTOR_ACCEL_FRACTION):
+        remain = abs(distance)
+        target_speed = max(0.01, abs(target_speed))
+        speed = 0.
+        segments = []
+        while remain > MOTOR_DISTANCE_EPS:
+            speed = (min(target_speed, speed + target_speed * accel_fraction)
+                     if speed < target_speed else target_speed)
+            duration = min(segment_time, remain / speed)
+            segments.append((duration, speed))
+            remain -= speed * duration
+        return segments
 
     def start(self, distance, speed, act_type):
         if distance == 0.:
@@ -298,6 +334,7 @@ class FilaMotor:
         self._active = False
         self._remain = 0.
         self.total_mm += self._move_mm
+        self._move_mm = 0.
         if call_stop_cb and (self._on_stop_cb is not None):
             self._on_stop_cb(act_type, reason)
 
@@ -429,6 +466,9 @@ class FilaFeeder:
         self._inlet_present = False
         self._buffer_present = False
         self._error_msg = None
+        self.feed_match_feeder_base = 0.
+        self.feed_match_extruder_base = 0.
+        self.feed_match_skip = True
         gearing = _get_feeder_gear_ratio(config, feeder_index)
         microstep = _get_feeder_int(
             config, 'microstep', feeder_index, 16, minval=1, maxval=256)
@@ -471,6 +511,34 @@ class FilaFeeder:
 
     def motor_halt(self):
         self.motor.stop('halt', call_stop_cb=False)
+
+    def note_feed_match_select(self, extruder_mm):
+        self.feed_match_feeder_base = self._feed_match_motor_mm()
+        self.feed_match_extruder_base = extruder_mm
+        self.feed_match_skip = not self.buffer_present
+
+    def note_feed_match_full(self, extruder_mm):
+        self.feed_match_feeder_base = self._feed_match_motor_mm()
+        self.feed_match_extruder_base = extruder_mm
+        self.feed_match_skip = False
+
+    def check_feed_match(self, extruder_mm, tolerance):
+        if self.feed_match_skip or tolerance <= 0.:
+            return None
+        if not self.fb.is_printing():
+            self.feed_match_skip = True
+            return None
+        feeder_mm = self._feed_match_motor_mm()
+        diff = ((feeder_mm - self.feed_match_feeder_base)
+                - (extruder_mm - self.feed_match_extruder_base))
+        if diff > tolerance:  # feed more filament than extrude, feeder slip
+            return ERROR_FEED_SLIP
+        elif diff < -tolerance:  # feed less filament than expected, extruder jam. 
+            return ERROR_FEED_EXTRUDER_JAM
+        return None
+
+    def _feed_match_motor_mm(self):
+        return self.motor.get_position_mm()
 
     # callback function when motor stop at max length.
     def _on_motor_stop(self, act_type, reason):
@@ -594,6 +662,9 @@ class FilaBuffer:
         self.watchdog_time = config.getfloat('watchdog_time', 0.5, above=0.05)
         self.feed_idle_time = config.getfloat('feed_idle_time', 10., above=0.)
         self._not_full_idle_since = 0.
+        self.feed_match_tolerance = config.getfloat('feed_match_tolerance', 30., minval=0.)
+        self.print_stats = None
+        self.idle = None
 
         #define length of fila tube, 2 segments, 1. inlet to buffer, 2. buffer to extruder.
         self.len2buffer = config.getfloat('len2buffer', 1000., above=10.) # inlet to buffer. 
@@ -613,11 +684,11 @@ class FilaBuffer:
             self.printer.load_object(config, 'pause_resume')
         gcode_macro = self.printer.load_object(config, 'gcode_macro')
         self.jam_gcode = gcode_macro.load_template(config, 'jam_gcode', '')
-        self.low_timeout_gcode = gcode_macro.load_template(
-            config, 'low_timeout_gcode', '')
+        self.low_timeout_gcode = gcode_macro.load_template(config, 'low_timeout_gcode', '')
         self.break_gcode = gcode_macro.load_template(config, 'break_gcode', '')
-        self.runout_gcode = gcode_macro.load_template(
-            config, 'runout_gcode', '')
+        self.runout_gcode = gcode_macro.load_template(config, 'runout_gcode', '')
+        self.extruder_jam_gcode = gcode_macro.load_template(config, 'extruder_jam_gcode', '')
+        self.feed_slip_gcode = gcode_macro.load_template(config, 'feed_slip_gcode', '')
         self.gcode_queue = GcodeQueue(self.printer)
         self.sensors = BufferSensors(config, self)
         self._watchdog_timer = self.reactor.register_timer(
@@ -684,10 +755,19 @@ class FilaBuffer:
                 % (self.name,))
 
     def _handle_ready(self):
+        self.print_stats = self.printer.lookup_object('print_stats', None)
+        self.idle = self.printer.lookup_object('idle_timeout', None)
         self.reactor.update_timer(self._watchdog_timer, self.reactor.NOW)
         self.reactor.register_timer(
             self._startup_sync_event,
             self.reactor.monotonic() + 2.0)
+
+    def _get_extruded_mm(self, eventtime=None):
+        if eventtime is None:
+            eventtime = self.reactor.monotonic()
+        return self.print_stats.get_status(eventtime)['filament_used']
+        # not updated in real time, so use filament_used directly.
+        # return self.print_stats.filament_used
 
     def _startup_sync_event(self, eventtime):
         self._sync_all_from_linked_sensors(force=True, clear_error=False)
@@ -843,6 +923,10 @@ class FilaBuffer:
             self.gcode_queue.enqueue(self.runout_gcode, self._pause_prefix())
         elif msg == ERROR_BREAK:
             self.gcode_queue.enqueue(self.break_gcode, self._pause_prefix())
+        elif msg == ERROR_FEED_EXTRUDER_JAM:
+            self.gcode_queue.enqueue(self.extruder_jam_gcode, self._pause_prefix())
+        elif msg == ERROR_FEED_SLIP:
+            self.gcode_queue.enqueue(self.feed_slip_gcode, self._pause_prefix())
         logging.error("filabuffer %s error: %s", self.name, msg)
 
     def on_feeder_motor_stop(self, feeder, act_type, reason):
@@ -945,9 +1029,11 @@ class FilaBuffer:
             return
         
         if state & BUFF_FULL:
-            feeder.motor_halt()
-            feeder.clear_run_state()
             self._not_full_idle_since = self.reactor.monotonic()
+            if feeder.motor.is_moving():
+                feeder.motor_halt()
+                feeder.clear_run_state()
+                feeder.note_feed_match_full(self._get_extruded_mm())
         elif state & BUFF_LOW:
             self._start_feeder_feed(feeder, self.feed_speed, self.feed_len)
 
@@ -958,6 +1044,12 @@ class FilaBuffer:
             feeder = self._active()
             if feeder is not None and feeder.feeder_state == FEEDER_ACTIVE:
                 state = self.sensors.state
+                match_error = feeder.check_feed_match(
+                            self._get_extruded_mm(eventtime),
+                            self.feed_match_tolerance)
+                if match_error is not None:
+                    self._enter_error(match_error)
+                    return
                 if state & BUFF_FULL:
                     self._not_full_idle_since = eventtime
                 elif feeder.motor.is_moving():
@@ -1062,8 +1154,7 @@ class FilaBuffer:
                 "Over one buffer filament detected, buffer maybe collision")
 
     def is_printing(self):
-        idle = self.printer.lookup_object('idle_timeout')
-        return idle.get_status(self.reactor.monotonic())['state'] == 'Printing'
+        return self.idle.get_status(self.reactor.monotonic())['state'] == 'Printing'
 
     def _watchdog_event(self, eventtime):
         if self.mode == MODE_WORK:
@@ -1102,6 +1193,7 @@ class FilaBuffer:
                 return False
         self.active_feeder = feeder.name
         feeder.set_run_state(FEEDER_ACTIVE)
+        feeder.note_feed_match_select(self._get_extruded_mm())
         if not (self.sensors.state & BUFF_FULL): # not full, start feed right now
             maxlen = self.len2extruder if feeder.buffer_present else self.len2buffer + self.len2extruder
             self._start_feeder_feed(feeder, self.feed_speed, maxlen)
