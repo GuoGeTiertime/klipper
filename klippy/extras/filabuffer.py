@@ -957,7 +957,7 @@ class FilaBuffer:
         elif act_type == ACT_TYPE_FEED: # not trigger FULL after max feed length
             if feeder.feeder_state == FEEDER_RUNOUT:
                 return
-            self.log_sensor_msg("feeder %s feed timeout" % (feeder.name))
+            self.log_sensor_msg("feeder %s feed timeout, state: %s" % (feeder.name, feeder.feeder_state))
             self._enter_error(ERROR_FEED_TIMEOUT)
 
     def note_buffer_change(self, eventtime, old, new):
@@ -986,9 +986,9 @@ class FilaBuffer:
         feeder.sync_stable_state()
         self.log_sensor_msg("feeder %s state %s -> %s" % (feeder.name, old_state, feeder.feeder_state))
         # 2. verify feeder state is valid for select.
-        if feeder.is_selected() and feeder.feeder_state not in (FEEDER_ACTIVE, FEEDER_RUNOUT):
-            self.log_sensor_msg("feeder %s state %s is not valid for select, clear active feeder" % (feeder.name, feeder.feeder_state))
-            self.active_feeder = None
+        # if feeder.is_selected() and feeder.feeder_state not in (FEEDER_ACTIVE, FEEDER_RUNOUT):
+        #     self.log_sensor_msg("feeder %s state %s is not valid for select, clear active feeder" % (feeder.name, feeder.feeder_state))
+        #     self.active_feeder = None
         # 3. handle init / retract edges.
         if feeder.feeder_state in (FEEDER_INIT, FEEDER_RETRACT):
             self._handle_init_edges(feeder, eventtime, old_inlet, old_buffer)
