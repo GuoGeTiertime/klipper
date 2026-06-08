@@ -733,6 +733,10 @@ class FilaBuffer:
             'FILA_BUFFER_RETRACT_FILAMENT', 'BUFFER', self.name,
             self.cmd_FILA_BUFFER_RETRACT_FILAMENT,
             desc=self.cmd_FILA_BUFFER_RETRACT_FILAMENT_help)
+        self.gcode.register_mux_command(
+            'FILA_BUFFER_SET_TOLERANCE', 'BUFFER', self.name,
+            self.cmd_FILA_BUFFER_SET_TOLERANCE,
+            desc=self.cmd_FILA_BUFFER_SET_TOLERANCE_help)
         self.printer.register_event_handler('klippy:ready', self._handle_ready)
         self._load_feeders(config)
         _consume_feeder_config_options(config)
@@ -1333,6 +1337,12 @@ class FilaBuffer:
                 st['is_feeding'], st['cur_feed_len'], st['total_mm'],
                 st['act_type'] or '-', st['init_phase']))
         gcmd.respond_info(msg)
+
+    cmd_FILA_BUFFER_SET_TOLERANCE_help = "Set feed match tolerance"
+    def cmd_FILA_BUFFER_SET_TOLERANCE(self, gcmd):
+        tolerance = gcmd.get_float('TOLERANCE', self.feed_match_tolerance, minval=0.)
+        self.feed_match_tolerance = tolerance
+        gcmd.respond_info("filabuffer %s feed match tolerance set to %.2f" % (self.name, tolerance))
 
     def get_status(self, eventtime):
         return {
