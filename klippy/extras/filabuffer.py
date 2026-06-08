@@ -532,8 +532,12 @@ class FilaFeeder:
         diff = ((feeder_mm - self.feed_match_feeder_base)
                 - (extruder_mm - self.feed_match_extruder_base))
         if diff > tolerance:  # feed more filament than extrude, feeder slip
+            self.fb.log_sensor_msg("feed match slip, diff: %f (feeder_mm: %f, feeder_base: %f, extruder_mm: %f, extruder_base: %f)" %  
+            (diff, feeder_mm, self.feed_match_feeder_base, extruder_mm, self.feed_match_extruder_base))
             return ERROR_FEED_SLIP
         elif diff < -tolerance:  # feed less filament than expected, extruder jam. 
+            self.fb.log_sensor_msg("feed match extruder jam, diff: %f (feeder_mm: %f, feeder_base: %f, extruder_mm: %f, extruder_base: %f)" %  
+            (diff, feeder_mm, self.feed_match_feeder_base, extruder_mm, self.feed_match_extruder_base))
             return ERROR_FEED_EXTRUDER_JAM
         return None
 
@@ -927,7 +931,7 @@ class FilaBuffer:
             self.gcode_queue.enqueue(self.extruder_jam_gcode, self._pause_prefix())
         elif msg == ERROR_FEED_SLIP:
             self.gcode_queue.enqueue(self.feed_slip_gcode, self._pause_prefix())
-        logging.error("filabuffer %s error: %s", self.name, msg)
+        self.log_sensor_msg("filabuffer %s error: %s" % (self.name, msg))
 
     def on_feeder_motor_stop(self, feeder, act_type, reason):
         if reason != 'complete':
@@ -949,6 +953,7 @@ class FilaBuffer:
         elif act_type == ACT_TYPE_FEED: # not trigger FULL after max feed length
             if feeder.feeder_state == FEEDER_RUNOUT:
                 return
+            self.log_sensor_msg("feeder %s feed timeout" % (feeder.name))
             self._enter_error(ERROR_FEED_TIMEOUT)
 
     def note_buffer_change(self, eventtime, old, new):
@@ -1077,9 +1082,8 @@ class FilaBuffer:
         # Shared buffer: do not feed into buffer while another feeder holds it
         if (self._count_buffer_filament(exclude_init=True) > 0
                 and not feeder.buffer_present):
-            logging.info(
-                "filabuffer %s: defer feed %s, shared buffer occupied",
-                self.name, feeder.name)
+            self.log_sensor_msg(
+                "filabuffer %s: defer feed %s, shared buffer occupied" % (self.name, feeder.name))
             return
         feeder.motor.start(length, speed, ACT_TYPE_FEED)
 
