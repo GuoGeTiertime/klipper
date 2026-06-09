@@ -658,6 +658,7 @@ class FilaBuffer:
         self.name = config.get_name().split()[-1]
         self.reactor = self.printer.get_reactor()
         self.gcode = self.printer.lookup_object('gcode')
+        self.extruder_name = config.get('extruder', 'extruder')
         self.feeders = {}
         self.active_feeder = None
         self.mode = MODE_DISABLED
@@ -669,6 +670,8 @@ class FilaBuffer:
         self.feed_match_tolerance = config.getfloat('feed_match_tolerance', 30., minval=0.)
         self.print_stats = None
         self.idle = None
+        self.extruder = None
+        self.estimated_print_time = None
 
         #define length of fila tube, 2 segments, 1. inlet to buffer, 2. buffer to extruder.
         self.len2buffer = config.getfloat('len2buffer', 1000., above=10.) # inlet to buffer. 
@@ -744,7 +747,6 @@ class FilaBuffer:
     def log_sensor_msg(self, msg):
         if not self.sensor_log:
             return
-        logging.info(msg)
         self.gcode.respond_info(msg)
 
     def _load_feeders(self, config):
@@ -763,8 +765,10 @@ class FilaBuffer:
                 % (self.name,))
 
     def _handle_ready(self):
-        self.print_stats = self.printer.lookup_object('print_stats', None)
-        self.idle = self.printer.lookup_object('idle_timeout', None)
+        self.print_stats = self.printer.lookup_object('print_stats')
+        self.idle = self.printer.lookup_object('idle_timeout')
+        self.extruder = self.printer.lookup_object(self.extruder_name)
+        self.estimated_print_time = (self.printer.lookup_object('mcu').estimated_print_time)
         self.reactor.update_timer(self._watchdog_timer, self.reactor.NOW)
         self.reactor.register_timer(
             self._startup_sync_event,
@@ -773,9 +777,8 @@ class FilaBuffer:
     def _get_extruded_mm(self, eventtime=None):
         if eventtime is None:
             eventtime = self.reactor.monotonic()
-        return self.print_stats.get_status(eventtime)['filament_used']
-        # not updated in real time, so use filament_used directly.
-        # return self.print_stats.filament_used
+        print_time = self.estimated_print_time(eventtime)
+        return self.extruder.find_past_position(print_time)
 
     def _startup_sync_event(self, eventtime):
         self._sync_all_from_linked_sensors(force=True, clear_error=False)
