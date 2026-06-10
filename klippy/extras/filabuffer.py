@@ -663,7 +663,7 @@ class FilaBuffer:
         self.active_feeder = None
         self.mode = MODE_DISABLED
         self.error_msg = None
-        self.pinout_delay = config.getfloat('pinout_delay', 0.025, minval=0.010, maxval=0.050)
+        self.pinout_delay = config.getfloat('pinout_delay', 0.05, minval=0.010, maxval=0.200)
         self.watchdog_time = config.getfloat('watchdog_time', 0.5, above=0.05)
         self.feed_idle_time = config.getfloat('feed_idle_time', 10., above=0.)
         self._not_full_idle_since = 0.
