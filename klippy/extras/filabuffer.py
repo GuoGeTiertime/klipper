@@ -203,7 +203,6 @@ class FilaMotor:
         self._on_stop_cb = on_stop_cb
         self.total_mm = 0.
         self._gen = 0
-        self._timer = None
         self._active = False
         self._fired = True
         self._remain = 0.
@@ -241,6 +240,7 @@ class FilaMotor:
         if enable_pin is not None:
             self.enable = ppins.setup_pin('digital_out', enable_pin)
             self.enable.setup_max_duration(0.)
+        self._timer = self.reactor.register_timer(self._timer_event)
 
     def is_moving(self):
         return self._active
@@ -300,7 +300,7 @@ class FilaMotor:
             return
         if self._active:
             self._gen += 1
-            self._cancel_timer()
+            self._stop_timer()
             self._halt_pwm()
             self.total_mm += self._move_mm
         self._gen += 1
@@ -317,7 +317,8 @@ class FilaMotor:
         if self.enable is not None:
             pt = self._sched_print_time(curtime, self.pinout_delay)
             self.enable.set_digital(pt, 1)
-        self._run_chunk(curtime, move_gen)
+        self.reactor.update_timer(
+            self._timer, self._run_chunk(curtime, move_gen))
 
     def stop(self, act_type, call_stop_cb=False):
         if not self._active:
@@ -326,7 +327,7 @@ class FilaMotor:
         self._end_move(act_type, 'stopped', call_stop_cb)
 
     def _end_move(self, act_type, reason, call_stop_cb=True):
-        self._cancel_timer()
+        self._stop_timer()
         self._halt_pwm()
         if self._fired:
             return
@@ -338,10 +339,8 @@ class FilaMotor:
         if call_stop_cb and (self._on_stop_cb is not None):
             self._on_stop_cb(act_type, reason)
 
-    def _cancel_timer(self):
-        if self._timer is not None:
-            self.reactor.unregister_timer(self._timer)
-            self._timer = None
+    def _stop_timer(self):
+        self.reactor.update_timer(self._timer, self.reactor.NEVER)
 
     def _add_move_mm(self, delta):
         if delta <= 0.:
@@ -398,11 +397,11 @@ class FilaMotor:
 
     def _run_chunk(self, curtime, move_gen):
         if not self._active or move_gen != self._gen:
-            return
+            return self.reactor.NEVER
         if self._remain <= MOTOR_DISTANCE_EPS:
             self._flush_current_chunk()
             self._end_move(self._act_type, 'complete')
-            return
+            return self.reactor.NEVER
         length, speed = self._get_next_chunk()
         pt = max(self._sched_print_time(curtime, self.pinout_delay),
                  self.chunk_end_pt)
@@ -420,19 +419,16 @@ class FilaMotor:
         self._remain -= length
         self._speed = speed
         if move_gen != self._gen:
-            return
+            return self.reactor.NEVER
         mcu = self.mcu
         margin = self.get_renew_margin(duration, self._remain > 0.)
         self._chunk_renew_margin = margin
         delay = max(0.01, self.chunk_end_pt - margin
                     - mcu.estimated_print_time(curtime))
         self._chunk_gen = move_gen
-        self._cancel_timer()
-        self._timer = self.reactor.register_timer(
-            self._timer_event, curtime + delay)
+        return curtime + delay
 
     def _timer_event(self, eventtime):
-        self._timer = None
         if not self._active or self._chunk_gen != self._gen:
             return self.reactor.NEVER
         pt = self.mcu.estimated_print_time(eventtime)
@@ -440,9 +436,7 @@ class FilaMotor:
             if pt + self._chunk_renew_margin < self.chunk_end_pt:
                 return eventtime + 0.01
             self._flush_current_chunk()
-            # self._run_chunk(eventtime, self._chunk_gen)
-            self._run_chunk(self.reactor.monotonic(), self._chunk_gen)
-            return self.reactor.NEVER
+            return self._run_chunk(self.reactor.monotonic(), self._chunk_gen)
         if pt < self.chunk_end_pt - 0.05:
             return eventtime + 0.01
         self._flush_current_chunk()
@@ -698,8 +692,8 @@ class FilaBuffer:
         self.feed_slip_gcode = gcode_macro.load_template(config, 'feed_slip_gcode', '')
         self.gcode_queue = GcodeQueue(self.printer)
         self.sensors = BufferSensors(config, self)
-        self._watchdog_timer = self.reactor.register_timer(
-            self._watchdog_event)
+        self._watchdog_timer = self.reactor.register_timer(self._watchdog_event)
+        self._startup_sync_timer = self.reactor.register_timer(self._startup_sync_event)
         self.gcode.register_mux_command(
             'FILA_BUFFER_START', 'BUFFER', self.name,
             self.cmd_FILA_BUFFER_START,
@@ -770,9 +764,7 @@ class FilaBuffer:
         self.extruder = self.printer.lookup_object(self.extruder_name)
         self.estimated_print_time = (self.printer.lookup_object('mcu').estimated_print_time)
         self.reactor.update_timer(self._watchdog_timer, self.reactor.NOW)
-        self.reactor.register_timer(
-            self._startup_sync_event,
-            self.reactor.monotonic() + 2.0)
+        self.reactor.update_timer(self._startup_sync_timer, self.reactor.monotonic() + 2.0)
 
     def _get_extruded_mm(self, eventtime=None):
         if eventtime is None:
