@@ -693,7 +693,6 @@ class FilaBuffer:
         self.gcode_queue = GcodeQueue(self.printer)
         self.sensors = BufferSensors(config, self)
         self._watchdog_timer = self.reactor.register_timer(self._watchdog_event)
-        self._startup_sync_timer = self.reactor.register_timer(self._startup_sync_event)
         self.gcode.register_mux_command(
             'FILA_BUFFER_START', 'BUFFER', self.name,
             self.cmd_FILA_BUFFER_START,
@@ -764,17 +763,16 @@ class FilaBuffer:
         self.extruder = self.printer.lookup_object(self.extruder_name)
         self.estimated_print_time = (self.printer.lookup_object('mcu').estimated_print_time)
         self.reactor.update_timer(self._watchdog_timer, self.reactor.NOW)
-        self.reactor.update_timer(self._startup_sync_timer, self.reactor.monotonic() + 2.0)
+        self.reactor.register_callback(
+            (lambda e: self._sync_all_from_linked_sensors(
+                force=True, clear_error=False)),
+            self.reactor.monotonic() + 2.0)
 
     def _get_extruded_mm(self, eventtime=None):
         if eventtime is None:
             eventtime = self.reactor.monotonic()
         print_time = self.estimated_print_time(eventtime)
         return self.extruder.find_past_position(print_time)
-
-    def _startup_sync_event(self, eventtime):
-        self._sync_all_from_linked_sensors(force=True, clear_error=False)
-        return self.reactor.NEVER
 
     def _read_linked_sensor_present(self, obj):
         if hasattr(obj, 'bPresent'):
