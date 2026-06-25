@@ -558,6 +558,7 @@ class MCU:
         wp = "mcu '%s': " % (self._name)
         self._serial = serialhdl.SerialReader(self._reactor, warn_prefix=wp)
         self._baud = 0
+        self._isUartPort = config.getboolean('is_uart_port', False)
         self._canbus_iface = None
         canbus_uuid = config.get('canbus_uuid', None)
         if canbus_uuid is not None:
@@ -570,7 +571,6 @@ class MCU:
             if not (self._serialport.startswith("/dev/rpmsg_")
                     or self._serialport.startswith("/tmp/klipper_host_")):
                 self._baud = config.getint('baud', 250000, minval=2400)
-        
             # add for serial port auto detect, 20240726
             isExist = os.path.exists(self._serialport)
             # try serial1~9 for alternative serial port. use the first available port.
@@ -581,9 +581,8 @@ class MCU:
                 isExist = os.path.exists(portname)
                 if isExist:
                     self._serialport = portname
-
             # 20250429, is uart or usb port by serial port name end with port0~3
-            isUartPort = False
+            isUartPort = True if self._isUartPort else False # add by guoge 20260625, to support is_uart_port option
             if self._serialport.endswith("port0") or self._serialport.endswith("port1") or self._serialport.endswith("port2") or self._serialport.endswith("port3"):
                 isUartPort = True
             # NOT uart port, set baud to 250000.
