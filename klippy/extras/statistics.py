@@ -67,7 +67,7 @@ class PrinterStats:
         if max([s[0] for s in stats]):
             logging.info("TT Stats %.1f: %s", eventtime,
                          ' '.join([s[1] for s in stats]))
-        return eventtime + 120.0 # 10.0->5.0->120.0
+        return eventtime + 10.0 # 1.0->5.0->10.0 此时间间隔影响moonraker的CPU负载统计更新频率，klipper默认为1.0. 但log输出太频繁，影响性能，所以改为10.0
 
 def load_config(config):
     config.get_printer().add_object('system_stats', PrinterSysStats(config))
