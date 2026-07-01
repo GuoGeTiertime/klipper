@@ -476,10 +476,12 @@ class ProbeSessionHelper:
 
                 # 如果第一个预测点(调整后)重量仍然小于threshold的20%,在认为重量异常,退出,采用原有测量结果.
                 if weightEst < th_1:
+                    gcmd.respond_info("weight est %.2f is smaller than th_1, test probe failed ---------" % (weightEst))
                     break
 
                 # 如果预测点高度小于前一个点,或者重量大于前一个点,认为异常,退出.
                 if posEst < posStop or weightEst > weightStop:
+                    gcmd.respond_info("posEst %.2f is smaller than posStop %.2f or weightEst %.2f is greater than weightStop %.2f, test probe failed ---------" % (posEst, posStop, weightEst, weightStop))
                     break
 
                 #重量从小到大, 高度从大到小排序
@@ -506,10 +508,15 @@ class ProbeSessionHelper:
 
                         # 校验tareWeight是否太大.如果太大.需要清零
                         if abs(self.hx71x.curTriggerTareWeight) > ( 1.0 * self.hx71x.endstop_threshold):
-                            time.sleep(0.5)
-                            self.hx71x.cmd_TARE_WEIGHT(" ")
-                            time.sleep(1.0)
                             gcmd.respond_info("Tare weight is too large, reset tare weight")
+                            # time.sleep(0.5)
+                            self.toolhead.dwell(0.5)
+                            self.toolhead.wait_moves()
+                            self.hx71x.cmd_TARE_WEIGHT(" ")
+                            # time.sleep(1.0)
+                            self.toolhead.dwell(1.0)
+                            self.toolhead.wait_moves()
+                            gcmd.respond_info("Reset tare weight success")
                             break #退出循环,重新测量.
 
                         pos[2] = estZ
@@ -537,8 +544,10 @@ class ProbeSessionHelper:
                             break
 
                     if weightEst > weights[0]: #重量增加,测量错误,退出.
+                        gcmd.respond_info("weightEst %.2f is greater than weights[0] %.2f, test probe failed ---------" % (weightEst, weights[0]))
                         break
                     if posEst < testPositions[0]: #如果预测点高度小于前一个点,认为异常,退出.
+                        gcmd.respond_info("posEst %.2f is smaller than testPositions[0] %.2f, test probe failed ---------" % (posEst, testPositions[0]))
                         break
                     
                     #添加新数据,并重新计算斜率.
