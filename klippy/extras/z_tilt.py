@@ -216,7 +216,10 @@ class ZTilt:
             #                  | * <-- probe0   probe3 --> * |
             # Z stepper0 ----> O                             O <---- Z stepper3
             # verify steppers position, steppers 0/3 and 1/2 are on the same X coordinate.
-            if abs(positions[0][0] - positions[3][0]) > 1 or abs(positions[1][0] - positions[2][0]) > 1:
+            x03 = abs(positions[0][0] - positions[3][0])
+            x12 = abs(positions[1][0] - positions[2][0])
+            x0z0 = abs(positions[0][0] - self.z_positions[0][0])
+            if x03 > 1 or x12 > 1 or x0z0 > 1:
                 # # Fallback for non-quad-gantry-like layouts: assume each probe
                 # # point maps directly to a single Z stepper with no coupling.
                 # adjustments[0] = positions[0][2]
