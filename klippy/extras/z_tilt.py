@@ -4,8 +4,29 @@
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
 import logging
+import math
 import mathutil
 from . import probe
+
+def calc_center_radial_adjustments(positions, z_positions):
+    # 基于探点几何中心，径向比例外推计算各 Z 电机调整值
+    n = len(positions)
+    cx = sum(p[0] for p in positions) / n
+    cy = sum(p[1] for p in positions) / n
+    mean_z = sum(p[2] for p in positions) / n
+    adjustments = []
+    for i, (sx, sy) in enumerate(z_positions):
+        px, py, pz = positions[i][0], positions[i][1], positions[i][2]
+        r_probe = math.hypot(px - cx, py - cy)
+        r_step = math.hypot(sx - cx, sy - cy)
+        if r_probe < 1e-6:
+            adjustments.append(pz)
+            continue
+        adjustments.append(mean_z + (pz - mean_z) * (r_step / r_probe))
+        logging.info(
+            "Calculating center radial adjustment: z:%.4f, mean_z:%.4f, r_probe:%.4f, r_step:%.4f, adjustment:%.4f",
+            pz, mean_z, r_probe, r_step, adjustments[i])
+    return adjustments
 
 class error(Exception):
     pass
@@ -196,14 +217,18 @@ class ZTilt:
             # Z stepper0 ----> O                             O <---- Z stepper3
             # verify steppers position, steppers 0/3 and 1/2 are on the same X coordinate.
             if abs(positions[0][0] - positions[3][0]) > 1 or abs(positions[1][0] - positions[2][0]) > 1:
-                # Fallback for non-quad-gantry-like layouts: assume each probe
-                # point maps directly to a single Z stepper with no coupling.
-                adjustments[0] = positions[0][2]
-                adjustments[1] = positions[1][2]
-                adjustments[2] = positions[2][2]
-                adjustments[3] = positions[3][2]
-                logging.info("Calculating 4-point fallback adjustment: %.4f, %.4f, %.4f, %.4f",
-                             adjustments[0], adjustments[1], adjustments[2], adjustments[3])
+                # # Fallback for non-quad-gantry-like layouts: assume each probe
+                # # point maps directly to a single Z stepper with no coupling.
+                # adjustments[0] = positions[0][2]
+                # adjustments[1] = positions[1][2]
+                # adjustments[2] = positions[2][2]
+                # adjustments[3] = positions[3][2]
+                # logging.info("Calculating 4-point fallback adjustment: %.4f, %.4f, %.4f, %.4f",
+                #              adjustments[0], adjustments[1], adjustments[2], adjustments[3])
+                adjustments = calc_center_radial_adjustments(positions, self.z_positions)
+                logging.info(
+                    "Calculating center radial adjustment: %.4f, %.4f, %.4f, %.4f",
+                    adjustments[0], adjustments[1], adjustments[2], adjustments[3])
             else:
                 # calc stepper0 ~ stepper3 adjustment.
                 def adjustfunc(y0, z0, y1, z1, y2):
