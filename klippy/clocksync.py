@@ -225,15 +225,15 @@ class SecondarySync(ClockSync):
         syncTimeDiff = (sync2_clock - sync1_clock) / self.mcu_freq
         
         # 防止校准频率离原有频率相差太大.设一个范围.
-        maxFreqErr = self.mcu_freq * 0.00005;
+        maxFreqErr = self.mcu_freq * 0.001;
         sample_time, clock, freq = self.clock_est
         # adjusted_freq = limit(adjusted_freq, freq - maxFreqErr, freq + maxFreqErr)
         maxFreq = freq + maxFreqErr
         minFreq = freq - maxFreqErr
-        # if adjusted_freq > maxFreq :
-        #     adjusted_freq = maxFreq
-        # elif adjusted_freq < minFreq :
-        #     adjusted_freq = minFreq
+        if adjusted_freq > maxFreq :
+            adjusted_freq = maxFreq
+        elif adjusted_freq < minFreq :
+            adjusted_freq = minFreq
             
         # adjusted_freq = sync2_clock / sync2_print_time
         adjusted_offset = sync1_print_time - sync1_clock / adjusted_freq
@@ -249,10 +249,13 @@ class SecondarySync(ClockSync):
         self.clock_adj = (adjusted_offset, adjusted_freq)
         self.last_sync_time = sync2_print_time
         # logging.info(" *** Sync clock by Second clock sync. print time: %.3f @ event time: %.3f, adj off: %.3f, freq: %.3f", print_time, eventtime, adjusted_offset, adjusted_freq)
-        # if abs(adjusted_offset) > 0.010 :
-        #     logging.info("ser_time:%.3f, ser_clock:%.3f, ser_freq:%.3f, estSerTime:%.3f", ser_time, ser_clock, ser_freq, estSerTime )
-        #     logging.info("est_main_clock:%.3f, est_print_time:%.3f, sync1_print_time:%.3f, sync2_print_time:%.3f, timeDiff: %.3f", est_main_clock, est_print_time, sync1_print_time, sync2_print_time, printTimeDiff )
-        #     logging.info("sync2_main_clock:%.3f, sync2_sys_time:%.3f, sync1_clock:%.3f, sync2_clock:%.3f, syncClock_TimeDiff:%.3f", sync2_main_clock, sync2_sys_time, sync1_clock, sync2_clock, syncTimeDiff )
-        #     logging.info("child mcu - sample_time:%.3f, clock:%.3f, freq:%.3f", sample_time, clock, freq )
+        adj = abs(adjusted_freq-self.mcu_freq) / self.mcu_freq
+        if abs(adjusted_offset) > 0.10 or adj > 0.001:
+            logging.info("tt clock error *************** ser_time:%.3f, ser_clock:%.3f, ser_freq:%.3f, estSerTime:%.3f", ser_time, ser_clock, ser_freq, estSerTime )
+            logging.info("est_main_clock:%.3f, est_print_time:%.3f, sync1_print_time:%.3f, sync2_print_time:%.3f, timeDiff: %.3f", est_main_clock, est_print_time, sync1_print_time, sync2_print_time, printTimeDiff )
+            logging.info("sync2_main_clock:%.3f, sync2_sys_time:%.3f, sync1_clock:%.3f, sync2_clock:%.3f, syncClock_TimeDiff:%.3f", sync2_main_clock, sync2_sys_time, sync1_clock, sync2_clock, syncTimeDiff )
+            logging.info("child mcu - sample_time:%.3f, clock:%.3f, freq:%.3f", sample_time, clock, freq )
+            logging.info("adjusted_freq: %.6f, adjusted_offset: %.3f", adjusted_freq, adjusted_offset)
+            logging.info("tt clock error *************** end")
 
         return self.clock_adj
