@@ -56,6 +56,7 @@ class PrinterStats:
         self.stats_timer = reactor.register_timer(self.generate_stats)
         self.stats_cb = []
         self.printer.register_event_handler("klippy:ready", self.handle_ready)
+        self.count = 0
     def handle_ready(self):
         self.stats_cb = [o.stats for n, o in self.printer.lookup_objects()
                          if hasattr(o, 'stats')]
@@ -65,9 +66,11 @@ class PrinterStats:
     def generate_stats(self, eventtime):
         stats = [cb(eventtime) for cb in self.stats_cb]
         if max([s[0] for s in stats]):
-            logging.info("TT Stats %.1f: %s", eventtime,
-                         ' '.join([s[1] for s in stats]))
-        return eventtime + 10.0 # 1.0->5.0->10.0 此时间间隔影响moonraker的CPU负载统计更新频率，klipper默认为1.0. 但log输出太频繁，影响性能，所以改为10.0
+            self.count += 1
+            if self.count >= 10: #隔段时间输出一次日志,避免日志输出太频繁,影响性能
+                self.count = 0
+                logging.info("TT Stats %.1f: %s", eventtime, ' '.join([s[1] for s in stats]))
+        return eventtime + 1.0
 
 def load_config(config):
     config.get_printer().add_object('system_stats', PrinterSysStats(config))
