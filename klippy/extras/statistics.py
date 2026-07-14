@@ -56,6 +56,7 @@ class PrinterStats:
         self.stats_timer = reactor.register_timer(self.generate_stats)
         self.stats_cb = []
         self.printer.register_event_handler("klippy:ready", self.handle_ready)
+        self.log_interval = config.getint('log_interval', 10, minval=1)
         self.count = 0
     def handle_ready(self):
         self.stats_cb = [o.stats for n, o in self.printer.lookup_objects()
@@ -67,7 +68,7 @@ class PrinterStats:
         stats = [cb(eventtime) for cb in self.stats_cb]
         if max([s[0] for s in stats]):
             self.count += 1
-            if self.count >= 10: #隔段时间输出一次日志,避免日志输出太频繁,影响性能
+            if self.count >= self.log_interval: #隔段时间输出一次日志,避免日志输出太频繁,影响性能
                 self.count = 0
                 logging.info("TT Stats %.1f: %s", eventtime, ' '.join([s[1] for s in stats]))
         return eventtime + 1.0
