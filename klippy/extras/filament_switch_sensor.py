@@ -119,7 +119,14 @@ class SwitchSensor:
         self.runout_helper = RunoutHelper(config)
         self.runout_helper.sensor_enabled = config.getboolean(
             'sensor_enable', default_enable)
-        self.get_status = self.runout_helper.get_status
+
+    def get_status(self, eventtime):
+        status = self.runout_helper.get_status(eventtime)
+        if self.filabuffer_link is not None:
+            status['filabuffer'] = self.filabuffer_link.buffer_name
+            status['filabuffer_feeder'] = self.filabuffer_link.feeder_name
+            status['filabuffer_role'] = self.filabuffer_link.role
+        return status
 
     def _button_handler(self, eventtime, state):
         present = bool(state)

@@ -1340,11 +1340,19 @@ class FilaBuffer:
     def get_status(self, eventtime):
         return {
             'name': self.name,
+            'extruder': self.extruder_name,
             'mode': self.mode,
             'active_feeder': self.active_feeder,
             'error': self.error_msg,
             'sensor_log': self.sensor_log,
+            'feed_match_tolerance': self.feed_match_tolerance,
+            'len2buffer': self.len2buffer,
+            'len2extruder': self.len2extruder,
+            'feed_speed': self.feed_speed,
+            'init_speed': self.init_speed,
+            'retract_speed': self.retract_speed,
             'buffer_state': self.sensors.get_status(),
+            'feeder_names': sorted(self.feeders.keys()),
             'feeders': {n: u.get_status() for n, u in self.feeders.items()},
         }
 
@@ -1370,7 +1378,16 @@ class FilaBufferManager:
         return self.buffers[name]
 
     def get_status(self, eventtime):
-        return {n: b.get_status(eventtime) for n, b in self.buffers.items()}
+        buffers = {n: b.get_status(eventtime) for n, b in self.buffers.items()}
+        extruders = sorted(set(
+            b.get('extruder') for b in buffers.values() if b.get('extruder')))
+        return {
+            'enabled': True,
+            'buffer_count': len(buffers),
+            'buffer_names': sorted(buffers.keys()),
+            'extruders': extruders,
+            'buffers': buffers,
+        }
 
 
 class FilaBufferSensorLink:

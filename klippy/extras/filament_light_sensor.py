@@ -232,8 +232,24 @@ class FilamentLightSensor:
         status['lux'] = round(self.last_lux, 2)  # Lux
         status['lux_runout'] = round(self.lux_runout, 1)
         status['lux_present'] = round(self.lux_present, 1)
+        status['lux_min'] = (None if self.lux_min >= 999999
+                             else round(self.lux_min, 2))
+        status['lux_max'] = (None if self.lux_max <= -999999
+                             else round(self.lux_max, 2))
+        status['lux_ema_fast'] = round(self.lux_ema_fast, 2)
+        status['lux_ema_slow'] = round(self.lux_ema_slow, 2)
+        status['lux_ema_diff'] = round(self.lux_ema_diff, 2)
+        status['lux_ema_diff_max'] = round(self.lux_ema_diff_max, 2)
+        status['jump_threshold'] = round(self.jump_threshold, 2)
+        status['jump_use_abs'] = self.jump_use_abs
+        status['runout_delay'] = round(self.runout_delay, 2)
+        status['report_time'] = round(self.report_time, 3)
         status['alarm_count'] = self.alarm_count
         status['alarm_trigger_count'] = self.alarm_trigger_count  # 报警触发总次数
+        if self.filabuffer_link is not None:
+            status['filabuffer'] = self.filabuffer_link.buffer_name
+            status['filabuffer_feeder'] = self.filabuffer_link.feeder_name
+            status['filabuffer_role'] = self.filabuffer_link.role
         if self.led_pin is not None:
             status['led_enable'] = self.led_enable
             status['led_power'] = self.led_power
