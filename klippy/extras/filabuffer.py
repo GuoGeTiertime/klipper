@@ -295,6 +295,13 @@ class FilaMotor:
             remain -= speed * duration
         return segments
 
+    def power(self, enable):
+        if self.enable is None:
+            return
+        curtime = self.reactor.monotonic()
+        pt = self._sched_print_time(curtime, self.pinout_delay)
+        self.enable.set_digital(pt, 1 if enable else 0)
+
     def start(self, distance, speed, act_type):
         if distance == 0.:
             return
@@ -314,9 +321,7 @@ class FilaMotor:
         self._speed = 0.
         self._act_type = act_type
         curtime = self.reactor.monotonic()
-        if self.enable is not None:
-            pt = self._sched_print_time(curtime, self.pinout_delay)
-            self.enable.set_digital(pt, 1)
+        self.power(True)
         self.reactor.update_timer(
             self._timer, self._run_chunk(curtime, move_gen))
 
@@ -873,8 +878,10 @@ class FilaBuffer:
         return self.feeders.get(self.active_feeder)
 
     def _stop_all_motors(self):
+        # Only this buffer's feeders; disable enable after halt.
         for u in self.feeders.values():
             u.motor_halt()
+            u.motor.power(False)
 
     def _check_buffer_exclusive(self):
         if self.sensors.state & BUFF_FULL:
