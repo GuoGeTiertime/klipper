@@ -30,8 +30,8 @@ FEEDER_RUN_STATES = (FEEDER_INIT, FEEDER_RETRACT)
 
 INIT_PHASE_FORWARD = 'forward'
 INIT_PHASE_RETRACT = 'retract'
-# Init 回撤：走满 retract_len（建议 50~100mm）@ retract_speed（默认同 feed_speed）；
-# 结束后 buffer false->ready，true->init_retract_fail。回撤中 buffer 变 false 不停止。
+# Init 回撤：上限 init_retract_len @ retract_speed；buffer 1→0 立即停并判定
+# ready/fail。走满仍未离 buffer → init_retract_fail。
 
 ERROR_JAM = "jam"
 ERROR_RUNOUT = "runout"
@@ -1113,7 +1113,10 @@ class FilaBuffer:
                     feeder.motor_halt()
                     feeder.set_error_state(ERROR_INIT_RUNOUT)
             elif feeder._init_phase == INIT_PHASE_RETRACT:
-                if not feeder.inlet_present and old_inlet:
+                if old_buffer and not feeder.buffer_present:
+                    feeder.motor_halt()
+                    self._complete_init_retract_check(feeder)
+                elif not feeder.inlet_present and old_inlet:
                     feeder.motor_halt()
                     feeder.set_error_state(ERROR_INIT_RUNOUT)
 
