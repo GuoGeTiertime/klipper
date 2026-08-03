@@ -100,7 +100,96 @@ class FilamentLightSensor:
         gcode.register_mux_command('AUTO_SET_FILAMENT_LIGHT_THRESHOLD', 'SENSOR', self.name,
                                     self.cmd_AUTO_SET_FILAMENT_LIGHT_THRESHOLD,
                                     desc=self.cmd_AUTO_SET_FILAMENT_LIGHT_THRESHOLD_help)
-        
+        gcode.register_mux_command('SAVE_FILAMENT_LIGHT_CALIB', 'SENSOR', self.name,
+                                    self.cmd_SAVE_FILAMENT_LIGHT_CALIB,
+                                    desc=self.cmd_SAVE_FILAMENT_LIGHT_CALIB_help)
+        gcode.register_mux_command('LOAD_FILAMENT_LIGHT_CALIB', 'SENSOR', self.name,
+                                    self.cmd_LOAD_FILAMENT_LIGHT_CALIB,
+                                    desc=self.cmd_LOAD_FILAMENT_LIGHT_CALIB_help)
+        self._calib_loaded = False
+        self.printer.register_event_handler("klippy:ready", self._handle_ready_load_calib)
+
+    def _calib_var_prefix(self):
+        # fls_<sensor> ; '-' / 空格 -> '_'
+        return "fls_" + self.name.replace('-', '_').replace(' ', '_')
+
+    def _get_save_variables(self):
+        return self.printer.lookup_object('save_variables', None)
+
+    def _handle_ready_load_calib(self):
+        # 启动后从 variables.cfg 恢复校准阈值（无 save_variables 或无 key 则跳过）
+        try:
+            self._load_calib_from_variables(respond=None)
+        except Exception:
+            logging.exception("[%s] load filament light calib failed" % self.name)
+
+    def _load_calib_from_variables(self, respond=None):
+        sv = self._get_save_variables()
+        if sv is None:
+            if respond is not None:
+                respond("save_variables not configured, skip load calib")
+            return False
+        prefix = self._calib_var_prefix()
+        allvars = sv.allVariables
+        runout = allvars.get("%s_runout" % (prefix,))
+        present = allvars.get("%s_present" % (prefix,))
+        jump = allvars.get("%s_jump" % (prefix,))
+        if runout is None and present is None and jump is None:
+            if respond is not None:
+                respond("No saved calib for %s" % (self.name,))
+            return False
+        changed = False
+        if runout is not None:
+            self.lux_runout = float(runout)
+            changed = True
+        if present is not None:
+            self.lux_present = float(present)
+            changed = True
+        if jump is not None:
+            self.jump_threshold = float(jump)
+            changed = True
+        if not changed:
+            return False
+        self._calib_loaded = True
+        msg = ("Loaded calib %s: runout=%.2f present=%.2f jump=%.2f"
+               % (self.name, self.lux_runout, self.lux_present, self.jump_threshold))
+        logging.info("[%s] %s" % (self.name, msg))
+        if respond is not None:
+            respond(msg)
+        if self.bInited:
+            self._state_init(self.last_lux)
+        return True
+
+    def _save_calib_to_variables(self, respond=None, save_jump=True):
+        sv = self._get_save_variables()
+        if sv is None:
+            msg = "save_variables not configured, cannot save calib"
+            logging.warning("[%s] %s" % (self.name, msg))
+            if respond is not None:
+                respond(msg)
+            return False
+        gcode = self.printer.lookup_object('gcode')
+        prefix = self._calib_var_prefix()
+        cmds = [
+            "SAVE_VARIABLE VARIABLE=%s_runout VALUE=%.4f"
+            % (prefix, self.lux_runout),
+            "SAVE_VARIABLE VARIABLE=%s_present VALUE=%.4f"
+            % (prefix, self.lux_present),
+        ]
+        if save_jump:
+            cmds.append(
+                "SAVE_VARIABLE VARIABLE=%s_jump VALUE=%.4f"
+                % (prefix, self.jump_threshold))
+        for cmd in cmds:
+            gcode.run_script_from_command(cmd)
+        self._calib_loaded = True
+        msg = ("Saved calib %s: runout=%.2f present=%.2f jump=%.2f"
+               % (self.name, self.lux_runout, self.lux_present, self.jump_threshold))
+        logging.info("[%s] %s" % (self.name, msg))
+        if respond is not None:
+            respond(msg)
+        return True
+
     def _format_lux_minmax(self):
         return "[%.2f-%.2f]Lux" % (self.lux_min, self.lux_max)
     
@@ -253,6 +342,8 @@ class FilamentLightSensor:
         if self.led_pin is not None:
             status['led_enable'] = self.led_enable
             status['led_power'] = self.led_power
+        status['calib_loaded'] = self._calib_loaded
+        status['calib_var_prefix'] = self._calib_var_prefix()
         return status
     
     cmd_QUERY_FILAMENT_LIGHT_SENSOR_help = "Query filament light sensor value. Usage: QUERY_FILAMENT_LIGHT_SENSOR SENSOR=<name>"
@@ -285,6 +376,7 @@ class FilamentLightSensor:
         gcmd.respond_info("  RESET_LUX=x     - Reset lux min/max statistics " )
         gcmd.respond_info("  RESET_EMA=x     - Reset EMA values and clear jump statistics " )
         gcmd.respond_info("  RESET_ALL=x      - Reset all statistics (min/max, EMA, jump)" )
+        gcmd.respond_info("  SAVE=<0|1>      - Persist lux/jump thresholds to save_variables" )
         gcmd.respond_info("Example: SET_FILAMENT_LIGHT_SENSOR SENSOR=%s LED_POWER=0.8" % self.name)
         
     def _update_ema_weights(self):
@@ -294,18 +386,19 @@ class FilamentLightSensor:
     cmd_SET_FILAMENT_LIGHT_SENSOR_help = "Set filament light sensor parameters. Usage: SET_FILAMENT_LIGHT_SENSOR SENSOR=<name> [parameters...]"
     def cmd_SET_FILAMENT_LIGHT_SENSOR(self, gcmd):
         # 所有支持的参数列表
-        all_params = ['LED_POWER', 'LED_ENABLE', 'SENSOR_ENABLE', 'LUX_RUNOUT', 'LUX_PRESENT', 
+        all_params = ['LED_POWER', 'LED_ENABLE', 'SENSOR_ENABLE', 'LUX_RUNOUT', 'LUX_PRESENT',
                      'ALARM_COUNT', 'REPORT_TIME', 'EMA_FAST_TIME', 'EMA_SLOW_TIME', 'JUMP_THRESHOLD', 'JUMP_USE_ABS',
-                     'RUNOUT_DELAY', 'RESET_LUX', 'RESET_EMA', 'RESET_ALL']
+                     'RUNOUT_DELAY', 'RESET_LUX', 'RESET_EMA', 'RESET_ALL', 'SAVE']
         # 检查是否有任何参数
         if not any(gcmd.get(param, None) is not None for param in all_params):
             self._show_set_help(gcmd)
             return
+        thresh_changed = False
         # 传感器使能
         if gcmd.get('SENSOR_ENABLE', None) is not None:
             enable = gcmd.get_int('SENSOR_ENABLE', 1)
             self.runout_helper.sensor_enabled = enable
-            gcmd.respond_info("Sensor enable set to %s" % enable)        
+            gcmd.respond_info("Sensor enable set to %s" % enable)
         # LED设置（需要同时处理LED_POWER和LED_ENABLE）
         if self.led_pin is not None and (gcmd.get('LED_POWER', None) is not None or gcmd.get('LED_ENABLE', None) is not None):
             power = gcmd.get_float('LED_POWER', self.led_power)
@@ -315,15 +408,18 @@ class FilamentLightSensor:
         # 简单参数设置（直接赋值）
         if gcmd.get('LUX_RUNOUT', None) is not None:
             self.lux_runout = gcmd.get_float('LUX_RUNOUT', above=0.)
-            gcmd.respond_info("LUX_RUNOUT set to %.2fLux" % self.lux_runout)        
+            thresh_changed = True
+            gcmd.respond_info("LUX_RUNOUT set to %.2fLux" % self.lux_runout)
         if gcmd.get('LUX_PRESENT', None) is not None:
             self.lux_present = gcmd.get_float('LUX_PRESENT', above=0.)
+            thresh_changed = True
             gcmd.respond_info("LUX_PRESENT set to %.2fLux" % self.lux_present)
         if gcmd.get('ALARM_COUNT', None) is not None:
             self.alarm_count = gcmd.get_int('ALARM_COUNT', minval=1)
             gcmd.respond_info("Alarm count set to %d" % self.alarm_count)
         if gcmd.get('JUMP_THRESHOLD', None) is not None:
             self.jump_threshold = gcmd.get_float('JUMP_THRESHOLD', above=0.)
+            thresh_changed = True
             gcmd.respond_info("JUMP_THRESHOLD set to %.2fLux" % self.jump_threshold)
         if gcmd.get('JUMP_USE_ABS', None) is not None:
             self.jump_use_abs = gcmd.get_int('JUMP_USE_ABS', 0) != 0
@@ -360,18 +456,63 @@ class FilamentLightSensor:
             self.lux_max = -999999
             self._reset_ema(self.last_lux)
             gcmd.respond_info("All statistics reset: min/max cleared, EMA reset")
+        if gcmd.get_int('SAVE', 0):
+            if not thresh_changed:
+                gcmd.respond_info("SAVE=1 with no lux/jump change; saving current thresholds")
+            self._save_calib_to_variables(respond=gcmd.respond_info)
 
-    cmd_AUTO_SET_FILAMENT_LIGHT_THRESHOLD_help = "Auto set filament light runout present lux by max and min lux. Usage: AUTO_SET_FILAMENT_LIGHT_THRESHOLD SENSOR=<name> PERCENT=<0-40>"
+    cmd_AUTO_SET_FILAMENT_LIGHT_THRESHOLD_help = (
+        "Auto set runout/present lux and jump from sampled min/max. "
+        "Usage: AUTO_SET_FILAMENT_LIGHT_THRESHOLD SENSOR=<name> "
+        "PERCENT=<0-40> [SET_JUMP=<0|1>] [SAVE=<0|1>]")
     def cmd_AUTO_SET_FILAMENT_LIGHT_THRESHOLD(self, gcmd):
+        if self.lux_min >= 999999 or self.lux_max <= -999999:
+            raise gcmd.error(
+                "No lux min/max yet for %s; RESET_ALL then sample empty and present filament"
+                % (self.name,))
+        if self.lux_max <= self.lux_min:
+            raise gcmd.error(
+                "Invalid lux range for %s: min=%.2f max=%.2f (need empty then present samples)"
+                % (self.name, self.lux_min, self.lux_max))
+        span = self.lux_max - self.lux_min
         percent = gcmd.get_float('PERCENT', 20., minval=0., maxval=40.)
-        delta = (self.lux_max - self.lux_min) * percent / 100.
+        delta = span * percent / 100.
         self.lux_runout = self.lux_max - delta
         self.lux_present = self.lux_min + delta
-        gcmd.respond_info("Filament light threshold set to %.2fLux (runout) and %.2fLux (present)" % (self.lux_runout, self.lux_present))
-        gcmd.respond_info("Percent: %.2f%%, delta: %.2fLux" % (percent, delta))
-        gcmd.respond_info("Max: %.2fLux, Min: %.2fLux" % (self.lux_max, self.lux_min))
+        if self.lux_present >= self.lux_runout:
+            raise gcmd.error(
+                "Computed thresholds invalid: present=%.2f >= runout=%.2f"
+                % (self.lux_present, self.lux_runout))
+        if gcmd.get_int('SET_JUMP', 1):
+            # Only use span: static empty/present sampling rarely builds a
+            # useful lux_ema_diff_max, which used to crush jump down to ~2.
+            self.jump_threshold = max(2.0, min(span * 0.35, span * 0.5))
+        gcmd.respond_info(
+            "Auto set %s: runout=%.2f present=%.2f jump=%.2f "
+            "(percent=%.1f%% span=%.2f)"
+            % (self.name, self.lux_runout, self.lux_present, self.jump_threshold,
+               percent, span))
         self._state_init(self.last_lux)
-        gcmd.respond_info("Reinit filament state to: %s" % ("Present" if self.bPresent else "Runout"))
+        gcmd.respond_info("Reinit filament state to: %s"
+                          % ("Present" if self.bPresent else "Runout"))
+        if gcmd.get_int('SAVE', 1):
+            self._save_calib_to_variables(respond=gcmd.respond_info)
+
+    cmd_SAVE_FILAMENT_LIGHT_CALIB_help = (
+        "Save lux/jump thresholds to save_variables. "
+        "Usage: SAVE_FILAMENT_LIGHT_CALIB SENSOR=<name>")
+    def cmd_SAVE_FILAMENT_LIGHT_CALIB(self, gcmd):
+        ok = self._save_calib_to_variables(respond=gcmd.respond_info)
+        if not ok:
+            raise gcmd.error("Failed to save calib for %s" % (self.name,))
+
+    cmd_LOAD_FILAMENT_LIGHT_CALIB_help = (
+        "Load lux/jump thresholds from save_variables. "
+        "Usage: LOAD_FILAMENT_LIGHT_CALIB SENSOR=<name>")
+    def cmd_LOAD_FILAMENT_LIGHT_CALIB(self, gcmd):
+        ok = self._load_calib_from_variables(respond=gcmd.respond_info)
+        if not ok:
+            raise gcmd.error("No saved calib (or save_variables missing) for %s" % (self.name,))
 
 def load_config_prefix(config):
     return FilamentLightSensor(config)
