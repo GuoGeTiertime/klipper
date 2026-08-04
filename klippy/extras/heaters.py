@@ -205,8 +205,6 @@ class Heater:
         kp = gcmd.get_float('KP', None, minval=0.)
         ki = gcmd.get_float('KI', None, minval=0.)
         kd = gcmd.get_float('KD', None, minval=0.)
-        if kp is None and ki is None and kd is None:
-            raise gcmd.error("At least one of Kp, Ki, Kd must be specified")
         self.control.set_pid(Kp=kp, Ki=ki, Kd=kd)
         # 回显当前 PID（与 config 同尺度）
         c = self.control
