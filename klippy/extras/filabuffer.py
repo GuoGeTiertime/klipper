@@ -686,6 +686,7 @@ class FilaBuffer:
         # self.hw_latency = config.getfloat('hw_latency', 0.002, above=0.)
         self.sensor_log = config.getboolean('sensor_log', False)
         self.pause_on_error = config.getboolean('pause_on_error', False)
+        self.light_sensitivity = 1
         if self.pause_on_error:
             self.printer.load_object(config, 'pause_resume')
         gcode_macro = self.printer.load_object(config, 'gcode_macro')
@@ -738,6 +739,10 @@ class FilaBuffer:
             'FILA_BUFFER_SET_TOLERANCE', 'BUFFER', self.name,
             self.cmd_FILA_BUFFER_SET_TOLERANCE,
             desc=self.cmd_FILA_BUFFER_SET_TOLERANCE_help)
+        self.gcode.register_mux_command(
+            'FILA_BUFFER_LIGHT_SENSITIVITY', 'BUFFER', self.name,
+            self.cmd_FILA_BUFFER_LIGHT_SENSITIVITY,
+            desc=self.cmd_FILA_BUFFER_LIGHT_SENSITIVITY_help)
         self.printer.register_event_handler('klippy:ready', self._handle_ready)
         self._load_feeders(config)
         _consume_feeder_config_options(config)
@@ -1347,6 +1352,21 @@ class FilaBuffer:
         self.feed_match_tolerance = tolerance
         gcmd.respond_info("filabuffer %s feed match tolerance set to %.2f" % (self.name, tolerance))
 
+    cmd_FILA_BUFFER_LIGHT_SENSITIVITY_help = (
+        "Set light sensitivity for all sensors on this buffer. "
+        "FILA_BUFFER_LIGHT_SENSITIVITY BUFFER=<name> SENSITIVITY=<1-10> [SAVE=1]")
+    def cmd_FILA_BUFFER_LIGHT_SENSITIVITY(self, gcmd):
+        s = gcmd.get_int('SENSITIVITY', minval=1, maxval=10)
+        for _, obj in self.printer.lookup_objects('filament_light_sensor'):
+            link = getattr(obj, 'filabuffer_link', None)
+            if link is not None and link.buffer_name == self.name:
+                obj.apply_buffer_sensitivity(
+                    s, save=bool(gcmd.get_int('SAVE', 1)),
+                    respond=gcmd.respond_info)
+                return
+        raise gcmd.error(
+            "filabuffer %s: no filament_light_sensor linked" % (self.name,))
+
     def get_status(self, eventtime):
         return {
             'name': self.name,
@@ -1355,6 +1375,7 @@ class FilaBuffer:
             'active_feeder': self.active_feeder,
             'error': self.error_msg,
             'sensor_log': self.sensor_log,
+            'light_sensitivity': self.light_sensitivity,
             'feed_match_tolerance': self.feed_match_tolerance,
             'len2buffer': self.len2buffer,
             'len2extruder': self.len2extruder,
