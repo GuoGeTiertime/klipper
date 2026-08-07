@@ -9,6 +9,13 @@ from . import adc_light
 
 DEFAULT_REPORT_TIME = 0.1  # 默认10Hz
 
+# Dark-filament calib + sensitivity (S=1 dark … S=10 light)
+RUNOUT_PULL = 0.20
+PRESENT_PULL_S1 = 0.35
+GAP_MIN = 2.0          # present↔runout，以及 runout↔cal_max
+JUMP_MIN = 4.0
+JUMP_RATIO_S1 = 0.35
+
 class FilamentLightSensor:
     """光敏电阻丝材传感器：通过ADC读取电压，转换为电阻和光强，使用光强检测丝材状态"""
     def __init__(self, config):
@@ -70,9 +77,12 @@ class FilamentLightSensor:
         self.last_lux = 0.0  # Lux
         self.alarm_trigger_count = 0  # 报警触发总次数统计, 可以删除
         
-        # 光强统计（用于监测过程中的最大值和最小值）
+        # 光强统计（快 EMA 极值，供采样；标定锁定另存 cal_lux_*）
         self.lux_min = 999999
         self.lux_max = -999999
+        self.cal_lux_min = None
+        self.cal_lux_max = None
+        self.sensitivity = config.getint('sensitivity', 1, minval=1, maxval=10)
         
         # 双EMA跳变检测配置
         self.ema_fast_time = config.getfloat('ema_fast_time', 2.0, above=0.)  # 快EMA时间常数（秒）
@@ -110,14 +120,19 @@ class FilamentLightSensor:
         self.printer.register_event_handler("klippy:ready", self._handle_ready_load_calib)
 
     def _calib_var_prefix(self):
-        # fls_<sensor> ; '-' / 空格 -> '_'
         return "fls_" + self.name.replace('-', '_').replace(' ', '_')
+
+    def _sens_save_key(self):
+        # One S per buffer; standalone sensor keeps per-name key
+        if self.filabuffer_link is not None:
+            buf = self.filabuffer_link.buffer_name.replace('-', '_').replace(' ', '_')
+            return "fls_buf_%s_sensitivity" % (buf,)
+        return "%s_sensitivity" % (self._calib_var_prefix(),)
 
     def _get_save_variables(self):
         return self.printer.lookup_object('save_variables', None)
 
     def _handle_ready_load_calib(self):
-        # 启动后从 variables.cfg 恢复校准阈值（无 save_variables 或无 key 则跳过）
         try:
             self._load_calib_from_variables(respond=None)
         except Exception:
@@ -126,69 +141,143 @@ class FilamentLightSensor:
     def _load_calib_from_variables(self, respond=None):
         sv = self._get_save_variables()
         if sv is None:
-            if respond is not None:
-                respond("save_variables not configured, skip load calib")
             return False
         prefix = self._calib_var_prefix()
-        allvars = sv.allVariables
-        runout = allvars.get("%s_runout" % (prefix,))
-        present = allvars.get("%s_present" % (prefix,))
-        jump = allvars.get("%s_jump" % (prefix,))
-        if runout is None and present is None and jump is None:
-            if respond is not None:
-                respond("No saved calib for %s" % (self.name,))
+        v = sv.allVariables
+        cal_min, cal_max = v.get("%s_cal_min" % prefix), v.get("%s_cal_max" % prefix)
+        sens = v.get(self._sens_save_key())
+        if sens is None:
+            sens = v.get("%s_sensitivity" % prefix)  # legacy per-sensor
+        runout, present, jump = (v.get("%s_runout" % prefix),
+                                 v.get("%s_present" % prefix),
+                                 v.get("%s_jump" % prefix))
+        if all(x is None for x in (cal_min, cal_max, sens, runout, present, jump)):
             return False
-        changed = False
-        if runout is not None:
-            self.lux_runout = float(runout)
-            changed = True
-        if present is not None:
-            self.lux_present = float(present)
-            changed = True
-        if jump is not None:
-            self.jump_threshold = float(jump)
-            changed = True
-        if not changed:
-            return False
+        if sens is not None:
+            self.sensitivity = max(1, min(10, int(float(sens))))
+        if cal_min is not None and cal_max is not None:
+            self.cal_lux_min, self.cal_lux_max = float(cal_min), float(cal_max)
+            try:
+                self._apply_sensitivity_thresholds()
+            except Exception:
+                if runout is not None:
+                    self.lux_runout = float(runout)
+                if present is not None:
+                    self.lux_present = float(present)
+                if jump is not None:
+                    self.jump_threshold = float(jump)
+        else:
+            if runout is not None:
+                self.lux_runout = float(runout)
+            if present is not None:
+                self.lux_present = float(present)
+            if jump is not None:
+                self.jump_threshold = float(jump)
+        self._push_s_to_filabuffer()
         self._calib_loaded = True
-        msg = ("Loaded calib %s: runout=%.2f present=%.2f jump=%.2f"
-               % (self.name, self.lux_runout, self.lux_present, self.jump_threshold))
-        logging.info("[%s] %s" % (self.name, msg))
         if respond is not None:
-            respond(msg)
+            respond("Loaded calib %s: present=%.2f runout=%.2f jump=%.2f S=%d"
+                    % (self.name, self.lux_present, self.lux_runout,
+                       self.jump_threshold, self.sensitivity))
         if self.bInited:
             self._state_init(self.last_lux)
         return True
 
-    def _save_calib_to_variables(self, respond=None, save_jump=True):
+    def _save_calib_to_variables(self, respond=None, save_jump=True, save_s=True):
         sv = self._get_save_variables()
         if sv is None:
-            msg = "save_variables not configured, cannot save calib"
-            logging.warning("[%s] %s" % (self.name, msg))
             if respond is not None:
-                respond(msg)
+                respond("save_variables not configured")
             return False
         gcode = self.printer.lookup_object('gcode')
-        prefix = self._calib_var_prefix()
+        p = self._calib_var_prefix()
         cmds = [
-            "SAVE_VARIABLE VARIABLE=%s_runout VALUE=%.4f"
-            % (prefix, self.lux_runout),
-            "SAVE_VARIABLE VARIABLE=%s_present VALUE=%.4f"
-            % (prefix, self.lux_present),
+            "SAVE_VARIABLE VARIABLE=%s_runout VALUE=%.4f" % (p, self.lux_runout),
+            "SAVE_VARIABLE VARIABLE=%s_present VALUE=%.4f" % (p, self.lux_present),
         ]
         if save_jump:
-            cmds.append(
-                "SAVE_VARIABLE VARIABLE=%s_jump VALUE=%.4f"
-                % (prefix, self.jump_threshold))
+            cmds.append("SAVE_VARIABLE VARIABLE=%s_jump VALUE=%.4f"
+                        % (p, self.jump_threshold))
+        if self.cal_lux_min is not None and self.cal_lux_max is not None:
+            cmds.append("SAVE_VARIABLE VARIABLE=%s_cal_min VALUE=%.4f"
+                        % (p, self.cal_lux_min))
+            cmds.append("SAVE_VARIABLE VARIABLE=%s_cal_max VALUE=%.4f"
+                        % (p, self.cal_lux_max))
+        if save_s:
+            cmds.append("SAVE_VARIABLE VARIABLE=%s VALUE=%d"
+                        % (self._sens_save_key(), self.sensitivity))
         for cmd in cmds:
             gcode.run_script_from_command(cmd)
         self._calib_loaded = True
-        msg = ("Saved calib %s: runout=%.2f present=%.2f jump=%.2f"
-               % (self.name, self.lux_runout, self.lux_present, self.jump_threshold))
-        logging.info("[%s] %s" % (self.name, msg))
         if respond is not None:
-            respond(msg)
+            respond("Saved calib %s: present=%.2f runout=%.2f jump=%.2f S=%d"
+                    % (self.name, self.lux_present, self.lux_runout,
+                       self.jump_threshold, self.sensitivity))
         return True
+
+    def _push_s_to_filabuffer(self):
+        if self.filabuffer_link is None:
+            return
+        mgr = self.printer.lookup_object('filabuffer', None)
+        fb = None if mgr is None else mgr.buffers.get(self.filabuffer_link.buffer_name)
+        if fb is not None:
+            fb.light_sensitivity = self.sensitivity
+
+    def apply_buffer_sensitivity(self, sensitivity, save=False, respond=None):
+        """One S for all light sensors on this filabuffer; optional SAVE of thresholds + S."""
+        sensitivity = max(1, min(10, int(sensitivity)))
+        bname = None if self.filabuffer_link is None else self.filabuffer_link.buffer_name
+        n = 0
+        for _, obj in self.printer.lookup_objects('filament_light_sensor'):
+            link = getattr(obj, 'filabuffer_link', None)
+            if bname is None:
+                if obj is not self:
+                    continue
+            elif link is None or link.buffer_name != bname:
+                continue
+            obj.sensitivity = sensitivity
+            if obj.cal_lux_min is None or obj.cal_lux_max is None:
+                continue
+            try:
+                obj._apply_sensitivity_thresholds()
+            except ValueError:
+                continue
+            if obj.bInited:
+                obj._state_init(obj.last_lux)
+            n += 1
+            if save:
+                obj._save_calib_to_variables(save_s=False)
+        self._push_s_to_filabuffer()
+        if save:
+            sv = self._get_save_variables()
+            if sv is not None:
+                self.printer.lookup_object('gcode').run_script_from_command(
+                    "SAVE_VARIABLE VARIABLE=%s VALUE=%d"
+                    % (self._sens_save_key(), sensitivity))
+        if respond is not None:
+            respond("light S=%d on %s (%d applied)" % (sensitivity, bname or self.name, n))
+        return n
+
+    def _apply_sensitivity_thresholds(self, set_jump=True):
+        lo, hi = self.cal_lux_min, self.cal_lux_max
+        if lo is None or hi is None:
+            raise ValueError("No cal range for %s" % (self.name,))
+        span = hi - lo
+        if span <= 0.:
+            raise ValueError("cal span must be > 0")
+        r10 = hi - GAP_MIN
+        r1 = min(hi - span * RUNOUT_PULL, r10)
+        p10 = r10 - GAP_MIN
+        p1 = min(lo + span * PRESENT_PULL_S1, r1 - GAP_MIN)
+        if p1 >= r1 or p1 > p10:
+            raise ValueError("span too small (cal=[%.2f-%.2f])" % (lo, hi))
+        t = (self.sensitivity - 1) / 9.0
+        self.lux_runout = r1 + t * (r10 - r1)
+        self.lux_present = p1 + t * (p10 - p1)
+        if set_jump:
+            j1 = max(JUMP_MIN, span * JUMP_RATIO_S1)
+            self.jump_threshold = j1 + t * (JUMP_MIN - j1)
+        return span
 
     def _format_lux_minmax(self):
         return "[%.2f-%.2f]Lux" % (self.lux_min, self.lux_max)
@@ -257,11 +346,11 @@ class FilamentLightSensor:
             return
         self.last_voltage = voltage
         self.last_resistance = resistance
-        self.last_lux = lux        
-        # 更新光强最大值和最小值
-        self.lux_min = min(self.lux_min, lux)
-        self.lux_max = max(self.lux_max, lux)
+        self.last_lux = lux
         self._update_ema(lux)
+        # min/max from fast EMA (reject single-sample spikes)
+        self.lux_min = min(self.lux_min, self.lux_ema_fast)
+        self.lux_max = max(self.lux_max, self.lux_ema_fast)
         # detect jump and change filament state
         bJump = self._detect_jump(read_time, lux)
 
@@ -331,6 +420,11 @@ class FilamentLightSensor:
         status['lux_ema_diff_max'] = round(self.lux_ema_diff_max, 2)
         status['jump_threshold'] = round(self.jump_threshold, 2)
         status['jump_use_abs'] = self.jump_use_abs
+        status['sensitivity'] = self.sensitivity
+        status['cal_lux_min'] = (None if self.cal_lux_min is None
+                                 else round(self.cal_lux_min, 2))
+        status['cal_lux_max'] = (None if self.cal_lux_max is None
+                                 else round(self.cal_lux_max, 2))
         status['runout_delay'] = round(self.runout_delay, 2)
         status['report_time'] = round(self.report_time, 3)
         status['alarm_count'] = self.alarm_count
@@ -353,6 +447,8 @@ class FilamentLightSensor:
         msg += ",  Lux=%s" % self._format_lux_minmax()
         msg += ", EMA Fast=%.2f, Slow=%.2f, diff=%.2f, max Diff=%.2f" % (
             self.lux_ema_fast, self.lux_ema_slow, self.lux_ema_diff, self.lux_ema_diff_max)
+        msg += ", S=%d present=%.1f runout=%.1f jump=%.1f" % (
+            self.sensitivity, self.lux_present, self.lux_runout, self.jump_threshold)
         if self.led_pin is not None:
             msg += ", LED Power=%.2f, Enable=%s" % (self.led_power, self.led_enable)
         gcmd.respond_info(msg)
@@ -372,6 +468,7 @@ class FilamentLightSensor:
         gcmd.respond_info("  EMA_SLOW_TIME=<sec>  - Slow EMA time constant " )
         gcmd.respond_info("  JUMP_THRESHOLD=<lux> - jump detection threshold " )
         gcmd.respond_info("  JUMP_USE_ABS=<0|1>  - jump detection mode (0=single-sided, 1=both-sided)" )
+        gcmd.respond_info("  SENSITIVITY=<1-10>  - 1=dark 10=light; linear raise present+runout, lower jump" )
         gcmd.respond_info("  RUNOUT_DELAY=<sec>  - Runout delay time in seconds (0=immediate, current: %.1f)" % self.runout_delay)
         gcmd.respond_info("  RESET_LUX=x     - Reset lux min/max statistics " )
         gcmd.respond_info("  RESET_EMA=x     - Reset EMA values and clear jump statistics " )
@@ -388,7 +485,7 @@ class FilamentLightSensor:
         # 所有支持的参数列表
         all_params = ['LED_POWER', 'LED_ENABLE', 'SENSOR_ENABLE', 'LUX_RUNOUT', 'LUX_PRESENT',
                      'ALARM_COUNT', 'REPORT_TIME', 'EMA_FAST_TIME', 'EMA_SLOW_TIME', 'JUMP_THRESHOLD', 'JUMP_USE_ABS',
-                     'RUNOUT_DELAY', 'RESET_LUX', 'RESET_EMA', 'RESET_ALL', 'SAVE']
+                     'SENSITIVITY', 'RUNOUT_DELAY', 'RESET_LUX', 'RESET_EMA', 'RESET_ALL', 'SAVE']
         # 检查是否有任何参数
         if not any(gcmd.get(param, None) is not None for param in all_params):
             self._show_set_help(gcmd)
@@ -425,6 +522,15 @@ class FilamentLightSensor:
             self.jump_use_abs = gcmd.get_int('JUMP_USE_ABS', 0) != 0
             mode_str = "both-sided for transparent filament" if self.jump_use_abs else "single-sided"
             gcmd.respond_info("JUMP_USE_ABS set to %s" % mode_str)
+        if gcmd.get('SENSITIVITY', None) is not None:
+            self.apply_buffer_sensitivity(
+                gcmd.get_int('SENSITIVITY', minval=1, maxval=10),
+                save=bool(gcmd.get_int('SAVE', 0)),
+                respond=gcmd.respond_info)
+            thresh_changed = True
+            saved_s = True
+        else:
+            saved_s = False
         if gcmd.get('RUNOUT_DELAY', None) is not None:
             self.runout_delay = gcmd.get_float('RUNOUT_DELAY', minval=0.)
             gcmd.respond_info("Runout delay set to %.1f seconds (0=immediate)" % self.runout_delay)
@@ -456,47 +562,35 @@ class FilamentLightSensor:
             self.lux_max = -999999
             self._reset_ema(self.last_lux)
             gcmd.respond_info("All statistics reset: min/max cleared, EMA reset")
-        if gcmd.get_int('SAVE', 0):
+        if gcmd.get_int('SAVE', 0) and not saved_s:
             if not thresh_changed:
                 gcmd.respond_info("SAVE=1 with no lux/jump change; saving current thresholds")
             self._save_calib_to_variables(respond=gcmd.respond_info)
 
     cmd_AUTO_SET_FILAMENT_LIGHT_THRESHOLD_help = (
-        "Auto set runout/present lux and jump from sampled min/max. "
-        "Usage: AUTO_SET_FILAMENT_LIGHT_THRESHOLD SENSOR=<name> "
-        "PERCENT=<0-40> [SET_JUMP=<0|1>] [SAVE=<0|1>]")
+        "Lock cal min/max from sample, apply S to buffer. "
+        "AUTO_SET_FILAMENT_LIGHT_THRESHOLD SENSOR=<name> [SENSITIVITY=1] [SAVE=1]")
     def cmd_AUTO_SET_FILAMENT_LIGHT_THRESHOLD(self, gcmd):
         if self.lux_min >= 999999 or self.lux_max <= -999999:
             raise gcmd.error(
-                "No lux min/max yet for %s; RESET_ALL then sample empty and present filament"
+                "No lux min/max yet for %s; RESET_ALL then sample empty and dark filament"
                 % (self.name,))
         if self.lux_max <= self.lux_min:
-            raise gcmd.error(
-                "Invalid lux range for %s: min=%.2f max=%.2f (need empty then present samples)"
-                % (self.name, self.lux_min, self.lux_max))
-        span = self.lux_max - self.lux_min
-        percent = gcmd.get_float('PERCENT', 20., minval=0., maxval=40.)
-        delta = span * percent / 100.
-        self.lux_runout = self.lux_max - delta
-        self.lux_present = self.lux_min + delta
-        if self.lux_present >= self.lux_runout:
-            raise gcmd.error(
-                "Computed thresholds invalid: present=%.2f >= runout=%.2f"
-                % (self.lux_present, self.lux_runout))
-        if gcmd.get_int('SET_JUMP', 1):
-            # Only use span: static empty/present sampling rarely builds a
-            # useful lux_ema_diff_max, which used to crush jump down to ~2.
-            self.jump_threshold = max(2.0, min(span * 0.35, span * 0.5))
-        gcmd.respond_info(
-            "Auto set %s: runout=%.2f present=%.2f jump=%.2f "
-            "(percent=%.1f%% span=%.2f)"
-            % (self.name, self.lux_runout, self.lux_present, self.jump_threshold,
-               percent, span))
+            raise gcmd.error("Invalid lux range for %s" % (self.name,))
+        self.cal_lux_min, self.cal_lux_max = self.lux_min, self.lux_max
+        s = gcmd.get_int('SENSITIVITY', 1, minval=1, maxval=10)
+        self.sensitivity = s
+        try:
+            self._apply_sensitivity_thresholds()
+        except ValueError as e:
+            raise gcmd.error(str(e))
+        self.apply_buffer_sensitivity(
+            s, save=bool(gcmd.get_int('SAVE', 1)), respond=gcmd.respond_info)
         self._state_init(self.last_lux)
-        gcmd.respond_info("Reinit filament state to: %s"
-                          % ("Present" if self.bPresent else "Runout"))
-        if gcmd.get_int('SAVE', 1):
-            self._save_calib_to_variables(respond=gcmd.respond_info)
+        gcmd.respond_info(
+            "Auto set %s cal=[%.2f-%.2f] present=%.2f runout=%.2f jump=%.2f S=%d"
+            % (self.name, self.cal_lux_min, self.cal_lux_max,
+               self.lux_present, self.lux_runout, self.jump_threshold, s))
 
     cmd_SAVE_FILAMENT_LIGHT_CALIB_help = (
         "Save lux/jump thresholds to save_variables. "
