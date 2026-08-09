@@ -670,6 +670,7 @@ class FilaBuffer:
         self.print_stats = None
         self.idle = None
         self.extruder = None
+        self.toolhead = None
         self.estimated_print_time = None
 
         #define length of fila tube, 2 segments, 1. inlet to buffer, 2. buffer to extruder.
@@ -771,6 +772,7 @@ class FilaBuffer:
         self.print_stats = self.printer.lookup_object('print_stats')
         self.idle = self.printer.lookup_object('idle_timeout')
         self.extruder = self.printer.lookup_object(self.extruder_name)
+        self.toolhead = self.printer.lookup_object('toolhead')
         self.estimated_print_time = (self.printer.lookup_object('mcu').estimated_print_time)
         self.reactor.update_timer(self._watchdog_timer, self.reactor.NOW)
         self.reactor.register_callback(
@@ -783,6 +785,10 @@ class FilaBuffer:
             eventtime = self.reactor.monotonic()
         print_time = self.estimated_print_time(eventtime)
         return self.extruder.find_past_position(print_time)
+
+    # 本 buffer 绑定的喷头是否为当前激活喷头(多喷头切换时使用)
+    def _is_active_extruder(self):
+        return self.toolhead.get_extruder() is self.extruder
 
     def _read_linked_sensor_present(self, obj):
         if hasattr(obj, 'bPresent'):
@@ -1057,6 +1063,11 @@ class FilaBuffer:
         else:
             feeder = self._active()
             if feeder is not None and feeder.feeder_state == FEEDER_ACTIVE:
+                if not self._is_active_extruder():
+                    # 喷头未激活: 跟随重置基准, 不做检查也不强制补料
+                    feeder.note_feed_match_full(self._get_extruded_mm(eventtime))
+                    self._not_full_idle_since = eventtime
+                    return
                 state = self.sensors.state
                 match_error = feeder.check_feed_match(
                             self._get_extruded_mm(eventtime),
