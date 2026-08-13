@@ -200,7 +200,7 @@ class PrinterExtruder:
         return self.heater.stats(eventtime)
     def check_move(self, move):
         axis_r = move.axes_r[3]
-        if not self.heater.can_extrude:
+        if not self.heater.can_extrude and axis_r > 0.:
             raise self.printer.command_error(
                 "Extrude below minimum temp\n"
                 "See the 'min_extrude_temp' config option for details")
