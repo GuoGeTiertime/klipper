@@ -1090,10 +1090,6 @@ class FilaBuffer:
                     feeder.note_feed_match_full(self._get_extruded_mm(eventtime))
                     self._not_full_idle_since = eventtime
                     return
-                if feeder.motor.get_act_type() == ACT_TYPE_EASE:
-                    # ease 回撤中: 跳过对账(反转拉低 diff), 重置 idle 计时
-                    self._not_full_idle_since = eventtime
-                    return
                 state = self.sensors.state
                 match_error = feeder.check_feed_match(
                             self._get_extruded_mm(eventtime),
@@ -1106,11 +1102,12 @@ class FilaBuffer:
                 elif feeder.motor.is_moving():
                     self._not_full_idle_since = eventtime
                 elif eventtime - self._not_full_idle_since > self.feed_idle_time:
-                    self._start_feeder_feed(feeder, self.feed_speed, self.feed_len)
-                    self._not_full_idle_since = eventtime
-                    self.log_sensor_msg(
-                        "buffer %s force feed %s after max idle time"
-                        % (self.name, feeder.name))
+                    if not self.ease_on_full: # ease模式下，不补料
+                        self._start_feeder_feed(feeder, self.feed_speed, self.feed_len)
+                        self._not_full_idle_since = eventtime
+                        self.log_sensor_msg(
+                            "buffer %s force feed %s after max idle time"
+                            % (self.name, feeder.name))
             else:
                 self._not_full_idle_since = eventtime
 
