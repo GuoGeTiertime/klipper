@@ -667,6 +667,12 @@ class FilaBuffer:
         self.feed_idle_time = config.getfloat('feed_idle_time', 10., above=0.)
         self._not_full_idle_since = 0.
         self.feed_match_tolerance = config.getfloat('feed_match_tolerance', 30., minval=0.)
+        # ease_on_full: FULL 触发后自动回撤一小段, 减小缓冲顶死压力;
+        # 喷头回抽顶亮 FULL 时自动放丝. 默认关, 可用 FILA_BUFFER_EASE_ON_FULL 开关
+        self.ease_on_full = config.getboolean('ease_on_full', False)
+        # ease_len: ease 模式每次回撤长度 mm. 需大于 FULL 传感器滞回,
+        # 且小于 feed_match_tolerance
+        self.ease_len = config.getfloat('ease_len', 3., above=0.)
         self.print_stats = None
         self.idle = None
         self.extruder = None
@@ -740,6 +746,10 @@ class FilaBuffer:
             'FILA_BUFFER_SET_TOLERANCE', 'BUFFER', self.name,
             self.cmd_FILA_BUFFER_SET_TOLERANCE,
             desc=self.cmd_FILA_BUFFER_SET_TOLERANCE_help)
+        self.gcode.register_mux_command(
+            'FILA_BUFFER_EASE_ON_FULL', 'BUFFER', self.name,
+            self.cmd_FILA_BUFFER_EASE_ON_FULL,
+            desc=self.cmd_FILA_BUFFER_EASE_ON_FULL_help)
         self.gcode.register_mux_command(
             'FILA_BUFFER_LIGHT_SENSITIVITY', 'BUFFER', self.name,
             self.cmd_FILA_BUFFER_LIGHT_SENSITIVITY,
@@ -1363,6 +1373,18 @@ class FilaBuffer:
         self.feed_match_tolerance = tolerance
         gcmd.respond_info("filabuffer %s feed match tolerance set to %.2f" % (self.name, tolerance))
 
+    cmd_FILA_BUFFER_EASE_ON_FULL_help = (
+        "Enable/disable ease-on-full mode: auto retract ease_len mm after "
+        "buffer FULL to release pressure. ENABLE=1 on (default), ENABLE=0 off, "
+        "LEN sets ease retract length mm")
+    def cmd_FILA_BUFFER_EASE_ON_FULL(self, gcmd):
+        self.ease_on_full = bool(gcmd.get_int('ENABLE', 1, minval=0, maxval=1))
+        self.ease_len = gcmd.get_float('LEN', self.ease_len, above=0.)
+        gcmd.respond_info(
+            "filabuffer %s ease_on_full: %s, ease_len: %.2f"
+            % (self.name, 'on' if self.ease_on_full else 'off',
+               self.ease_len))
+
     cmd_FILA_BUFFER_LIGHT_SENSITIVITY_help = (
         "Set light sensitivity for all sensors on this buffer. "
         "FILA_BUFFER_LIGHT_SENSITIVITY BUFFER=<name> SENSITIVITY=<1-10> [SAVE=1]")
@@ -1388,6 +1410,8 @@ class FilaBuffer:
             'sensor_log': self.sensor_log,
             'light_sensitivity': self.light_sensitivity,
             'feed_match_tolerance': self.feed_match_tolerance,
+            'ease_on_full': self.ease_on_full,
+            'ease_len': self.ease_len,
             'len2buffer': self.len2buffer,
             'len2extruder': self.len2extruder,
             'feed_speed': self.feed_speed,
