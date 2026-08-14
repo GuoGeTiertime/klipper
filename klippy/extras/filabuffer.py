@@ -979,10 +979,10 @@ class FilaBuffer:
             # ease 回撤完成: 重置 idle 计时. 长度对账无需修正,
             # 回撤量与 FULL->LOW 消耗量的减少天然抵消
             self._not_full_idle_since = self.reactor.monotonic()
-            if self.sensors.state & BUFF_FULL:
-                self.log_sensor_msg(
-                    "filabuffer %s %s ease done but FULL still on, "
-                    "consider larger ease_len" % (self.name, feeder.name))
+            # if self.sensors.state & BUFF_FULL:
+            #     self.log_sensor_msg(
+            #         "filabuffer %s %s ease done but FULL still on, "
+            #         "consider larger ease_len" % (self.name, feeder.name))
         elif act_type == ACT_TYPE_FEED: # not trigger FULL after max feed length
             if feeder.feeder_state == FEEDER_RUNOUT:
                 return
