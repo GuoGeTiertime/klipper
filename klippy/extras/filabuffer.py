@@ -190,6 +190,7 @@ ACT_TYPE_INIT_FORWARD = 'init_forward'
 ACT_TYPE_INIT_RETRACT = 'init_retract'
 ACT_TYPE_FEED = 'feed'
 ACT_TYPE_RETRACT = 'retract'
+ACT_TYPE_EASE = 'ease'
 
 class FilaMotor:
     """PWM step/dir/enable driver. start/stop only; on_stop_cb from __init__."""
@@ -667,12 +668,6 @@ class FilaBuffer:
         self.feed_idle_time = config.getfloat('feed_idle_time', 10., above=0.)
         self._not_full_idle_since = 0.
         self.feed_match_tolerance = config.getfloat('feed_match_tolerance', 30., minval=0.)
-        # ease_on_full: FULL 触发后自动回撤一小段, 减小缓冲顶死压力;
-        # 喷头回抽顶亮 FULL 时自动放丝. 默认关, 可用 FILA_BUFFER_EASE_ON_FULL 开关
-        self.ease_on_full = config.getboolean('ease_on_full', False)
-        # ease_len: ease 模式每次回撤长度 mm. 需大于 FULL 传感器滞回,
-        # 且小于 feed_match_tolerance
-        self.ease_len = config.getfloat('ease_len', 3., above=0.)
         self.print_stats = None
         self.idle = None
         self.extruder = None
@@ -688,6 +683,11 @@ class FilaBuffer:
         self.feed_speed = config.getfloat('feed_speed', 30., above=0.)
         self.init_speed = config.getfloat('init_speed', self.feed_speed, above=0.)
         self.retract_speed = config.getfloat('retract_speed', self.feed_speed, above=0.)
+        # ease_on_full: FULL 触发后自动回撤一小段, 减小缓冲顶死压力;
+        # 喷头回抽顶亮 FULL 时自动放丝. 默认关, 可用 FILA_BUFFER_EASE_ON_FULL 开关
+        self.ease_on_full = config.getboolean('ease_on_full', False)
+        self.ease_len = config.getfloat('ease_len', 3., above=0.)
+        self.ease_speed = config.getfloat('ease_speed', self.retract_speed, above=0.)
 
         # self.button_latency = config.getfloat('button_latency', 0.010, above=0.)
         # self.hw_latency = config.getfloat('hw_latency', 0.002, above=0.)
@@ -975,6 +975,14 @@ class FilaBuffer:
                 feeder.feeder_state = FEEDER_INSERT
             else:
                 feeder.feeder_state = FEEDER_EMPTY
+        elif act_type == ACT_TYPE_EASE:
+            # ease 回撤完成: 重置 idle 计时. 长度对账无需修正,
+            # 回撤量与 FULL->LOW 消耗量的减少天然抵消
+            self._not_full_idle_since = self.reactor.monotonic()
+            if self.sensors.state & BUFF_FULL:
+                self.log_sensor_msg(
+                    "filabuffer %s %s ease done but FULL still on, "
+                    "consider larger ease_len" % (self.name, feeder.name))
         elif act_type == ACT_TYPE_FEED: # not trigger FULL after max feed length
             if feeder.feeder_state == FEEDER_RUNOUT:
                 return
@@ -1061,9 +1069,13 @@ class FilaBuffer:
         if state & BUFF_FULL:
             self._not_full_idle_since = self.reactor.monotonic()
             if feeder.motor.is_moving():
+                if feeder.motor.get_act_type() == ACT_TYPE_EASE:
+                    return  # ease 回撤进行中, 不干预
                 feeder.motor_halt()
                 feeder.clear_run_state()
                 feeder.note_feed_match_full(self._get_extruded_mm())
+            elif self.ease_on_full: # 自动回撤放丝，电机停着FULL仍亮
+                self._start_feeder_ease(feeder)
         elif state & BUFF_LOW:
             self._start_feeder_feed(feeder, self.feed_speed, self.feed_len)
 
@@ -1076,6 +1088,10 @@ class FilaBuffer:
                 if not self._is_active_extruder():
                     # 喷头未激活: 跟随重置基准, 不做检查也不强制补料
                     feeder.note_feed_match_full(self._get_extruded_mm(eventtime))
+                    self._not_full_idle_since = eventtime
+                    return
+                if feeder.motor.get_act_type() == ACT_TYPE_EASE:
+                    # ease 回撤中: 跳过对账(反转拉低 diff), 重置 idle 计时
                     self._not_full_idle_since = eventtime
                     return
                 state = self.sensors.state
@@ -1116,6 +1132,12 @@ class FilaBuffer:
                 "filabuffer %s: defer feed %s, shared buffer occupied" % (self.name, feeder.name))
             return
         feeder.motor.start(length, speed, ACT_TYPE_FEED)
+
+    def _start_feeder_ease(self, feeder):
+        # ease: FULL 后回撤 ease_len 释放缓冲压力
+        if self.ease_len <= 0. or feeder.motor.is_moving():
+            return
+        feeder.motor.start(-self.ease_len, self.ease_speed, ACT_TYPE_EASE)
 
     def _start_feeder_init(self, feeder):
         if not feeder.inlet_present or feeder.buffer_present:
@@ -1376,14 +1398,15 @@ class FilaBuffer:
     cmd_FILA_BUFFER_EASE_ON_FULL_help = (
         "Enable/disable ease-on-full mode: auto retract ease_len mm after "
         "buffer FULL to release pressure. ENABLE=1 on (default), ENABLE=0 off, "
-        "LEN sets ease retract length mm")
+        "LEN sets ease retract length mm, SPEED sets ease retract speed mm/s")
     def cmd_FILA_BUFFER_EASE_ON_FULL(self, gcmd):
         self.ease_on_full = bool(gcmd.get_int('ENABLE', 1, minval=0, maxval=1))
         self.ease_len = gcmd.get_float('LEN', self.ease_len, above=0.)
+        self.ease_speed = gcmd.get_float('SPEED', self.ease_speed, above=0.)
         gcmd.respond_info(
-            "filabuffer %s ease_on_full: %s, ease_len: %.2f"
+            "filabuffer %s ease_on_full: %s, ease_len: %.2f, ease_speed: %.2f"
             % (self.name, 'on' if self.ease_on_full else 'off',
-               self.ease_len))
+               self.ease_len, self.ease_speed))
 
     cmd_FILA_BUFFER_LIGHT_SENSITIVITY_help = (
         "Set light sensitivity for all sensors on this buffer. "
@@ -1412,6 +1435,7 @@ class FilaBuffer:
             'feed_match_tolerance': self.feed_match_tolerance,
             'ease_on_full': self.ease_on_full,
             'ease_len': self.ease_len,
+            'ease_speed': self.ease_speed,
             'len2buffer': self.len2buffer,
             'len2extruder': self.len2extruder,
             'feed_speed': self.feed_speed,
