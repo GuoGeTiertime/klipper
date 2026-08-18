@@ -36,7 +36,6 @@ INIT_PHASE_RETRACT = 'retract'
 ERROR_JAM = "jam"
 ERROR_RUNOUT = "runout"
 ERROR_BREAK = "break"
-ERROR_FULL_EXCLUSIVE_VIOLATION = "full_exclusive_violation"
 ERROR_FEED_TIMEOUT = "feed_timeout"
 ERROR_INIT_FEED_FAIL = "init_feed_fail"
 ERROR_INIT_RETRACT_FAIL = "init_retract_fail"
@@ -904,12 +903,6 @@ class FilaBuffer:
             u.motor_halt()
             u.motor.power(False)
 
-    def _check_buffer_exclusive(self):
-        if self.sensors.state & BUFF_FULL:
-            if self.sensors.state & (BUFF_JAM | BUFF_LOW):
-                return False
-        return True
-
     def _count_buffer_filament(self, exclude_init=False):
         """Count feeders with buffer_present. Init feeder may touch buffer briefly."""
         n = 0
@@ -990,9 +983,6 @@ class FilaBuffer:
             self._enter_error(ERROR_FEED_TIMEOUT)
 
     def note_buffer_change(self, eventtime, old, new):
-        if not self._check_buffer_exclusive():
-            self._enter_error(ERROR_FULL_EXCLUSIVE_VIOLATION)
-            return
         # work mode, sync work feed.
         if self.mode == MODE_WORK:
             # jump to jam state, handle jam error.
@@ -1191,10 +1181,6 @@ class FilaBuffer:
                 % (self.name, self.error_msg or "unknown"))
         if self.sensors.state & BUFF_JAM:
             raise self.gcode.error("filabuffer %s buffer jam" % (self.name,))
-        if not self._check_buffer_exclusive():
-            raise self.gcode.error(
-                "filabuffer %s buffer full exclusive violation"
-                % (self.name,))
         allowed = (FEEDER_EMPTY, FEEDER_INSERT, FEEDER_READY, FEEDER_BUFFERED)
         for name, u in self.feeders.items():
             u.sync_stable_state()
