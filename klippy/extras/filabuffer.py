@@ -236,11 +236,20 @@ class FilaMotor:
             self.dir = ppins.setup_pin('digital_out', dir_pin)
             self.dir.setup_max_duration(0.)
         self.enable = None
+        self._enable_cmd = None
         enable_pin = _get_feeder_option(config, 'enable_pin', feeder_index)
         if enable_pin is not None:
             self.enable = ppins.setup_pin('digital_out', enable_pin)
             self.enable.setup_max_duration(0.)
+            self.enable.get_mcu().register_config_callback(
+                self._build_enable_cmd)
         self._timer = self.reactor.register_timer(self._timer_event)
+
+    def _build_enable_cmd(self):
+        # enable 只用 update_digital_out：MCU 收到即写 GPIO，不与 queue 混用
+        mcu = self.enable.get_mcu()
+        self._enable_cmd = mcu.lookup_command(
+            "update_digital_out oid=%c value=%c", cq=mcu.alloc_command_queue())
 
     def is_moving(self):
         return self._active
@@ -296,11 +305,10 @@ class FilaMotor:
         return segments
 
     def power(self, enable):
-        if self.enable is None:
+        if self._enable_cmd is None:
             return
-        curtime = self.reactor.monotonic()
-        pt = self._sched_print_time(curtime, self.pinout_delay)
-        self.enable.set_digital(pt, 1 if enable else 0)
+        value = (not not enable) ^ self.enable._invert
+        self._enable_cmd.send([self.enable._oid, value])
 
     def start(self, distance, speed, act_type):
         if distance == 0.:
@@ -375,10 +383,15 @@ class FilaMotor:
 
     def _halt_pwm(self):
         curtime = self.reactor.monotonic()
+        now_pt = self.mcu.estimated_print_time(curtime)
         pt = self._sched_print_time(curtime, self.pinout_delay)
         pt_pwm = max(pt, self.last_pt + self.pinout_delay)
-        self._flush_current_chunk(pt_pwm)
-        # Keep enable asserted after stopping pulses so the motor holds torque.
+        if self._enable_cmd is not None:
+            # 立刻拉 ENN，TMC 失能；行程按当前时刻结算，不按 PWM 排队时刻
+            self.power(False)
+            self._flush_current_chunk(now_pt)
+        else:
+            self._flush_current_chunk(pt_pwm)
         self.step.set_pwm_cycle(pt_pwm, 0., self.cycle_time)
         self.last_pt = pt_pwm
         self.chunk_end_pt = pt_pwm + 0.05
