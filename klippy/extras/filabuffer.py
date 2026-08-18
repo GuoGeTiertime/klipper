@@ -639,9 +639,8 @@ class BufferSensors:
              config.get('full_pin')], self._button_handler)
 
     def _button_handler(self, eventtime, state):
-        old = self.state
         self.state = state & (BUFF_JAM | BUFF_LOW | BUFF_FULL)
-        self.fb.note_buffer_change(eventtime, old, self.state)
+        self.fb.note_buffer_change()
 
     def get_status(self):
         return {
@@ -982,14 +981,8 @@ class FilaBuffer:
             self.log_sensor_msg("feeder %s feed timeout, state: %s" % (feeder.name, feeder.feeder_state))
             self._enter_error(ERROR_FEED_TIMEOUT)
 
-    def note_buffer_change(self, eventtime, old, new):
-        # work mode, sync work feed.
-        if self.mode == MODE_WORK:
-            # jump to jam state, handle jam error.
-            if new & BUFF_JAM and not (old & BUFF_JAM):
-                self._on_jam()
-                return
-            self._sync_work_feed()
+    def note_buffer_change(self):
+        self._sync_work_feed()
 
     # 核心处理函数, 传感器数据变化处理,状态机更新,执行都在这里.
     def note_feeder_change(self, feeder, eventtime, old_inlet, old_buffer):
