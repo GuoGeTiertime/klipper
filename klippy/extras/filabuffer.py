@@ -684,6 +684,7 @@ class FilaBuffer:
         self.extruder = None
         self.toolhead = None
         self.estimated_print_time = None
+        self.bRunout = True
 
         #define length of fila tube, 2 segments, 1. inlet to buffer, 2. buffer to extruder.
         self.len2buffer = config.getfloat('len2buffer', 1000., above=10.) # inlet to buffer. 
@@ -1224,6 +1225,10 @@ class FilaBuffer:
         for u in self.feeders.values():
             if u.feeder_state == FEEDER_BUFFERED:
                 return u
+        # if not runout, can't select feeder from ready/insert feeders
+        # N in 1 out buffer must be empty before feed new fila.
+        if not self.bRunout: # if not runout, can't select feeder.
+            return None
         for u in self.feeders.values():
             if u.feeder_state == FEEDER_READY:
                 return u
@@ -1499,9 +1504,10 @@ class FilaBufferSensorLink:
     def notify(self, eventtime, present):
         try:
             if self.role == 'runout':
-                if not present: # filament runout. 
+                fb = self._resolve_buffer()
+                fb.bRunout = not present
+                if fb.bRunout: # filament runout. 
                     logging.info("filabuffer: runout sensor %s present, selecting feeder to send filament", self.buffer_name)
-                    fb = self._resolve_buffer()
                     if fb.mode == MODE_WORK:
                         bSelected = fb._select_feeder(None)
                         if not bSelected:
