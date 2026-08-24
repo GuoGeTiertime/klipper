@@ -48,10 +48,7 @@ ERROR_FEED_SLIP = "feed_slip"
 
 
 # Min print_time gap between MCU digital_out/pwm events: [filabuffer] pinout_delay
-# Renew software-PWM queue this many seconds before chunk ends (print_time)
-FEED_RENEW_MARGIN = 0.15
 # FilaMotor fixed timing (not from config)
-MOTOR_MAX_CHUNK_TIME = 4.0
 MOTOR_ACCEL_SEGMENT_TIME = 0.100
 MOTOR_ACCEL_FRACTION = 0.25
 MOTOR_STEP_DUTY = 0.333
@@ -202,23 +199,17 @@ class FilaMotor:
         self.mm_per_pulse = mm_per_pulse
         self._on_stop_cb = on_stop_cb
         self.total_mm = 0.
-        self._gen = 0
         self._active = False
         self._fired = True
-        self._remain = 0.
         self._move_mm = 0.
         self._chunk_mm = 0.
         self._chunk_start_pt = 0.
-        self._chunk_speed = 0.
-        self._speed = 0.
         self._target_speed = 0.
         self._forward = True
         self._act_type = None
         self.cycle_time = 0.1
         self.last_pt = 0.
         self.chunk_end_pt = 0.
-        self._chunk_renew_margin = 0.
-        self._chunk_gen = 0
         fb_name = config.get_name().split()[-1]
         ppins = config.get_printer().lookup_object('pins')
         step_pin = _get_feeder_option(config, 'step_pin', feeder_index)
@@ -255,38 +246,27 @@ class FilaMotor:
         return self._active
 
     def get_move_mm(self):
-        return self._move_mm
+        mm = self._move_mm
+        if not self._active or self._chunk_mm <= 0.:
+            return mm
+        pt = self.mcu.estimated_print_time(self.reactor.monotonic())
+        partial = self.calc_run_mm(
+            self._chunk_start_pt, pt, self._chunk_mm, self._target_speed)
+        if self._forward:
+            return mm + partial
+        return mm - partial
 
     def get_total_mm(self):
         return self.total_mm
 
     def get_position_mm(self):
-        """累计净位置 mm，含当前进行中行程（含未 flush 的 chunk）"""
-        pos = self.total_mm + self._move_mm
-        if not self._active or self._chunk_mm <= 0.:
-            return pos
-        curtime = self.reactor.monotonic()
-        pt = self.mcu.estimated_print_time(curtime)
-        end_pt = self._chunk_start_pt + self._chunk_mm / self._chunk_speed
-        if pt <= self._chunk_start_pt:
-            partial = 0.
-        elif pt >= end_pt:
-            partial = self._chunk_mm
-        else:
-            partial = (pt - self._chunk_start_pt) * self._chunk_speed
-        if self._forward:
-            return pos + partial
-        return pos - partial
+        """累计净位置 mm，含当前进行中行程"""
+        return self.total_mm + self.get_move_mm()
 
     def get_act_type(self):
         if not self._active:
             return None
         return self._act_type
-
-    @staticmethod
-    def get_renew_margin(duration, has_more):
-        base_margin = FEED_RENEW_MARGIN if has_more else 0.05
-        return min(base_margin, duration * 0.25)
 
     @staticmethod
     def build_speed_segments(distance, target_speed,
@@ -295,14 +275,39 @@ class FilaMotor:
         remain = abs(distance)
         target_speed = max(0.01, abs(target_speed))
         speed = 0.
+        step_i = 0
         segments = []
         while remain > MOTOR_DISTANCE_EPS:
-            speed = (min(target_speed, speed + target_speed * accel_fraction)
-                     if speed < target_speed else target_speed)
+            if speed < target_speed:
+                delta = target_speed * accel_fraction
+                if step_i < 2:
+                    delta *= 0.5
+                speed = min(target_speed, speed + delta)
+                step_i += 1
             duration = min(segment_time, remain / speed)
             segments.append((duration, speed))
             remain -= speed * duration
         return segments
+
+    @staticmethod
+    def calc_run_mm(start_pt, stop_pt, distance, target_speed,
+                    segment_time=MOTOR_ACCEL_SEGMENT_TIME,
+                    accel_fraction=MOTOR_ACCEL_FRACTION):
+        # 由起止 print_time 按规划速度台阶积分
+        if stop_pt <= start_pt or distance <= 0.:
+            return 0.
+        mm = 0.
+        t = start_pt
+        for duration, speed in FilaMotor.build_speed_segments(
+                distance, target_speed, segment_time, accel_fraction):
+            if stop_pt >= t + duration:
+                mm += speed * duration
+                t += duration
+                continue
+            if stop_pt > t:
+                mm += speed * (stop_pt - t)
+            break
+        return mm
 
     def power(self, enable):
         if self._enable_cmd is None:
@@ -314,39 +319,34 @@ class FilaMotor:
         if distance == 0.:
             return
         if self._active:
-            self._gen += 1
             self._stop_timer()
             self._halt_pwm()
             self.total_mm += self._move_mm
-        self._gen += 1
-        move_gen = self._gen
         self._active = True
         self._fired = False
         self._move_mm = 0.
-        self._remain = abs(distance)
         self._forward = distance > 0
         self._target_speed = max(0.01, abs(speed))
-        self._speed = 0.
         self._act_type = act_type
         curtime = self.reactor.monotonic()
         self.power(True)
-        self.reactor.update_timer(
-            self._timer, self._run_chunk(curtime, move_gen))
+        self._send_speed_commands(curtime, abs(distance))
+        delay = max(0.01, self.chunk_end_pt
+                    - self.mcu.estimated_print_time(curtime))
+        self.reactor.update_timer(self._timer, curtime + delay)
 
     def stop(self, act_type, call_stop_cb=False):
         if not self._active:
             return
-        self._gen += 1
         self._end_move(act_type, 'stopped', call_stop_cb)
 
-    def _end_move(self, act_type, reason, call_stop_cb=True):
+    def _end_move(self, act_type, reason, call_stop_cb=True, finished=False):
         self._stop_timer()
-        self._halt_pwm()
+        self._halt_pwm(finished)
         if self._fired:
             return
         self._fired = True
         self._active = False
-        self._remain = 0.
         self.total_mm += self._move_mm
         self._move_mm = 0.
         if call_stop_cb and (self._on_stop_cb is not None):
@@ -355,33 +355,7 @@ class FilaMotor:
     def _stop_timer(self):
         self.reactor.update_timer(self._timer, self.reactor.NEVER)
 
-    def _add_move_mm(self, delta):
-        if delta <= 0.:
-            return
-        if self._forward:
-            self._move_mm += delta
-        else:
-            self._move_mm -= delta
-
-    def _flush_current_chunk(self, halt_pt=None):
-        """Add current chunk to _move_mm; halt_pt=None means chunk finished."""
-        if self._chunk_mm <= 0.:
-            return
-        if halt_pt is None:
-            self._add_move_mm(self._chunk_mm)
-        else:
-            end_pt = self._chunk_start_pt + self._chunk_mm / self._chunk_speed
-            if halt_pt <= self._chunk_start_pt:
-                partial = 0.
-            elif halt_pt >= end_pt:
-                partial = self._chunk_mm
-            else:
-                partial = (halt_pt - self._chunk_start_pt) * self._chunk_speed
-            self._add_move_mm(partial)
-        self._chunk_mm = 0.
-        self._chunk_speed = 0.
-
-    def _halt_pwm(self):
+    def _halt_pwm(self, finished=False):
         curtime = self.reactor.monotonic()
         now_pt = self.mcu.estimated_print_time(curtime)
         pt = self._sched_print_time(curtime, self.pinout_delay)
@@ -389,76 +363,53 @@ class FilaMotor:
         if self._enable_cmd is not None:
             # 立刻拉 ENN，TMC 失能；行程按当前时刻结算，不按 PWM 排队时刻
             self.power(False)
-            self._flush_current_chunk(now_pt)
+            halt_pt = now_pt
         else:
-            self._flush_current_chunk(pt_pwm)
+            halt_pt = pt_pwm
+        if self._chunk_mm > 0.:
+            if finished:
+                delta = self._chunk_mm
+            else:
+                delta = self.calc_run_mm(
+                    self._chunk_start_pt, halt_pt,
+                    self._chunk_mm, self._target_speed)
+            if delta > 0.:
+                self._move_mm += delta if self._forward else -delta
+            self._chunk_mm = 0.
         self.step.set_pwm_cycle(pt_pwm, 0., self.cycle_time)
         self.last_pt = pt_pwm
         self.chunk_end_pt = pt_pwm + 0.05
-        self._chunk_renew_margin = 0.
 
     def _sched_print_time(self, curtime, gap=0.):
         return max(self.mcu.estimated_print_time(curtime) + self.pinout_delay,
                    self.last_pt + gap)
 
-    def _get_next_chunk(self):
-        if self._speed < self._target_speed:
-            speed = min(self._target_speed,
-                        self._speed + self._target_speed
-                        * MOTOR_ACCEL_FRACTION)
-            max_time = MOTOR_ACCEL_SEGMENT_TIME
-        else:
-            speed = self._target_speed
-            max_time = MOTOR_MAX_CHUNK_TIME
-        duration = min(max_time, self._remain / speed)
-        return speed * duration, speed
-
-    def _run_chunk(self, curtime, move_gen):
-        if not self._active or move_gen != self._gen:
-            return self.reactor.NEVER
-        if self._remain <= MOTOR_DISTANCE_EPS:
-            self._flush_current_chunk()
-            self._end_move(self._act_type, 'complete')
-            return self.reactor.NEVER
-        length, speed = self._get_next_chunk()
+    def _send_speed_commands(self, curtime, distance):
+        # 一次排完：升速段各发一条 set_pwm_cycle，print_time 间隔 100ms
+        segments = self.build_speed_segments(distance, self._target_speed)
         pt = max(self._sched_print_time(curtime, self.pinout_delay),
                  self.chunk_end_pt)
-        ct = self.mm_per_pulse / speed
-        self.cycle_time = ct
         if self.dir is not None:
             self.dir.set_digital(pt, 1 if self._forward else 0)
-        self.step.set_pwm_cycle(pt, MOTOR_STEP_DUTY, self.cycle_time)
-        self.last_pt = pt
-        self.chunk_end_pt = pt + length / speed
-        duration = self.chunk_end_pt - pt
         self._chunk_start_pt = pt
-        self._chunk_mm = length
-        self._chunk_speed = speed
-        self._remain -= length
-        self._speed = speed
-        if move_gen != self._gen:
-            return self.reactor.NEVER
-        mcu = self.mcu
-        margin = self.get_renew_margin(duration, self._remain > 0.)
-        self._chunk_renew_margin = margin
-        delay = max(0.01, self.chunk_end_pt - margin
-                    - mcu.estimated_print_time(curtime))
-        self._chunk_gen = move_gen
-        return curtime + delay
+        last_speed = 0.
+        for duration, speed in segments:
+            if speed > last_speed:
+                self.cycle_time = self.mm_per_pulse / speed
+                self.step.set_pwm_cycle(pt, MOTOR_STEP_DUTY, self.cycle_time)
+                self.last_pt = pt
+                last_speed = speed
+            pt += duration
+        self._chunk_mm = distance
+        self.chunk_end_pt = pt
 
     def _timer_event(self, eventtime):
-        if not self._active or self._chunk_gen != self._gen:
+        if not self._active:
             return self.reactor.NEVER
         pt = self.mcu.estimated_print_time(eventtime)
-        if self._remain > 0.:
-            if pt + self._chunk_renew_margin < self.chunk_end_pt:
-                return eventtime + 0.01
-            self._flush_current_chunk()
-            return self._run_chunk(self.reactor.monotonic(), self._chunk_gen)
-        if pt < self.chunk_end_pt - 0.05:
+        if pt < self.chunk_end_pt:
             return eventtime + 0.01
-        self._flush_current_chunk()
-        self._end_move(self._act_type, 'complete')
+        self._end_move(self._act_type, 'complete', finished=True)
         return self.reactor.NEVER
 
 
