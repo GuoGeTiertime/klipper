@@ -425,6 +425,7 @@ class FilaFeeder:
                 "Duplicate feeder '%s' on filabuffer '%s'"
                 % (self.name, fb.name))
         self.feeder_state = FEEDER_EMPTY
+        self.preRunout = False
         self._init_phase = None
         self._inlet_present = False
         self._buffer_present = False
@@ -641,6 +642,7 @@ class FilaBuffer:
         self.len2buffer = config.getfloat('len2buffer', 1000., above=10.) # inlet to buffer. 
         self.len2extruder = config.getfloat('len2extruder', 2000., above=100.) # buffer to extruder.
         self.feed_len = config.getfloat('feed_len', 100.0, above=50.) # feed length when feeder is active.
+        self.runout_len = config.getfloat('runout_len', 200.0, above=50.) # feed length when feeder is runout.
         self.init_retract_len = config.getfloat('init_retract_len', 50., above=0.) # init retract length.
         # speed for feed, init, withdraw
         self.feed_speed = config.getfloat('feed_speed', 30., above=0.)
@@ -942,6 +944,7 @@ class FilaBuffer:
             #         "consider larger ease_len" % (self.name, feeder.name))
         elif act_type == ACT_TYPE_FEED: # not trigger FULL after max feed length
             if feeder.feeder_state == FEEDER_RUNOUT:
+                feeder.preRunout = False #feeder已经完全进入runout状态，不再preRunout
                 return
             self.log_sensor_msg("feeder %s feed timeout, state: %s" % (feeder.name, feeder.feeder_state))
             self._enter_error(ERROR_FEED_TIMEOUT)
@@ -981,9 +984,11 @@ class FilaBuffer:
         # 5. handle other feeder state changes.
         if feeder.is_selected():
             if feeder.feeder_state == FEEDER_RUNOUT and old_state == FEEDER_ACTIVE:
+                feeder.preRunout = True
                 self.log_sensor_msg("feeder %s runout from active to runout" % (feeder.name))
             elif feeder.feeder_state == FEEDER_EMPTY and old_state == FEEDER_RUNOUT:
                 self.log_sensor_msg("feeder %s empty from runout to empty" % (feeder.name))
+                feeder.preRunout = False
                 feeder.motor_halt()
                 self.active_feeder = None
             elif old_buffer and not feeder.buffer_present:
@@ -1025,7 +1030,11 @@ class FilaBuffer:
             elif self.ease_on_full: # 自动回撤放丝，电机停着FULL仍亮
                 self._start_feeder_ease(feeder)
         elif state & BUFF_LOW:
-            self._start_feeder_feed(feeder, self.feed_speed, self.feed_len)
+            if feeder.feeder_state == FEEDER_RUNOUT:
+                if feeder.preRunout:
+                    self._start_feeder_feed(feeder, self.feed_speed, self.runout_len)
+            else:
+                self._start_feeder_feed(feeder, self.feed_speed, self.feed_len)
 
     def _check_not_full_idle_feed(self, eventtime):
         if self.mode != MODE_WORK:
