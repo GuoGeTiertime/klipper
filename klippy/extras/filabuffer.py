@@ -4,7 +4,6 @@
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
 import logging
-
 from . import pwm_cycle_time
 
 # Buffer sensor bits (pin order: jam, low, full)
@@ -509,6 +508,9 @@ class FilaFeeder:
         if diff > tolerance:  # feed more filament than extrude, feeder slip
             self.fb.log_sensor_msg("feed match slip, diff: %f (feeder_mm: %f, feeder_base: %f, extruder_mm: %f, extruder_base: %f)" %  
             (diff, feeder_mm, self.feed_match_feeder_base, extruder_mm, self.feed_match_extruder_base))
+            total_mm = self.motor.get_total_mm()
+            move_mm = self.motor.get_move_mm()
+            self.fb.log_sensor_msg("feed match slip, move_mm: %f, total_mm: %f" % (move_mm, total_mm))
             return ERROR_FEED_SLIP
         elif diff < -tolerance:  # feed less filament than expected, extruder jam. 
             self.fb.log_sensor_msg("feed match extruder jam, diff: %f (feeder_mm: %f, feeder_base: %f, extruder_mm: %f, extruder_base: %f)" %  
