@@ -1,7 +1,6 @@
 # XY calib orchestration on Klipper host (Center + FitY).
 #
-# Macro = motion (UI_MOVE). Python = probe matrix / FitY scan / px→mm correct.
-# Screen wires buttons in later steps (center_backend / fity_backend).
+# Macro = motion (UI_MOVE / XYCAL_Z_POINT). Python = detect + math + probe-style Z scan.
 #
 # Copyright (C) 2026 TierTime / ScreenQML migration
 #
@@ -16,6 +15,51 @@ FITY_OFFSETS_MM = (
     4.3, 4.4, 4.5, 4.6, 4.7,
     -4.3, -4.4, -4.5, -4.6, -4.7,
 )
+
+PM45_SPAN_MM = 4.5
+
+DEFAULT_Z_GHOST_COARSE = (5.0, 4.0, 3.0, 2.0, 1.0, 0.0, -1.0, -2.0, -3.0, -4.0, -5.0)
+DEFAULT_Z_GHOST_FINE = (0.5, 0.25, -0.25, -0.5)
+
+
+def _cfg_float_list(config, option, default=()):
+    if config.get(option, None) is None:
+        return [float(x) for x in default]
+    # Prefer getfloatlist with comma-only sep. Space must NOT be a separator:
+    # "1, 2" + seps=(","," ") becomes ["1","","2"] → parse error.
+    return list(config.getfloatlist(option, sep=",", count=None))
+
+
+class XyCalZPoint:
+    __slots__ = ("site", "x", "y", "z", "off", "tag")
+
+    def __init__(self, site, x, y, z, off=0.0, tag=""):
+        self.site = str(site).upper()
+        self.x = float(x)
+        self.y = float(y)
+        self.z = float(z)
+        self.off = float(off)
+        self.tag = str(tag or "")
+
+
+class XyCalZPointsHelper:
+    """Probe-style fixed-point scan: move → measure → store samples."""
+
+    def __init__(self, calib):
+        self.calib = calib
+        self.samples = []
+
+    def run_scan(self, gcmd, points, measure_fn, cancel_label="XYCAL"):
+        self.samples = []
+        n = len(points)
+        for i, pt in enumerate(points):
+            self.calib._z_point_index = i
+            self.calib._z_point_n = n
+            self.calib._check_cancel(gcmd, cancel_label)
+            sample = measure_fn(gcmd, pt, i, n)
+            if sample is not None:
+                self.samples.append(sample)
+        return self.samples
 
 
 class XyCalCalib:
@@ -46,6 +90,22 @@ class XyCalCalib:
         self.zgap_max_iter = config.getint("zgap_max_iter", 120, minval=1, maxval=300)
         self.z_min_mm = config.getfloat("z_min_mm", 60.0, above=0.0)
         self.dcx_t1_fallback = config.getfloat("dcx_t1_fallback", 3.8)
+        self.dcxz_measure_mode = config.get(
+            "dcxz_measure_mode", "full_fity"
+        ).lower().strip()
+        self.dcxz_coarse_offsets = _cfg_float_list(
+            config, "dcxz_coarse_offsets", ()
+        )
+        self.dcxz_fine_span = config.getfloat("dcxz_fine_span", 0.25, above=0.0)
+        self.dcxz_fine_step = config.getfloat(
+            "dcxz_fine_step", 0.1, above=0.001
+        )
+        self.z_ghost_coarse = _cfg_float_list(
+            config, "z_ghost_coarse", DEFAULT_Z_GHOST_COARSE
+        )
+        self.z_ghost_fine = _cfg_float_list(
+            config, "z_ghost_fine", DEFAULT_Z_GHOST_FINE
+        )
 
         self._busy = False
         self._cancel = False
@@ -55,6 +115,15 @@ class XyCalCalib:
         self._last_cx = -1.0
         self._last_cy = -1.0
         self._last_r = 0.0
+        self._last_fw = 0.0
+        self._last_fh = 0.0
+        self._last_allowed_roi = None
+        self._last_allowed_circle = None
+        self._last_expect_x = None
+        self._last_expect_y = None
+        self._toolhead_x = None
+        self._toolhead_y = None
+        self._toolhead_z = None
         self._vx_x = 0.0
         self._vx_y = 0.0
         self._vy_x = 0.0
@@ -90,6 +159,8 @@ class XyCalCalib:
         self._auto_sec_z = None
         self._auto_ox = None
         self._auto_oy = None
+        self._z_point_index = 0
+        self._z_point_n = 0
 
         self.gcode.register_command(
             "XYCAL_CENTER", self.cmd_XYCAL_CENTER, desc=self.cmd_XYCAL_CENTER_help
@@ -170,10 +241,37 @@ class XyCalCalib:
         if expected is not None:
             body["expected_x"] = float(expected[0])
             body["expected_y"] = float(expected[1])
+            self._last_expect_x = float(expected[0])
+            self._last_expect_y = float(expected[1])
+        elif reset_follow:
+            self._last_expect_x = None
+            self._last_expect_y = None
         result = det.detect_once(body)
         self._last_cx = float(result.get("cx_px", -1) or -1)
         self._last_cy = float(result.get("cy_px", -1) or -1)
         self._last_r = float(result.get("radius_px", 0) or 0)
+        self._last_fw = float(result.get("frame_w", 0) or 0)
+        self._last_fh = float(result.get("frame_h", 0) or 0)
+        roi = result.get("allowed_roi")
+        if isinstance(roi, (list, tuple)) and len(roi) >= 4:
+            try:
+                self._last_allowed_roi = [float(v) for v in roi[:4]]
+            except (TypeError, ValueError):
+                self._last_allowed_roi = None
+        else:
+            self._last_allowed_roi = None
+        circ = result.get("allowed_circle")
+        if isinstance(circ, (list, tuple)) and len(circ) >= 3:
+            try:
+                self._last_allowed_circle = [float(v) for v in circ[:3]]
+            except (TypeError, ValueError):
+                self._last_allowed_circle = None
+        else:
+            self._last_allowed_circle = None
+        # 检出成功后：下一窗跟当前 tip（与屏端「识别后再跟圆心」一致）
+        if self._looks_like_tip(result) and self._last_cx >= 0 and self._last_cy >= 0:
+            self._last_expect_x = float(self._last_cx)
+            self._last_expect_y = float(self._last_cy)
         return result
 
     def _looks_like_tip(self, result):
@@ -193,6 +291,13 @@ class XyCalCalib:
         pos = toolhead.get_position()
         return float(pos[0]), float(pos[1]), float(pos[2])
 
+    def _remember_toolhead(self):
+        x, y, z = self._toolhead_xyz()
+        self._toolhead_x = x
+        self._toolhead_y = y
+        self._toolhead_z = z
+        return x, y, z
+
     def _home_xy_if_needed(self, gcmd, label="XYCAL"):
         toolhead = self.printer.lookup_object("toolhead")
         st = toolhead.get_status(self.reactor.monotonic())
@@ -205,6 +310,7 @@ class XyCalCalib:
         self._check_cancel(gcmd, label)
 
     def _xycal_goto(self, gcmd, site, x, y, z):
+        self._z_assert_min(gcmd, z, "goto Z")
         site = str(site).upper()
         if site.startswith("SEC"):
             site = "SECOND"
@@ -220,9 +326,332 @@ class XyCalCalib:
         self._check_cancel(gcmd)
 
     def _xycal_move_z(self, gcmd, z_abs):
+        self._z_assert_min(gcmd, z_abs, "move Z")
         script = "XYCAL_MOVE_Z Z=%.3f" % float(z_abs)
         self.gcode.run_script_from_command(script)
         self._check_cancel(gcmd)
+
+    def _z_min_mm(self, gcmd):
+        return gcmd.get_float("Z_MIN", self.z_min_mm, above=0.0)
+
+    def _z_assert_min(self, gcmd, z, where, label="XYCAL"):
+        z_min = self._z_min_mm(gcmd)
+        zf = float(z)
+        if zf < z_min - 1e-6:
+            raise gcmd.error(
+                "%s: %s Z=%.2f < Z_MIN %.1f" % (label, where, zf, z_min)
+            )
+        return zf
+
+    def _z_ladder_try_ok(self, gcmd, z_try, label="XYCAL_Z"):
+        return float(z_try) >= self._z_min_mm(gcmd) - 1e-6
+
+    def _run_z_point_macro(self, gcmd, site, x, y, z, shift=0.0, label="XYCAL_Z"):
+        self._z_assert_min(gcmd, z, "goto Z", label)
+        script = (
+            "XYCAL_Z_POINT SITE=%s X=%.3f Y=%.3f Z=%.3f SHIFT=%.3f SPEED=%d"
+            % (
+                str(site).upper(),
+                float(x),
+                float(y),
+                float(z),
+                float(shift),
+                int(self.jog_speed),
+            )
+        )
+        self.gcode.run_script_from_command(script)
+        self._check_cancel(gcmd)
+
+    def _dcxz_measure_pm45(self, gcmd, tip0=None):
+        """Return {dcx, cx_pos, cy_pos, cx_neg, cy_neg} or None.
+
+        Y±4.5 用 FitY vy（或短探针 vy）预测 expected，搜索窗跟随喷嘴。
+        tip0: 当前 Z 点已检出的 tip；缺省则用 _last_cx/cy。
+        """
+        span = float(PM45_SPAN_MM)
+        if tip0 and self._looks_like_tip(tip0):
+            cx0 = float(tip0["cx_px"])
+            cy0 = float(tip0["cy_px"])
+        else:
+            cx0 = float(self._last_cx)
+            cy0 = float(self._last_cy)
+        if self._fity_vy_ok:
+            vx, vy = float(self._fity_vy_x), float(self._fity_vy_y)
+        elif self._matrix_ok:
+            vx, vy = float(self._vy_x), float(self._vy_y)
+        else:
+            vx = vy = None
+        def _est(d_mm):
+            if vx is None or not (cx0 >= 0 and cy0 >= 0):
+                return None
+            return (cx0 + float(d_mm) * vx, cy0 + float(d_mm) * vy)
+
+        self._ui_move("Y", span)
+        self._check_cancel(gcmd, "XYCAL_DCXZ")
+        tip_pos = self._detect(gcmd, flush=2, expected=_est(span))
+        if not self._looks_like_tip(tip_pos):
+            tip_pos = self._detect(gcmd, flush=2, reset_follow=True)
+        if not self._looks_like_tip(tip_pos):
+            return None
+        cx_pos = float(tip_pos["cx_px"])
+        cy_pos = float(tip_pos["cy_px"])
+        self._ui_move("Y", -2.0 * span)
+        self._check_cancel(gcmd, "XYCAL_DCXZ")
+        # 从 +span 再走到 -span：相对 tip0 为 -span；相对 tip_pos 为 -2*span
+        tip_neg = self._detect(
+            gcmd,
+            flush=2,
+            expected=_est(-span)
+            if _est(-span) is not None
+            else (
+                (cx_pos - 2.0 * span * vx, cy_pos - 2.0 * span * vy)
+                if vx is not None
+                else None
+            ),
+        )
+        if not self._looks_like_tip(tip_neg):
+            tip_neg = self._detect(gcmd, flush=1, reset_follow=True)
+        if not self._looks_like_tip(tip_neg):
+            self._ui_move("Y", span)
+            return None
+        cx_neg = float(tip_neg["cx_px"])
+        cy_neg = float(tip_neg["cy_px"])
+        self._ui_move("Y", span)
+        self._check_cancel(gcmd, "XYCAL_DCXZ")
+        return {
+            "dcx": cx_neg - cx_pos,
+            "cx_pos": cx_pos,
+            "cy_pos": cy_pos,
+            "cx_neg": cx_neg,
+            "cy_neg": cy_neg,
+        }
+
+    def _dcxz_offsets_from_range(self, off_hi, off_lo, step):
+        off = round(float(off_hi) * 1000.0) / 1000.0
+        off_lo = float(off_lo)
+        step = float(step)
+        out = []
+        while off >= off_lo - 1e-6:
+            out.append(round(off * 1000.0) / 1000.0)
+            off = round((off - step) * 1000.0) / 1000.0
+        return out
+
+    def _dcxz_offsets_for_pass(self, gcmd, t1_ref, auto, off_hi, off_lo, step):
+        if self.dcxz_coarse_offsets:
+            return list(self.dcxz_coarse_offsets)
+        if auto:
+            return self._dcxz_offsets_from_range(
+                t1_ref + 1.0, t1_ref - 1.0, 0.5
+            )
+        return self._dcxz_offsets_from_range(off_hi, off_lo, step)
+
+    def _dcxz_fine_offsets(self, center_off):
+        span = float(self.dcxz_fine_span)
+        step = float(self.dcxz_fine_step)
+        hi = round((float(center_off) + span) * 1000.0) / 1000.0
+        lo = round((float(center_off) - span) * 1000.0) / 1000.0
+        return self._dcxz_offsets_from_range(hi, lo, step)
+
+    def _run_dcxz_main_baseline(self, gcmd, main_x, main_y, main_z, skip_center=False):
+        self._set_phase("dcx_main", "dcx main FitY")
+        self._xycal_goto(gcmd, "MAIN", main_x, main_y, main_z)
+        if skip_center and self._fity_vy_ok:
+            gcmd.respond_info(
+                "XYCAL_DCXZ: reuse prior Center FitY vy=(%.3f,%.3f); skip re-center"
+                % (self._fity_vy_x, self._fity_vy_y)
+            )
+        else:
+            self._matrix_ok = False
+            self._fity_vy_ok = False
+            self.run_center(gcmd)
+        self.run_fity(gcmd)
+        main_dcx = self._fity_dcx45
+        if main_dcx is None:
+            fit_ok, fit_dcx, _ = self._compute_dcx45(self._fity_samples)
+            main_dcx = fit_dcx if fit_ok else None
+        if main_dcx is None:
+            raise gcmd.error("XYCAL_DCXZ: main FitY dcx45 failed")
+        self._dcx_main_dcx45 = float(main_dcx)
+        gcmd.respond_info("XYCAL_DCXZ: main dcx45=%.2f" % self._dcx_main_dcx45)
+        return self._dcx_main_dcx45
+
+    def _run_dcxz_scan_pm45(
+        self, gcmd, main_z, sec_x, sec_y, offsets, pass_tag, rows
+    ):
+        z_min = gcmd.get_float("Z_MIN", self.z_min_mm, above=0.0)
+        n = len(offsets)
+        for i, off in enumerate(offsets):
+            self._z_point_index = i
+            self._z_point_n = n
+            self._check_cancel(gcmd, "XYCAL_DCXZ")
+            off = float(off)
+            z_abs = round((float(main_z) + off) * 1000.0) / 1000.0
+            if z_abs < z_min - 1e-6:
+                rows.append(
+                    {
+                        "off": off,
+                        "z": z_abs,
+                        "ok": False,
+                        "dcx": None,
+                        "pass": pass_tag,
+                        "reason": "z<min",
+                    }
+                )
+                self._dcx_rebuild_report(self._dcx_main_dcx45 or 0.0, rows)
+                continue
+            self._set_phase(
+                "dcx_scan",
+                "dcx pm45 off=%+.2f z=%.2f (%d/%d)"
+                % (off, z_abs, i + 1, n),
+            )
+            self._run_z_point_macro(gcmd, "SECOND", sec_x, sec_y, z_abs, 0.0)
+            tip0 = self._detect(gcmd, flush=1)
+            if not self._looks_like_tip(tip0):
+                tip0 = self._detect(gcmd, flush=2, reset_follow=True)
+            if not self._looks_like_tip(tip0):
+                rows.append(
+                    {
+                        "off": off,
+                        "z": z_abs,
+                        "ok": False,
+                        "dcx": None,
+                        "pass": pass_tag,
+                        "reason": "no tip",
+                    }
+                )
+                self._dcx_rebuild_report(self._dcx_main_dcx45 or 0.0, rows)
+                continue
+            try:
+                m = self._dcxz_measure_pm45(gcmd, tip0=tip0)
+                ok = m is not None
+                dcx = float(m["dcx"]) if ok else None
+                row = {
+                    "off": off,
+                    "z": z_abs,
+                    "ok": ok,
+                    "dcx": dcx,
+                    "pass": pass_tag,
+                    "reason": "" if ok else "pm45",
+                }
+                if ok:
+                    row["cx_pos"] = float(m["cx_pos"])
+                    row["cy_pos"] = float(m["cy_pos"])
+                    row["cx_neg"] = float(m["cx_neg"])
+                    row["cy_neg"] = float(m["cy_neg"])
+                rows.append(row)
+                if ok:
+                    gcmd.respond_info(
+                        "XYCAL_DCXZ [%s] off=%+.2f dcx=%.2f vs=%.2f"
+                        % (
+                            pass_tag,
+                            off,
+                            dcx,
+                            dcx - float(self._dcx_main_dcx45),
+                        )
+                    )
+            except Exception as exc:
+                rows.append(
+                    {
+                        "off": off,
+                        "z": z_abs,
+                        "ok": False,
+                        "dcx": None,
+                        "pass": pass_tag,
+                        "reason": str(exc),
+                    }
+                )
+            self._dcx_rebuild_report(self._dcx_main_dcx45 or 0.0, rows)
+
+    def _z_detect_after_shift(self, gcmd, shift_axis, shift_mm, label="XYCAL_Z"):
+        self._ui_move(shift_axis, shift_mm)
+        self._check_cancel(gcmd, label)
+        tip = self._detect(gcmd, flush=2)
+        if not self._looks_like_tip(tip):
+            tip = self._detect(gcmd, flush=2, reset_follow=True)
+        return tip
+
+    def _z_ghost_ladder_match(
+        self, gcmd, sx, sy, shift_axis, shift_mm, match_tol, dr_tol
+    ):
+        z0 = float(self._z_calib_z0)
+        z_min = self._z_min_mm(gcmd)
+        matched_z = None
+        coarse_ladder = [float(d) for d in self.z_ghost_coarse]
+        n = len(coarse_ladder)
+        tried_coarse = 0
+        for i, delta in enumerate(coarse_ladder):
+            z_try = round((z0 + delta) * 1000.0) / 1000.0
+            if not self._z_ladder_try_ok(gcmd, z_try, "XYCAL_Z"):
+                gcmd.respond_info(
+                    "XYCAL_Z: skip ladder coarse z=%.2f (< Z_MIN %.1f)"
+                    % (z_try, z_min)
+                )
+                continue
+            tried_coarse += 1
+            self._z_point_index = i
+            self._z_point_n = n
+            self._check_cancel(gcmd, "XYCAL_Z")
+            self._set_phase(
+                "z_ladder",
+                "Z coarse z=%.2f (%d/%d)" % (z_try, i + 1, n),
+            )
+            self._run_z_point_macro(gcmd, "SECOND", sx, sy, z_try, 0.0)
+            tip2 = self._z_detect_after_shift(gcmd, shift_axis, shift_mm)
+            if not self._looks_like_tip(tip2):
+                continue
+            if self._circle_match(
+                self._ghost_cx,
+                self._ghost_cy,
+                self._ghost_r,
+                tip2,
+                match_tol,
+                dr_tol,
+            ):
+                matched_z = z_try
+                gcmd.respond_info("XYCAL_Z: ladder coarse match z=%.3f" % z_try)
+                break
+        if tried_coarse == 0:
+            raise gcmd.error(
+                "XYCAL_Z: ladder coarse all below Z_MIN %.1f (Z0=%.2f)"
+                % (z_min, z0)
+            )
+        if matched_z is None:
+            return None
+        fine_base = matched_z
+        fine_ladder = [
+            round((fine_base + float(d)) * 1000.0) / 1000.0
+            for d in self.z_ghost_fine
+        ]
+        n_f = len(fine_ladder)
+        best_z = matched_z
+        for i, z_try in enumerate(fine_ladder):
+            if not self._z_ladder_try_ok(gcmd, z_try, "XYCAL_Z"):
+                gcmd.respond_info(
+                    "XYCAL_Z: skip ladder fine z=%.2f (< Z_MIN %.1f)"
+                    % (z_try, z_min)
+                )
+                continue
+            self._z_point_index = i
+            self._z_point_n = n_f
+            self._check_cancel(gcmd, "XYCAL_Z")
+            self._set_phase(
+                "z_ladder",
+                "Z fine z=%.2f (%d/%d)" % (z_try, i + 1, n_f),
+            )
+            self._run_z_point_macro(gcmd, "SECOND", sx, sy, z_try, 0.0)
+            tip2 = self._z_detect_after_shift(gcmd, shift_axis, shift_mm)
+            if not self._looks_like_tip(tip2):
+                continue
+            if self._circle_match(
+                self._ghost_cx,
+                self._ghost_cy,
+                self._ghost_r,
+                tip2,
+                match_tol,
+                dr_tol,
+            ):
+                best_z = z_try
+        return float(best_z) - z0
 
     def _read_save_var_float(self, name, default):
         sv = self.printer.lookup_object("save_variables", None)
@@ -256,15 +685,10 @@ class XyCalCalib:
     def _save_tool1_offset_z(self, gcmd, dz, dual_init=False):
         dz_f = round(float(dz) * 100.0) / 100.0
         dz_str = "%.2f" % dz_f
+        init_flag = 1 if dual_init else 0
         self.gcode.run_script_from_command(
-            "SET_DUAL_TOOL_OFFSET TOOL=1 Z=%s" % dz_str
+            "XYCAL_WRITE_T1_Z Z=%s INIT=%d" % (dz_str, init_flag)
         )
-        self.gcode.run_script_from_command(
-            "SAVE_VARIABLE VARIABLE=t1_offset_z VALUE=%s" % dz_str
-        )
-        if dual_init:
-            self.gcode.run_script_from_command("DUAL_TOOL_INIT")
-            self.gcode.run_script_from_command("TOOL_STATUS")
         return dz_f
 
     def _save_tool1_offsets_xyz(self, gcmd, ox, oy, oz):
@@ -272,20 +696,8 @@ class XyCalCalib:
         oy_f = round(float(oy) * 100.0) / 100.0
         oz_f = round(float(oz) * 100.0) / 100.0
         self.gcode.run_script_from_command(
-            "SET_DUAL_TOOL_OFFSET TOOL=1 X=%.2f Y=%.2f Z=%.2f"
-            % (ox_f, oy_f, oz_f)
+            "XYCAL_WRITE_T1_XYZ X=%.2f Y=%.2f Z=%.2f" % (ox_f, oy_f, oz_f)
         )
-        self.gcode.run_script_from_command(
-            "SAVE_VARIABLE VARIABLE=t1_offset_x VALUE=%.2f" % ox_f
-        )
-        self.gcode.run_script_from_command(
-            "SAVE_VARIABLE VARIABLE=t1_offset_y VALUE=%.2f" % oy_f
-        )
-        self.gcode.run_script_from_command(
-            "SAVE_VARIABLE VARIABLE=t1_offset_z VALUE=%.2f" % oz_f
-        )
-        self.gcode.run_script_from_command("DUAL_TOOL_INIT")
-        self.gcode.run_script_from_command("TOOL_STATUS")
         return ox_f, oy_f, oz_f
 
     def _matrix_ok_vals(self, vxx, vxy, vyx, vyy):
@@ -538,13 +950,18 @@ class XyCalCalib:
                         raise gcmd.error("XYCAL_CENTER: %s" % detail)
                     d_x, d_y, err_main, done = step
                     if done:
+                        self._remember_toolhead()
                         self._set_phase("done", "Centered e=%.2f" % err_main)
                         gcmd.respond_info(
-                            "XYCAL_CENTER ok=True cx=%.1f cy=%.1f e=%.2f fity_vy_ok=%s"
+                            "XYCAL_CENTER ok=True cx=%.1f cy=%.1f e=%.2f "
+                            "xyz=(%.3f,%.3f,%.3f) fity_vy_ok=%s"
                             % (
                                 self._last_cx,
                                 self._last_cy,
                                 err_main,
+                                self._toolhead_x,
+                                self._toolhead_y,
+                                self._toolhead_z,
                                 self._fity_vy_ok,
                             )
                         )
@@ -679,7 +1096,8 @@ class XyCalCalib:
         if self._fity_dcx45 is not None:
             lines.append("=======")
             lines.append(
-                "实测Δcx@±4.5  %.2f px  (cx(-4.5)-cx(+4.5))" % self._fity_dcx45
+                "拟合Δcx@±4.5  %.2f px  (pos/neg 臂线性拟合@±4.5)"
+                % self._fity_dcx45
             )
         self._fity_report = "\n".join(lines)
 
@@ -883,8 +1301,8 @@ class XyCalCalib:
             raw_ok, raw_dcx = self._raw_dcx45(self._fity_samples)
             fit_ok, fit_dcx, _dropped = self._compute_dcx45(self._fity_samples)
             self._fity_dcx45_raw = raw_dcx if raw_ok else None
-            # Standalone FitY on screen uses measured ±4.5; expose that as primary
-            self._fity_dcx45 = raw_dcx if raw_ok else (fit_dcx if fit_ok else None)
+            # DCXZ/Auto 与屏端：主结果只用两臂线性拟合 Δcx@±4.5
+            self._fity_dcx45 = fit_dcx if fit_ok else (raw_dcx if raw_ok else None)
             self._rebuild_fity_report()
             self._fity_home_y()
             tip_end = self._detect(gcmd, reset_follow=True, flush=2)
@@ -911,9 +1329,9 @@ class XyCalCalib:
             pass
 
     cmd_XYCAL_Z_help = (
-        "Host Z gap: main/second center, ghost match, Z descend. "
+        "Host Z gap: ghost match + fixed Z ladder. "
         "Params: URL= MAIN_X/Y/Z SEC_X/Y/Z SHIFT_AXIS SHIFT_MM "
-        "Z_PLUS Z_STEP MATCH_TOL DR_TOL WRITE="
+        "MATCH_TOL DR_TOL Z_MIN WRITE="
     )
 
     def cmd_XYCAL_Z(self, gcmd):
@@ -961,12 +1379,13 @@ class XyCalCalib:
         if shift_axis not in ("X", "Y"):
             shift_axis = "Y"
         shift_mm = gcmd.get_float("SHIFT_MM", self.zgap_shift_mm, above=0.1)
-        z_plus = gcmd.get_float("Z_PLUS", self.zgap_z_plus_mm, above=0.1)
-        z_step = gcmd.get_float("Z_STEP", self.zgap_z_step_mm, above=0.01)
         match_tol = gcmd.get_float("MATCH_TOL", self.zgap_match_tol_px, above=0.0)
         dr_tol = gcmd.get_float("DR_TOL", self.zgap_dr_tol_px, above=0.0)
-        max_iter = gcmd.get_int("MAX_ITER", self.zgap_max_iter, minval=1, maxval=300)
         write = gcmd.get_int("WRITE", 0, minval=0, maxval=1) != 0
+        z_min = self._z_min_mm(gcmd)
+        self._z_assert_min(gcmd, mz, "MAIN_Z", "XYCAL_Z")
+        self._z_assert_min(gcmd, sz, "SEC_Z", "XYCAL_Z")
+        gcmd.respond_info("XYCAL_Z: Z_MIN=%.1f" % z_min)
 
         self._set_phase("z_goto_main", "Z go main")
         gcmd.respond_info("XYCAL_Z: goto main")
@@ -989,6 +1408,7 @@ class XyCalCalib:
         self._ghost_r = float(tip.get("radius_px") or 8.0)
         _, _, z0 = self._toolhead_xyz()
         self._z_calib_z0 = float(z0)
+        self._z_assert_min(gcmd, self._z_calib_z0, "Z0 ghost", "XYCAL_Z")
         gcmd.respond_info(
             "XYCAL_Z: ghost (%.1f,%.1f) r=%.1f Z0=%.3f"
             % (self._ghost_cx, self._ghost_cy, self._ghost_r, self._z_calib_z0)
@@ -1017,54 +1437,11 @@ class XyCalCalib:
             self._z_offset_dz = float(z_now) - float(self._z_calib_z0)
             gcmd.respond_info("XYCAL_Z: matched without Z adjust dz=%.3f" % self._z_offset_dz)
         else:
-            target_z = float(self._z_calib_z0) + float(z_plus)
-            self._set_phase("z_jump", "Z jump Z0+%.1f" % z_plus)
-            self._xycal_move_z(gcmd, target_z)
-            tip2 = self._detect(gcmd, flush=2)
-            if not self._looks_like_tip(tip2):
-                tip2 = self._detect(gcmd, flush=2, reset_follow=True)
-            if self._circle_match(
-                self._ghost_cx, self._ghost_cy, self._ghost_r, tip2, match_tol, dr_tol
-            ):
-                _, _, z_now = self._toolhead_xyz()
-                self._z_offset_dz = float(z_now) - float(self._z_calib_z0)
-            else:
-                floor_z = float(self._z_calib_z0) - float(z_plus)
-                for _ in range(max_iter):
-                    self._check_cancel(gcmd, "XYCAL_Z")
-                    _, _, z_now = self._toolhead_xyz()
-                    if z_now <= floor_z + 0.001:
-                        raise gcmd.error("XYCAL_Z: no match within Z0±%.1f" % z_plus)
-                    step = float(z_step)
-                    err = max(
-                        abs(float(tip2.get("cx_px", 0)) - self._ghost_cx),
-                        abs(float(tip2.get("cy_px", 0)) - self._ghost_cy),
-                    )
-                    if err > 20:
-                        step = min(0.12, step * 2)
-                    elif err > 8:
-                        step = min(0.08, step * 1.5)
-                    room = float(z_now) - floor_z
-                    if step > room:
-                        step = max(0.01, room)
-                    self._set_phase("z_descend", "Z −%.2f e=%.1f" % (step, err))
-                    self._ui_move("Z", -step)
-                    tip2 = self._detect(gcmd, flush=2)
-                    if not self._looks_like_tip(tip2):
-                        tip2 = self._detect(gcmd, flush=1)
-                    if self._circle_match(
-                        self._ghost_cx,
-                        self._ghost_cy,
-                        self._ghost_r,
-                        tip2,
-                        match_tol,
-                        dr_tol,
-                    ):
-                        _, _, z_now = self._toolhead_xyz()
-                        self._z_offset_dz = float(z_now) - float(self._z_calib_z0)
-                        break
-                else:
-                    raise gcmd.error("XYCAL_Z: match timeout")
+            self._z_offset_dz = self._z_ghost_ladder_match(
+                gcmd, sx, sy, shift_axis, shift_mm, match_tol, dr_tol
+            )
+            if self._z_offset_dz is None:
+                raise gcmd.error("XYCAL_Z: ladder no ghost match")
 
         if self._z_offset_dz is None:
             raise gcmd.error("XYCAL_Z: dz not computed")
@@ -1124,20 +1501,30 @@ class XyCalCalib:
         lines.append("main dcx45=%.2f" % float(main_dcx))
         for r in rows:
             tag = "[%s]" % r.get("pass", "?")
+            off = float(r.get("off", 0))
+            z = float(r.get("z", 0))
             if r.get("ok"):
-                lines.append(
-                    "%s off=%+.2f z=%.2f dcx=%.2f"
-                    % (
-                        tag,
-                        float(r["off"]),
-                        float(r.get("z", 0)),
-                        float(r["dcx"]),
+                lines.append("%s off=%+.2f z=%.2f" % (tag, off, z))
+                if r.get("cx_pos") is not None:
+                    lines.append(
+                        "  [1] Y+4.5mm (cx, cy)=(%.2f, %.2f) px"
+                        % (float(r["cx_pos"]), float(r.get("cy_pos", 0)))
                     )
+                    lines.append(
+                        "  [2] Y-4.5mm (cx, cy)=(%.2f, %.2f) px"
+                        % (float(r["cx_neg"]), float(r.get("cy_neg", 0)))
+                    )
+                lines.append(
+                    "  实测 Δcx@±4.5  %.2f px  (cx(-4.5)-cx(+4.5))"
+                    % float(r["dcx"])
+                )
+                lines.append(
+                    "  vs main=%+.2f" % (float(r["dcx"]) - float(main_dcx))
                 )
             else:
                 lines.append(
-                    "%s off=%+.2f FAIL %s"
-                    % (tag, float(r["off"]), r.get("reason", ""))
+                    "%s off=%+.2f z=%.2f FAIL %s"
+                    % (tag, off, z, r.get("reason", ""))
                 )
         if self._dcx_solved_offset is not None:
             lines.append("offset*=%.2f" % float(self._dcx_solved_offset))
@@ -1234,9 +1621,9 @@ class XyCalCalib:
         return self._dcx_main_dcx45
 
     cmd_XYCAL_DCXZ_help = (
-        "Host ΔcxZ scan: main FitY + second Z sweep. "
+        "Host ΔcxZ scan: main FitY baseline + Z sweep (pm45 or full_fity). "
         "Params: URL= MAIN_X/Y/Z SEC_X/Y T1_REF OFF_HI OFF_LO STEP "
-        "Z_MIN AUTO WRITE="
+        "Z_MIN AUTO WRITE=  cfg: dcxz_measure_mode"
     )
 
     def cmd_XYCAL_DCXZ(self, gcmd):
@@ -1286,6 +1673,15 @@ class XyCalCalib:
             write = bool(write_override)
         else:
             write = gcmd.get_int("WRITE", 0, minval=0, maxval=1) != 0
+        # Auto 流水线：用已居中精修坐标，避免回粗定位后再二次 Center
+        if auto and self._auto_main_x is not None:
+            mx = float(self._auto_main_x)
+            my = float(self._auto_main_y)
+            if self._auto_main_z is not None:
+                mz = float(self._auto_main_z)
+        if auto and self._auto_sec_x is not None:
+            sx = float(self._auto_sec_x)
+            sy = float(self._auto_sec_y)
         z_min = gcmd.get_float("Z_MIN", self.z_min_mm, above=0.0)
         if mz < z_min - 1e-6:
             raise gcmd.error("XYCAL_DCXZ: MAIN_Z=%.2f < Z_MIN" % mz)
@@ -1306,51 +1702,89 @@ class XyCalCalib:
         if not (off_hi > off_lo and step > 0):
             raise gcmd.error("XYCAL_DCXZ: bad OFF_HI/OFF_LO/STEP")
 
-        self._run_dcxz_scan_pass(
-            gcmd, mx, my, mz, sx, sy, off_hi, off_lo, step, "coarse", rows, True
-        )
-        solved = self._dcx_solve_offset(rows, self._dcx_main_dcx45)
-        if auto and solved is not None:
-            approx = solved
-            if approx > t1_ref + 1.0 + 0.01:
-                approx = round((t1_ref + 1.0) * 1000.0) / 1000.0
-            if approx < t1_ref - 1.0 - 0.01:
-                approx = round((t1_ref - 1.0) * 1000.0) / 1000.0
-            fine_hi = round((approx + 0.25) * 1000.0) / 1000.0
-            fine_lo = round((approx - 0.25) * 1000.0) / 1000.0
-            if (float(mz) + fine_lo) >= z_min - 1e-6:
-                fine_rows = []
-                self._run_dcxz_scan_pass(
-                    gcmd,
-                    mx,
-                    my,
-                    mz,
-                    sx,
-                    sy,
-                    fine_hi,
-                    fine_lo,
-                    0.1,
-                    "fine",
-                    fine_rows,
-                    False,
-                )
-                fine_sol = self._dcx_solve_offset(fine_rows, self._dcx_main_dcx45)
-                if fine_sol is not None and len(fine_rows) >= 2:
-                    rows = fine_rows
-                    solved = fine_sol
-                    gate_lo = fine_lo
-                    gate_hi = fine_hi
+        use_pm45 = self.dcxz_measure_mode not in ("full_fity", "legacy", "full")
+        if use_pm45:
+            coarse_offs = self._dcxz_offsets_for_pass(
+                gcmd, t1_ref, auto, off_hi, off_lo, step
+            )
+            # Auto 已对主喷头做过 Center：复用 FitY vy，只回主位做 FitY，避免二次居中
+            self._run_dcxz_main_baseline(
+                gcmd, mx, my, mz, skip_center=bool(auto and self._fity_vy_ok)
+            )
+            self._run_dcxz_scan_pm45(
+                gcmd, mz, sx, sy, coarse_offs, "coarse", rows
+            )
+            solved = self._dcx_solve_offset(rows, self._dcx_main_dcx45)
+            if auto and solved is not None:
+                approx = solved
+                if approx > t1_ref + 1.0 + 0.01:
+                    approx = round((t1_ref + 1.0) * 1000.0) / 1000.0
+                if approx < t1_ref - 1.0 - 0.01:
+                    approx = round((t1_ref - 1.0) * 1000.0) / 1000.0
+                fine_offs = self._dcxz_fine_offsets(approx)
+                if (float(mz) + min(fine_offs)) >= z_min - 1e-6:
+                    fine_rows = []
+                    self._run_dcxz_scan_pm45(
+                        gcmd, mz, sx, sy, fine_offs, "fine", fine_rows
+                    )
+                    fine_sol = self._dcx_solve_offset(
+                        fine_rows, self._dcx_main_dcx45
+                    )
+                    if fine_sol is not None and len(fine_rows) >= 2:
+                        rows = fine_rows
+                        solved = fine_sol
+                        gate_lo = round((approx - self.dcxz_fine_span) * 1000.0) / 1000.0
+                        gate_hi = round((approx + self.dcxz_fine_span) * 1000.0) / 1000.0
+        else:
+            self._run_dcxz_scan_pass(
+                gcmd, mx, my, mz, sx, sy, off_hi, off_lo, step, "coarse", rows, True
+            )
+            solved = self._dcx_solve_offset(rows, self._dcx_main_dcx45)
+            if auto and solved is not None:
+                approx = solved
+                if approx > t1_ref + 1.0 + 0.01:
+                    approx = round((t1_ref + 1.0) * 1000.0) / 1000.0
+                if approx < t1_ref - 1.0 - 0.01:
+                    approx = round((t1_ref - 1.0) * 1000.0) / 1000.0
+                fine_hi = round((approx + 0.25) * 1000.0) / 1000.0
+                fine_lo = round((approx - 0.25) * 1000.0) / 1000.0
+                if (float(mz) + fine_lo) >= z_min - 1e-6:
+                    fine_rows = []
+                    self._run_dcxz_scan_pass(
+                        gcmd,
+                        mx,
+                        my,
+                        mz,
+                        sx,
+                        sy,
+                        fine_hi,
+                        fine_lo,
+                        0.1,
+                        "fine",
+                        fine_rows,
+                        False,
+                    )
+                    fine_sol = self._dcx_solve_offset(fine_rows, self._dcx_main_dcx45)
+                    if fine_sol is not None and len(fine_rows) >= 2:
+                        rows = fine_rows
+                        solved = fine_sol
+                        gate_lo = fine_lo
+                        gate_hi = fine_hi
 
         self._dcx_rows = list(rows)
+        main_dcx = self._dcx_main_dcx45 if self._dcx_main_dcx45 is not None else 0.0
+        self._dcx_rebuild_report(main_dcx, rows)
         if solved is None:
-            raise gcmd.error("XYCAL_DCXZ: solve failed")
+            raise gcmd.error(
+                "XYCAL_DCXZ: solve failed\n%s" % (self._dcx_report or "no rows")
+            )
         if solved < gate_lo - 0.01 or solved > gate_hi + 0.01:
             raise gcmd.error(
-                "XYCAL_DCXZ: offset*=%.2f out of gate [%.2f..%.2f]"
-                % (solved, gate_lo, gate_hi)
+                "XYCAL_DCXZ: offset*=%.2f out of gate [%.2f..%.2f]\n%s"
+                % (solved, gate_lo, gate_hi, self._dcx_report or "")
             )
         self._dcx_solved_offset = float(solved)
-        self._dcx_rebuild_report(self._dcx_main_dcx45, rows)
+        self._dcx_rebuild_report(main_dcx, rows)
         if write:
             self._save_tool1_offset_z(gcmd, solved, dual_init=True)
         self._set_phase("done", "dcx offset=%.2f" % solved)
@@ -1401,6 +1835,9 @@ class XyCalCalib:
                 raise gcmd.error("XYCAL_AUTO: need %s" % name)
         write = gcmd.get_int("WRITE", 1, minval=0, maxval=1) != 0
 
+        self._z_assert_min(gcmd, mz, "MAIN_Z", "XYCAL_AUTO")
+        self._z_assert_min(gcmd, sz, "SEC_Z", "XYCAL_AUTO")
+
         self._home_xy_if_needed(gcmd, "XYCAL_AUTO")
         self._set_phase("auto_main", "auto main center")
         self._xycal_goto(gcmd, "MAIN", mx, my, mz)
@@ -1411,11 +1848,14 @@ class XyCalCalib:
         self._auto_main_x = mx_r
         self._auto_main_y = my_r
         self._auto_main_z = mz_r
+        # 保留主喷头 ±span 标定的 FitY vy，供后续 DCXZ 基线复用（副喷头 Center 会改矩阵）
+        main_fity_ok = bool(self._fity_vy_ok)
+        main_fity_vx = float(self._fity_vy_x)
+        main_fity_vy = float(self._fity_vy_y)
 
         self._set_phase("auto_sec", "auto 2nd center")
         self._xycal_goto(gcmd, "SECOND", sx, sy, sz)
         self._matrix_ok = False
-        self._fity_vy_ok = False
         self.run_center(gcmd)
         sx_r, sy_r, sz_r = self._toolhead_xyz()
         self._auto_sec_x = sx_r
@@ -1423,6 +1863,10 @@ class XyCalCalib:
         self._auto_sec_z = sz_r
         self._auto_ox = round((sx_r - mx_r) * 100.0) / 100.0
         self._auto_oy = round((sy_r - my_r) * 100.0) / 100.0
+        if main_fity_ok:
+            self._fity_vy_ok = True
+            self._fity_vy_x = main_fity_vx
+            self._fity_vy_y = main_fity_vy
 
         self._dcx_rows = []
         self._dcx_main_dcx45 = None
@@ -1436,7 +1880,10 @@ class XyCalCalib:
         if write:
             self._save_tool1_offsets_xyz(gcmd, self._auto_ox, self._auto_oy, dz)
         self._set_phase("auto_return", "auto return main")
-        self._xycal_goto(gcmd, "MAIN", mx, my, mz)
+        ret_x = self._auto_main_x if self._auto_main_x is not None else mx
+        ret_y = self._auto_main_y if self._auto_main_y is not None else my
+        ret_z = self._auto_main_z if self._auto_main_z is not None else mz
+        self._xycal_goto(gcmd, "MAIN", ret_x, ret_y, ret_z)
         self._set_phase(
             "done",
             "Auto X=%.2f Y=%.2f Z=%.2f" % (self._auto_ox, self._auto_oy, dz),
@@ -1484,6 +1931,15 @@ class XyCalCalib:
             "cx_px": self._last_cx,
             "cy_px": self._last_cy,
             "radius_px": self._last_r,
+            "frame_w": self._last_fw,
+            "frame_h": self._last_fh,
+            "allowed_roi": self._last_allowed_roi,
+            "allowed_circle": self._last_allowed_circle,
+            "expected_x": self._last_expect_x,
+            "expected_y": self._last_expect_y,
+            "toolhead_x": self._toolhead_x,
+            "toolhead_y": self._toolhead_y,
+            "toolhead_z": self._toolhead_z,
             "vx_x": self._vx_x,
             "vx_y": self._vx_y,
             "vy_x": self._vy_x,
@@ -1514,6 +1970,9 @@ class XyCalCalib:
             "auto_sec_z": self._auto_sec_z,
             "ox": self._auto_ox,
             "oy": self._auto_oy,
+            "z_point_index": int(self._z_point_index),
+            "z_point_n": int(self._z_point_n),
+            "dcxz_measure_mode": self.dcxz_measure_mode,
         }
 
 
