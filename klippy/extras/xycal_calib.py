@@ -216,14 +216,21 @@ class XyCalCalib:
         if "x" not in homed or "y" not in homed:
             raise gcmd.error("%s: home XY first" % label)
 
-    def _ui_move(self, axis, length_mm):
-        axis = str(axis).upper()
-        script = "UI_MOVE %s=1 LEN=%.3f SPEED=%d" % (
-            axis,
-            float(length_mm),
-            int(self.jog_speed),
-        )
-        self.gcode.run_script_from_command(script)
+    def _abs_move(self, coord):
+        # coord: [x, y, z] 绝对机床坐标, None 表示该轴不动
+        toolhead = self.printer.lookup_object("toolhead")
+        toolhead.manual_move(coord, float(self.jog_speed))
+        toolhead.dwell(0.3)
+        toolhead.wait_moves()
+
+    def _rel_move(self, axis, delta_mm):
+        # 单轴增量: 目标 = 当前机床坐标 + delta_mm
+        idx = "XYZ".index(str(axis).upper())
+        toolhead = self.printer.lookup_object("toolhead")
+        pos = toolhead.get_position()
+        coord = [None, None, None]
+        coord[idx] = pos[idx] + float(delta_mm)
+        self._abs_move(coord)
 
     def _detect(self, gcmd, reset_follow=False, flush=0, expected=None):
         det = self._detect_obj()
@@ -386,7 +393,7 @@ class XyCalCalib:
                 return None
             return (cx0 + float(d_mm) * vx, cy0 + float(d_mm) * vy)
 
-        self._ui_move("Y", span)
+        self._rel_move("Y", span)
         self._check_cancel(gcmd, "XYCAL_DCXZ")
         tip_pos = self._detect(gcmd, flush=2, expected=_est(span))
         if not self._looks_like_tip(tip_pos):
@@ -395,7 +402,7 @@ class XyCalCalib:
             return None
         cx_pos = float(tip_pos["cx_px"])
         cy_pos = float(tip_pos["cy_px"])
-        self._ui_move("Y", -2.0 * span)
+        self._rel_move("Y", -2.0 * span)
         self._check_cancel(gcmd, "XYCAL_DCXZ")
         # 从 +span 再走到 -span：相对 tip0 为 -span；相对 tip_pos 为 -2*span
         tip_neg = self._detect(
@@ -412,11 +419,11 @@ class XyCalCalib:
         if not self._looks_like_tip(tip_neg):
             tip_neg = self._detect(gcmd, flush=1, reset_follow=True)
         if not self._looks_like_tip(tip_neg):
-            self._ui_move("Y", span)
+            self._rel_move("Y", span)
             return None
         cx_neg = float(tip_neg["cx_px"])
         cy_neg = float(tip_neg["cy_px"])
-        self._ui_move("Y", span)
+        self._rel_move("Y", span)
         self._check_cancel(gcmd, "XYCAL_DCXZ")
         return {
             "dcx": cx_neg - cx_pos,
@@ -563,7 +570,7 @@ class XyCalCalib:
             self._dcx_rebuild_report(self._dcx_main_dcx45 or 0.0, rows)
 
     def _z_detect_after_shift(self, gcmd, shift_axis, shift_mm, label="XYCAL_Z"):
-        self._ui_move(shift_axis, shift_mm)
+        self._rel_move(shift_axis, shift_mm)
         self._check_cancel(gcmd, label)
         tip = self._detect(gcmd, flush=2)
         if not self._looks_like_tip(tip):
@@ -775,7 +782,7 @@ class XyCalCalib:
 
         self._set_phase("probe_span_pos", "span Y+%.1f" % span)
         gcmd.respond_info("XYCAL_CENTER: span Y +%.1f" % span)
-        self._ui_move("Y", span)
+        self._rel_move("Y", span)
         self._check_cancel(gcmd)
         tip_pos = self._detect(gcmd, flush=2, expected=(
             cx0 + span * ref_x, cy0 + span * ref_y
@@ -783,12 +790,12 @@ class XyCalCalib:
         if not self._looks_like_tip(tip_pos):
             tip_pos = self._detect(gcmd, flush=2)
         if not self._looks_like_tip(tip_pos):
-            self._ui_move("Y", -span)
+            self._rel_move("Y", -span)
             raise gcmd.error("XYCAL_CENTER: no tip at Y+%.1f" % span)
         vx = (float(tip_pos["cx_px"]) - cx0) / span
         vy = (float(tip_pos["cy_px"]) - cy0) / span
         if not self._span_vector_ok(vx, vy, ref_x, ref_y):
-            self._ui_move("Y", -span)
+            self._rel_move("Y", -span)
             raise gcmd.error("XYCAL_CENTER: +span vector conflicts with short probe")
         pos_cx = float(tip_pos["cx_px"])
         pos_cy = float(tip_pos["cy_px"])
@@ -796,7 +803,7 @@ class XyCalCalib:
 
         self._set_phase("probe_span_neg", "span Y-%.1f" % span)
         gcmd.respond_info("XYCAL_CENTER: span Y +%.1f → -%.1f" % (span, span))
-        self._ui_move("Y", -2.0 * span)
+        self._rel_move("Y", -2.0 * span)
         self._check_cancel(gcmd)
         tip_neg = self._detect(gcmd, flush=2, expected=(
             pos_cx - 2.0 * span * self._vy_x,
@@ -805,18 +812,18 @@ class XyCalCalib:
         if not self._looks_like_tip(tip_neg):
             tip_neg = self._detect(gcmd, flush=2)
         if not self._looks_like_tip(tip_neg):
-            self._ui_move("Y", span)
+            self._rel_move("Y", span)
             raise gcmd.error("XYCAL_CENTER: no tip at Y-%.1f" % span)
         vx = (pos_cx - float(tip_neg["cx_px"])) / (2.0 * span)
         vy = (pos_cy - float(tip_neg["cy_px"])) / (2.0 * span)
         if not self._span_vector_ok(vx, vy, self._vy_x, self._vy_y):
-            self._ui_move("Y", span)
+            self._rel_move("Y", span)
             raise gcmd.error("XYCAL_CENTER: ±span vector inconsistent")
         self._vy_x, self._vy_y = vx, vy
 
         self._set_phase("probe_span_home", "span return")
         gcmd.respond_info("XYCAL_CENTER: return from Y-%.1f" % span)
-        self._ui_move("Y", span)
+        self._rel_move("Y", span)
         self._check_cancel(gcmd)
         tip_home = self._detect(gcmd, reset_follow=True, flush=3)
         if not self._looks_like_tip(tip_home):
@@ -890,7 +897,7 @@ class XyCalCalib:
 
             self._set_phase("probe_x", "probe +X")
             gcmd.respond_info("XYCAL_CENTER: probe X +%.2f" % probe_mm)
-            self._ui_move("X", probe_mm)
+            self._rel_move("X", probe_mm)
             self._check_cancel(gcmd)
             tip_x = self._detect(gcmd, flush=2)
             if not self._looks_like_tip(tip_x):
@@ -905,7 +912,7 @@ class XyCalCalib:
 
             self._set_phase("probe_y", "probe +Y")
             gcmd.respond_info("XYCAL_CENTER: probe Y +%.2f" % probe_mm)
-            self._ui_move("Y", probe_mm)
+            self._rel_move("Y", probe_mm)
             self._check_cancel(gcmd)
             tip_y = self._detect(gcmd, flush=2)
             if not self._looks_like_tip(tip_y):
@@ -924,8 +931,8 @@ class XyCalCalib:
 
             self._set_phase("probe_undo", "undo probe")
             gcmd.respond_info("XYCAL_CENTER: undo probe")
-            self._ui_move("X", -probe_mm)
-            self._ui_move("Y", -probe_mm)
+            self._rel_move("X", -probe_mm)
+            self._rel_move("Y", -probe_mm)
             self._check_cancel(gcmd)
             tip = self._detect(gcmd, reset_follow=True, flush=3)
             if not self._looks_like_tip(tip):
@@ -979,9 +986,9 @@ class XyCalCalib:
                         % (d_x, d_y, err_main)
                     )
                     if abs(d_x) >= 0.01:
-                        self._ui_move("X", d_x)
+                        self._rel_move("X", d_x)
                     if abs(d_y) >= 0.01:
-                        self._ui_move("Y", d_y)
+                        self._rel_move("Y", d_y)
                     tip = self._detect(
                         gcmd,
                         flush=2,
@@ -1149,7 +1156,7 @@ class XyCalCalib:
     def _fity_home_y(self):
         back = -float(self._fity_prev_mm)
         if abs(back) >= 0.01:
-            self._ui_move("Y", back)
+            self._rel_move("Y", back)
             self._fity_prev_mm = 0.0
 
     cmd_XYCAL_FITY_help = (
@@ -1225,7 +1232,7 @@ class XyCalCalib:
                     % ("+" if target >= 0 else "", target, idx + 1, n_off),
                 )
                 if abs(delta) >= 0.001:
-                    self._ui_move("Y", delta)
+                    self._rel_move("Y", delta)
                 flush_n = 2 if abs(delta) >= 2.0 or abs(abs(target) - 4.3) < 0.05 else 1
                 est = self._fity_estimate(target)
                 tip_pt = None
@@ -1396,7 +1403,7 @@ class XyCalCalib:
         self._check_cancel(gcmd, "XYCAL_Z")
 
         self._set_phase("z_shift_main", "Z shift main")
-        self._ui_move(shift_axis, shift_mm)
+        self._rel_move(shift_axis, shift_mm)
         self._check_cancel(gcmd, "XYCAL_Z")
         tip = self._detect(gcmd, flush=2)
         if not self._looks_like_tip(tip):
@@ -1422,7 +1429,7 @@ class XyCalCalib:
         self._check_cancel(gcmd, "XYCAL_Z")
 
         self._set_phase("z_shift_second", "Z shift 2nd")
-        self._ui_move(shift_axis, shift_mm)
+        self._rel_move(shift_axis, shift_mm)
         self._check_cancel(gcmd, "XYCAL_Z")
         tip2 = self._detect(gcmd, flush=2)
         if not self._looks_like_tip(tip2):
