@@ -29,39 +29,6 @@ def _cfg_float_list(config, option, default=()):
     # "1, 2" + seps=(","," ") becomes ["1","","2"] → parse error.
     return list(config.getfloatlist(option, sep=",", count=None))
 
-
-class XyCalZPoint:
-    __slots__ = ("site", "x", "y", "z", "off", "tag")
-
-    def __init__(self, site, x, y, z, off=0.0, tag=""):
-        self.site = str(site).upper()
-        self.x = float(x)
-        self.y = float(y)
-        self.z = float(z)
-        self.off = float(off)
-        self.tag = str(tag or "")
-
-
-class XyCalZPointsHelper:
-    """Probe-style fixed-point scan: move → measure → store samples."""
-
-    def __init__(self, calib):
-        self.calib = calib
-        self.samples = []
-
-    def run_scan(self, gcmd, points, measure_fn, cancel_label="XYCAL"):
-        self.samples = []
-        n = len(points)
-        for i, pt in enumerate(points):
-            self.calib._z_point_index = i
-            self.calib._z_point_n = n
-            self.calib._check_cancel(gcmd, cancel_label)
-            sample = measure_fn(gcmd, pt, i, n)
-            if sample is not None:
-                self.samples.append(sample)
-        return self.samples
-
-
 class XyCalCalib:
     def __init__(self, config):
         self.printer = config.get_printer()
@@ -81,13 +48,10 @@ class XyCalCalib:
         self.resid_sigma_k = config.getfloat("resid_sigma_k", 2.5, above=0.0)
         self.zgap_axis = config.get("zgap_axis", "Y").upper()
         self.zgap_shift_mm = config.getfloat("zgap_shift_mm", 5.0, above=0.1)
-        self.zgap_z_plus_mm = config.getfloat("zgap_z_plus_mm", 5.0, above=0.1)
-        self.zgap_z_step_mm = config.getfloat("zgap_z_step_mm", 0.05, above=0.01)
         self.zgap_match_tol_px = config.getfloat(
             "zgap_match_tol_px", 1.0, above=0.0
         )
         self.zgap_dr_tol_px = config.getfloat("zgap_dr_tol_px", 2.0, above=0.0)
-        self.zgap_max_iter = config.getint("zgap_max_iter", 120, minval=1, maxval=300)
         self.z_min_mm = config.getfloat("z_min_mm", 60.0, above=0.0)
         self.dcx_t1_fallback = config.getfloat("dcx_t1_fallback", 3.8)
         self.dcxz_measure_mode = config.get(
@@ -159,8 +123,6 @@ class XyCalCalib:
         self._auto_sec_z = None
         self._auto_ox = None
         self._auto_oy = None
-        self._z_point_index = 0
-        self._z_point_n = 0
 
         self.gcode.register_command(
             "XYCAL_CENTER", self.cmd_XYCAL_CENTER, desc=self.cmd_XYCAL_CENTER_help
@@ -332,12 +294,6 @@ class XyCalCalib:
         self.gcode.run_script_from_command(script)
         self._check_cancel(gcmd)
 
-    def _xycal_move_z(self, gcmd, z_abs):
-        self._z_assert_min(gcmd, z_abs, "move Z")
-        script = "XYCAL_MOVE_Z Z=%.3f" % float(z_abs)
-        self.gcode.run_script_from_command(script)
-        self._check_cancel(gcmd)
-
     def _z_min_mm(self, gcmd):
         return gcmd.get_float("Z_MIN", self.z_min_mm, above=0.0)
 
@@ -488,8 +444,6 @@ class XyCalCalib:
         z_min = gcmd.get_float("Z_MIN", self.z_min_mm, above=0.0)
         n = len(offsets)
         for i, off in enumerate(offsets):
-            self._z_point_index = i
-            self._z_point_n = n
             self._check_cancel(gcmd, "XYCAL_DCXZ")
             off = float(off)
             z_abs = round((float(main_z) + off) * 1000.0) / 1000.0
@@ -595,8 +549,6 @@ class XyCalCalib:
                 )
                 continue
             tried_coarse += 1
-            self._z_point_index = i
-            self._z_point_n = n
             self._check_cancel(gcmd, "XYCAL_Z")
             self._set_phase(
                 "z_ladder",
@@ -638,8 +590,6 @@ class XyCalCalib:
                     % (z_try, z_min)
                 )
                 continue
-            self._z_point_index = i
-            self._z_point_n = n_f
             self._check_cancel(gcmd, "XYCAL_Z")
             self._set_phase(
                 "z_ladder",
@@ -1201,139 +1151,134 @@ class XyCalCalib:
         self._fity_prev_mm = 0.0
         self._fity_span_pos_cx = None
         self._fity_span_pos_cy = None
-        try:
-            self._set_phase("fity_tip", "FitY need tip")
-            tip = self._detect(gcmd, reset_follow=True, flush=2)
-            self._check_cancel(gcmd, "XYCAL_FITY")
-            if not self._looks_like_tip(tip):
-                raise gcmd.error("XYCAL_FITY: fresh centered tip required")
-            self._fity_tip0_cx = float(tip["cx_px"])
-            self._fity_tip0_cy = float(tip["cy_px"])
-            fw = float(tip.get("frame_w") or 640)
-            fh = float(tip.get("frame_h") or 480)
-            gcmd.respond_info(
-                "XYCAL_FITY start tip=(%.1f,%.1f) vy=(%.3f,%.3f)"
-                % (
-                    self._fity_tip0_cx,
-                    self._fity_tip0_cy,
-                    self._fity_vy_x,
-                    self._fity_vy_y,
-                )
+        self._set_phase("fity_tip", "FitY need tip")
+        tip = self._detect(gcmd, reset_follow=True, flush=2)
+        self._check_cancel(gcmd, "XYCAL_FITY")
+        if not self._looks_like_tip(tip):
+            raise gcmd.error("XYCAL_FITY: fresh centered tip required")
+        self._fity_tip0_cx = float(tip["cx_px"])
+        self._fity_tip0_cy = float(tip["cy_px"])
+        fw = float(tip.get("frame_w") or 640)
+        fh = float(tip.get("frame_h") or 480)
+        gcmd.respond_info(
+            "XYCAL_FITY start tip=(%.1f,%.1f) vy=(%.3f,%.3f)"
+            % (
+                self._fity_tip0_cx,
+                self._fity_tip0_cy,
+                self._fity_vy_x,
+                self._fity_vy_y,
             )
+        )
 
-            n_off = len(FITY_OFFSETS_MM)
-            for idx, target in enumerate(FITY_OFFSETS_MM):
+        n_off = len(FITY_OFFSETS_MM)
+        for idx, target in enumerate(FITY_OFFSETS_MM):
+            self._check_cancel(gcmd, "XYCAL_FITY")
+            self._fity_index = idx
+            delta = float(target) - float(self._fity_prev_mm)
+            self._set_phase(
+                "fity_move",
+                "Y%s%.1f (%d/%d)"
+                % ("+" if target >= 0 else "", target, idx + 1, n_off),
+            )
+            if abs(delta) >= 0.001:
+                self._rel_move("Y", delta)
+            flush_n = 2 if abs(delta) >= 2.0 or abs(abs(target) - 4.3) < 0.05 else 1
+            est = self._fity_estimate(target)
+            tip_pt = None
+            for attempt in range(6):
                 self._check_cancel(gcmd, "XYCAL_FITY")
-                self._fity_index = idx
-                delta = float(target) - float(self._fity_prev_mm)
-                self._set_phase(
-                    "fity_move",
-                    "Y%s%.1f (%d/%d)"
-                    % ("+" if target >= 0 else "", target, idx + 1, n_off),
+                tip_pt = self._detect(
+                    gcmd, flush=flush_n if attempt == 0 else 1, expected=est
                 )
-                if abs(delta) >= 0.001:
-                    self._rel_move("Y", delta)
-                flush_n = 2 if abs(delta) >= 2.0 or abs(abs(target) - 4.3) < 0.05 else 1
-                est = self._fity_estimate(target)
-                tip_pt = None
-                for attempt in range(6):
-                    self._check_cancel(gcmd, "XYCAL_FITY")
-                    tip_pt = self._detect(
-                        gcmd, flush=flush_n if attempt == 0 else 1, expected=est
-                    )
-                    if not self._looks_like_tip(tip_pt):
-                        tip_pt = self._detect(gcmd, flush=1)
-                    if not self._looks_like_tip(tip_pt):
-                        continue
-                    cx = float(tip_pt["cx_px"])
-                    cy = float(tip_pt["cy_px"])
-                    fw = float(tip_pt.get("frame_w") or fw)
-                    fh = float(tip_pt.get("frame_h") or fh)
-                    if abs(target) >= 4.0 and (
-                        abs(self._fity_prev_mm) < 0.01
-                        or len(self._fity_samples) == 0
-                    ):
-                        if self._fity_tip_far_from_est(target, cx, cy, fw, fh):
-                            flush_n = 2
-                            continue
-                    # adjacent stale: almost no motion vs last same-arm 0.1mm
-                    if self._fity_samples:
-                        prev = self._fity_samples[-1]
-                        pmm = float(prev["mm"])
-                        if (
-                            target * pmm > 0
-                            and abs(target - pmm) <= 0.15
-                            and math.sqrt(
-                                (cx - float(prev["cx"])) ** 2
-                                + (cy - float(prev["cy"])) ** 2
-                            )
-                            < 1.5
-                            and attempt < 1
-                        ):
-                            continue
-                    break
-                else:
-                    self._fity_home_y()
-                    raise gcmd.error(
-                        "XYCAL_FITY: Y%s%.1f same ROI failed"
-                        % ("+" if target >= 0 else "", target)
-                    )
-
+                if not self._looks_like_tip(tip_pt):
+                    tip_pt = self._detect(gcmd, flush=1)
+                if not self._looks_like_tip(tip_pt):
+                    continue
                 cx = float(tip_pt["cx_px"])
                 cy = float(tip_pt["cy_px"])
-                r = float(tip_pt.get("radius_px") or 0)
-                if not self._fity_refine_at_span(target, cx, cy):
-                    self._fity_home_y()
-                    raise gcmd.error(
-                        "XYCAL_FITY: ±4.5 vector check failed at Y%s%.1f"
-                        % ("+" if target >= 0 else "", target)
-                    )
-                self._fity_prev_mm = float(target)
-                self._fity_samples.append(
-                    {"mm": float(target), "cx": cx, "cy": cy, "r": r}
-                )
-                self._rebuild_fity_report()
-                gcmd.respond_info(
-                    "XYCAL_FITY [%d/%d] Y%s%.1f cx=%.1f cy=%.1f"
-                    % (
-                        idx + 1,
-                        n_off,
-                        "+" if target >= 0 else "",
-                        target,
-                        cx,
-                        cy,
-                    )
+                fw = float(tip_pt.get("frame_w") or fw)
+                fh = float(tip_pt.get("frame_h") or fh)
+                if abs(target) >= 4.0 and (
+                    abs(self._fity_prev_mm) < 0.01
+                    or len(self._fity_samples) == 0
+                ):
+                    if self._fity_tip_far_from_est(target, cx, cy, fw, fh):
+                        flush_n = 2
+                        continue
+                # adjacent stale: almost no motion vs last same-arm 0.1mm
+                if self._fity_samples:
+                    prev = self._fity_samples[-1]
+                    pmm = float(prev["mm"])
+                    if (
+                        target * pmm > 0
+                        and abs(target - pmm) <= 0.15
+                        and math.sqrt(
+                            (cx - float(prev["cx"])) ** 2
+                            + (cy - float(prev["cy"])) ** 2
+                        )
+                        < 1.5
+                        and attempt < 1
+                    ):
+                        continue
+                break
+            else:
+                self._fity_home_y()
+                raise gcmd.error(
+                    "XYCAL_FITY: Y%s%.1f same ROI failed"
+                    % ("+" if target >= 0 else "", target)
                 )
 
-            raw_ok, raw_dcx = self._raw_dcx45(self._fity_samples)
-            fit_ok, fit_dcx, _dropped = self._compute_dcx45(self._fity_samples)
-            self._fity_dcx45_raw = raw_dcx if raw_ok else None
-            # DCXZ/Auto 与屏端：主结果只用两臂线性拟合 Δcx@±4.5
-            self._fity_dcx45 = fit_dcx if fit_ok else (raw_dcx if raw_ok else None)
-            self._rebuild_fity_report()
-            self._fity_home_y()
-            tip_end = self._detect(gcmd, reset_follow=True, flush=2)
-            if self._looks_like_tip(tip_end):
-                pass
-            self._set_phase(
-                "done",
-                "FitY done n=%d dcx45=%s"
-                % (
-                    len(self._fity_samples),
-                    ("%.2f" % self._fity_dcx45) if self._fity_dcx45 is not None else "?",
-                ),
+            cx = float(tip_pt["cx_px"])
+            cy = float(tip_pt["cy_px"])
+            r = float(tip_pt.get("radius_px") or 0)
+            if not self._fity_refine_at_span(target, cx, cy):
+                self._fity_home_y()
+                raise gcmd.error(
+                    "XYCAL_FITY: ±4.5 vector check failed at Y%s%.1f"
+                    % ("+" if target >= 0 else "", target)
+                )
+            self._fity_prev_mm = float(target)
+            self._fity_samples.append(
+                {"mm": float(target), "cx": cx, "cy": cy, "r": r}
             )
+            self._rebuild_fity_report()
             gcmd.respond_info(
-                "XYCAL_FITY ok=True n=%d dcx45=%s fit=%s raw=%s"
+                "XYCAL_FITY [%d/%d] Y%s%.1f cx=%.1f cy=%.1f"
                 % (
-                    len(self._fity_samples),
-                    self._fity_dcx45,
-                    fit_dcx if fit_ok else None,
-                    raw_dcx if raw_ok else None,
+                    idx + 1,
+                    n_off,
+                    "+" if target >= 0 else "",
+                    target,
+                    cx,
+                    cy,
                 )
             )
-        finally:
-            pass
+
+        raw_ok, raw_dcx = self._raw_dcx45(self._fity_samples)
+        fit_ok, fit_dcx, _dropped = self._compute_dcx45(self._fity_samples)
+        self._fity_dcx45_raw = raw_dcx if raw_ok else None
+        # DCXZ/Auto 与屏端：主结果只用两臂线性拟合 Δcx@±4.5
+        self._fity_dcx45 = fit_dcx if fit_ok else (raw_dcx if raw_ok else None)
+        self._rebuild_fity_report()
+        self._fity_home_y()
+        self._detect(gcmd, reset_follow=True, flush=2)
+        self._set_phase(
+            "done",
+            "FitY done n=%d dcx45=%s"
+            % (
+                len(self._fity_samples),
+                ("%.2f" % self._fity_dcx45) if self._fity_dcx45 is not None else "?",
+            ),
+        )
+        gcmd.respond_info(
+            "XYCAL_FITY ok=True n=%d dcx45=%s fit=%s raw=%s"
+            % (
+                len(self._fity_samples),
+                self._fity_dcx45,
+                fit_dcx if fit_ok else None,
+                raw_dcx if raw_ok else None,
+            )
+        )
 
     cmd_XYCAL_Z_help = (
         "Host Z gap: ghost match + fixed Z ladder. "
@@ -1977,8 +1922,6 @@ class XyCalCalib:
             "auto_sec_z": self._auto_sec_z,
             "ox": self._auto_ox,
             "oy": self._auto_oy,
-            "z_point_index": int(self._z_point_index),
-            "z_point_n": int(self._z_point_n),
             "dcxz_measure_mode": self.dcxz_measure_mode,
         }
 
