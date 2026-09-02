@@ -1457,7 +1457,24 @@ class XyCalCalib:
             z = float(r.get("z", 0))
             if r.get("ok"):
                 lines.append("%s off=%+.2f z=%.2f" % (tag, off, z))
-                if r.get("cx_pos") is not None:
+                samples = r.get("fity_samples")
+                if samples:
+                    for i, s in enumerate(samples):
+                        mm = float(s.get("mm", 0))
+                        lines.append(
+                            "  [%d] Y%+.1fmm (cx, cy)=(%.2f, %.2f) px"
+                            % (
+                                i + 1,
+                                mm,
+                                float(s.get("cx", 0)),
+                                float(s.get("cy", 0)),
+                            )
+                        )
+                    lines.append(
+                        "  拟合 Δcx@±4.5  %.2f px  (pos/neg 臂线性拟合 @±4.5)"
+                        % float(r["dcx"])
+                    )
+                elif r.get("cx_pos") is not None:
                     lines.append(
                         "  [1] Y+4.5mm (cx, cy)=(%.2f, %.2f) px"
                         % (float(r["cx_pos"]), float(r.get("cy_pos", 0)))
@@ -1466,10 +1483,14 @@ class XyCalCalib:
                         "  [2] Y-4.5mm (cx, cy)=(%.2f, %.2f) px"
                         % (float(r["cx_neg"]), float(r.get("cy_neg", 0)))
                     )
-                lines.append(
-                    "  实测 Δcx@±4.5  %.2f px  (cx(-4.5)-cx(+4.5))"
-                    % float(r["dcx"])
-                )
+                    lines.append(
+                        "  实测 Δcx@±4.5  %.2f px  (cx(-4.5)-cx(+4.5))"
+                        % float(r["dcx"])
+                    )
+                else:
+                    lines.append(
+                        "  Δcx@±4.5  %.2f px" % float(r["dcx"])
+                    )
                 lines.append(
                     "  vs main=%+.2f" % (float(r["dcx"]) - float(main_dcx))
                 )
@@ -1572,6 +1593,87 @@ class XyCalCalib:
             off = round((off - step) * 1000.0) / 1000.0
         return self._dcx_main_dcx45
 
+    def _run_dcxz_scan_fity(
+        self, gcmd, main_z, sec_x, sec_y, offsets, pass_tag, rows, vy_x, vy_y
+    ):
+        """Per-Z FitY (10 pts) without Center; reuse Center-span FitY vy."""
+        z_min = gcmd.get_float("Z_MIN", self.z_min_mm, above=0.0)
+        n = len(offsets)
+        for i, off in enumerate(offsets):
+            self._check_cancel(gcmd, "XYCAL_DCXZ")
+            off = float(off)
+            z_abs = round((float(main_z) + off) * 1000.0) / 1000.0
+            if z_abs < z_min - 1e-6:
+                rows.append(
+                    {
+                        "off": off,
+                        "z": z_abs,
+                        "ok": False,
+                        "dcx": None,
+                        "pass": pass_tag,
+                        "reason": "z<min",
+                    }
+                )
+                self._dcx_rebuild_report(self._dcx_main_dcx45 or 0.0, rows)
+                continue
+            self._set_phase(
+                "dcx_scan",
+                "dcx fity10 off=%+.2f z=%.2f (%d/%d)"
+                % (off, z_abs, i + 1, n),
+            )
+            self._run_z_point_macro(gcmd, "SECOND", sec_x, sec_y, z_abs, 0.0)
+            # Keep Auto/main FitY vy; do not Center again
+            self._fity_vy_ok = True
+            self._fity_vy_x = float(vy_x)
+            self._fity_vy_y = float(vy_y)
+            try:
+                self.run_fity(gcmd)
+                dcx = self._fity_dcx45
+                if dcx is None:
+                    fit_ok, fit_dcx, _ = self._compute_dcx45(self._fity_samples)
+                    dcx = fit_dcx if fit_ok else None
+                ok = dcx is not None
+                row = {
+                    "off": off,
+                    "z": z_abs,
+                    "ok": ok,
+                    "dcx": float(dcx) if ok else None,
+                    "pass": pass_tag,
+                    "reason": "" if ok else "fity",
+                }
+                if ok and self._fity_samples:
+                    row["fity_samples"] = [
+                        {
+                            "mm": float(s.get("mm", 0)),
+                            "cx": float(s.get("cx", 0)),
+                            "cy": float(s.get("cy", 0)),
+                        }
+                        for s in self._fity_samples
+                    ]
+                rows.append(row)
+                if ok:
+                    gcmd.respond_info(
+                        "XYCAL_DCXZ [%s] off=%+.2f dcx=%.2f vs=%.2f (fity10)"
+                        % (
+                            pass_tag,
+                            off,
+                            float(dcx),
+                            float(dcx) - float(self._dcx_main_dcx45),
+                        )
+                    )
+            except Exception as exc:
+                rows.append(
+                    {
+                        "off": off,
+                        "z": z_abs,
+                        "ok": False,
+                        "dcx": None,
+                        "pass": pass_tag,
+                        "reason": str(exc),
+                    }
+                )
+            self._dcx_rebuild_report(self._dcx_main_dcx45 or 0.0, rows)
+
     cmd_XYCAL_DCXZ_help = (
         "Host ΔcxZ scan: main FitY baseline + Z sweep (pm45 or full_fity). "
         "Params: URL= MAIN_X/Y/Z SEC_X/Y T1_REF OFF_HI OFF_LO STEP "
@@ -1654,20 +1756,25 @@ class XyCalCalib:
         if not (off_hi > off_lo and step > 0):
             raise gcmd.error("XYCAL_DCXZ: bad OFF_HI/OFF_LO/STEP")
 
-        use_pm45 = self.dcxz_measure_mode not in ("full_fity", "legacy", "full")
-        if use_pm45:
+        if auto:
+            # Auto：主喷 FitY 仍 10 点；副喷粗测 pm45(±各1)，细测 FitY10(±各5)，均不再 Center
+            gcmd.respond_info(
+                "XYCAL_DCXZ: AUTO hybrid sec=pm45 coarse + fity10 fine "
+                "(main FitY10; no per-Z Center)"
+            )
             coarse_offs = self._dcxz_offsets_for_pass(
                 gcmd, t1_ref, auto, off_hi, off_lo, step
             )
-            # Auto 已对主喷头做过 Center：复用 FitY vy，只回主位做 FitY，避免二次居中
             self._run_dcxz_main_baseline(
-                gcmd, mx, my, mz, skip_center=bool(auto and self._fity_vy_ok)
+                gcmd, mx, my, mz, skip_center=bool(self._fity_vy_ok)
             )
+            vy_x = float(self._fity_vy_x)
+            vy_y = float(self._fity_vy_y)
             self._run_dcxz_scan_pm45(
                 gcmd, mz, sx, sy, coarse_offs, "coarse", rows
             )
             solved = self._dcx_solve_offset(rows, self._dcx_main_dcx45)
-            if auto and solved is not None:
+            if solved is not None:
                 approx = solved
                 if approx > t1_ref + 1.0 + 0.01:
                     approx = round((t1_ref + 1.0) * 1000.0) / 1000.0
@@ -1676,8 +1783,16 @@ class XyCalCalib:
                 fine_offs = self._dcxz_fine_offsets(approx)
                 if (float(mz) + min(fine_offs)) >= z_min - 1e-6:
                     fine_rows = []
-                    self._run_dcxz_scan_pm45(
-                        gcmd, mz, sx, sy, fine_offs, "fine", fine_rows
+                    self._run_dcxz_scan_fity(
+                        gcmd,
+                        mz,
+                        sx,
+                        sy,
+                        fine_offs,
+                        "fine",
+                        fine_rows,
+                        vy_x,
+                        vy_y,
                     )
                     fine_sol = self._dcx_solve_offset(
                         fine_rows, self._dcx_main_dcx45
@@ -1685,43 +1800,45 @@ class XyCalCalib:
                     if fine_sol is not None and len(fine_rows) >= 2:
                         rows = fine_rows
                         solved = fine_sol
-                        gate_lo = round((approx - self.dcxz_fine_span) * 1000.0) / 1000.0
-                        gate_hi = round((approx + self.dcxz_fine_span) * 1000.0) / 1000.0
+                        gate_lo = round(
+                            (approx - self.dcxz_fine_span) * 1000.0
+                        ) / 1000.0
+                        gate_hi = round(
+                            (approx + self.dcxz_fine_span) * 1000.0
+                        ) / 1000.0
         else:
-            self._run_dcxz_scan_pass(
-                gcmd, mx, my, mz, sx, sy, off_hi, off_lo, step, "coarse", rows, True
+            use_pm45 = self.dcxz_measure_mode not in (
+                "full_fity",
+                "legacy",
+                "full",
             )
-            solved = self._dcx_solve_offset(rows, self._dcx_main_dcx45)
-            if auto and solved is not None:
-                approx = solved
-                if approx > t1_ref + 1.0 + 0.01:
-                    approx = round((t1_ref + 1.0) * 1000.0) / 1000.0
-                if approx < t1_ref - 1.0 - 0.01:
-                    approx = round((t1_ref - 1.0) * 1000.0) / 1000.0
-                fine_hi = round((approx + 0.25) * 1000.0) / 1000.0
-                fine_lo = round((approx - 0.25) * 1000.0) / 1000.0
-                if (float(mz) + fine_lo) >= z_min - 1e-6:
-                    fine_rows = []
-                    self._run_dcxz_scan_pass(
-                        gcmd,
-                        mx,
-                        my,
-                        mz,
-                        sx,
-                        sy,
-                        fine_hi,
-                        fine_lo,
-                        0.1,
-                        "fine",
-                        fine_rows,
-                        False,
-                    )
-                    fine_sol = self._dcx_solve_offset(fine_rows, self._dcx_main_dcx45)
-                    if fine_sol is not None and len(fine_rows) >= 2:
-                        rows = fine_rows
-                        solved = fine_sol
-                        gate_lo = fine_lo
-                        gate_hi = fine_hi
+            if use_pm45:
+                coarse_offs = self._dcxz_offsets_for_pass(
+                    gcmd, t1_ref, auto, off_hi, off_lo, step
+                )
+                self._run_dcxz_main_baseline(
+                    gcmd, mx, my, mz, skip_center=False
+                )
+                self._run_dcxz_scan_pm45(
+                    gcmd, mz, sx, sy, coarse_offs, "coarse", rows
+                )
+                solved = self._dcx_solve_offset(rows, self._dcx_main_dcx45)
+            else:
+                self._run_dcxz_scan_pass(
+                    gcmd,
+                    mx,
+                    my,
+                    mz,
+                    sx,
+                    sy,
+                    off_hi,
+                    off_lo,
+                    step,
+                    "coarse",
+                    rows,
+                    True,
+                )
+                solved = self._dcx_solve_offset(rows, self._dcx_main_dcx45)
 
         self._dcx_rows = list(rows)
         main_dcx = self._dcx_main_dcx45 if self._dcx_main_dcx45 is not None else 0.0
