@@ -4312,12 +4312,16 @@ def detect_nozzle(
         float(max_radius_px) if max_radius_px is not None else automatic_max
     )
     if fixed_640_profile:
-        # Explicit tracker bounds may narrow this band, but they may never
-        # widen it to the surrounding 50+ px cavity or shrink it to the hole.
-        active_min_radius = max(13.5, float(active_min_radius))
-        active_max_radius = min(17.0, float(active_max_radius))
+        # Explicit caller band (device-calibrated) is authoritative; only soft
+        # safety clamps apply. Default profile still uses 13.5--17 px.
+        if min_radius_px is not None and max_radius_px is not None:
+            active_min_radius = max(5.0, min(60.0, float(active_min_radius)))
+            active_max_radius = max(5.0, min(60.0, float(active_max_radius)))
+        else:
+            active_min_radius = max(13.5, float(active_min_radius))
+            active_max_radius = min(17.0, float(active_max_radius))
         if active_min_radius > active_max_radius:
-            raise RuntimeError("640x480 喷嘴跟踪半径与 13.5～17px 物理范围不相交")
+            raise RuntimeError("640x480 喷嘴跟踪半径范围不相交")
 
     # Preserve the proven multi-resolution LED behaviour.  Automatic pixel
     # calibration is enforced in the new fixed 1280x720 profile; other image

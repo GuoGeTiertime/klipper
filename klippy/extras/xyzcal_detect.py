@@ -1,18 +1,14 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""XY 标定喷嘴检测核心（供 Tierklipper [xycal_detect] 与独立 HTTP 共用）。
-
-分层：
-  detect_nozzle(image, …)     — 纯图像算法（无 URL / 无 Tracker）
-  NozzleDetectionService      — 截图、fresh_frame、Tracker，再调 detect_nozzle
-
-线协议：SERVICE_VERSION 不变；flush_snapshot_count / reset_follow 仍可用，
-fresh_frame / mode / search_delta_* 为语义别名。
-"""
+# XYZ nozzle detect — Klipper [xyzcal_detect] plugin + Service/HTTP/snapshot.
+# Algorithm: xyzcal_nozzle_detector.py (frozen). Calib: xyzcal_calib.py.
+#
+# Copyright (C) 2026 TierTime / ScreenQML migration
+# This file may be distributed under the terms of the GNU GPLv3 license.
 
 from __future__ import annotations
 
 import argparse
+import os
+import logging
 import base64
 import hashlib
 import json
@@ -31,13 +27,73 @@ try:
 except ImportError:  # pragma: no cover
     _Server = HTTPServer
 
-_ROOT = Path(__file__).resolve().parent
-if str(_ROOT) not in sys.path:
-    sys.path.insert(0, str(_ROOT))
 
-import nozzle_detector as _nozzle_detector  # noqa: E402
-import webcam_detect as _webcam_detect  # noqa: E402
-from nozzle_detector import (  # noqa: E402
+# --- snapshot fetch (from webcam_detect) ---
+try:
+    import certifi
+except ImportError:
+    certifi = None
+
+import ssl
+import urllib.error
+import urllib.parse
+import urllib.request
+
+import numpy as np
+
+
+def fetch_snapshot(
+    url,
+    timeout=15.0,
+    allow_insecure_certificate=False,
+):
+    """Download and decode one uncached JPEG/PNG snapshot."""
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("摄像头地址必须是有效的 http:// 或 https:// URL")
+    separator = "&" if parsed.query else "?"
+    fresh_url = "%s%s_nozzle_ts=%d" % (url, separator, time.time_ns())
+    request = urllib.request.Request(
+        fresh_url,
+        headers={
+            "User-Agent": "NozzleDetector-V6-R16/1.0",
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
+        },
+    )
+    if allow_insecure_certificate:
+        ssl_context = ssl._create_unverified_context()  # noqa: SLF001
+    elif certifi is not None:
+        ssl_context = ssl.create_default_context(cafile=certifi.where())
+    else:
+        ssl_context = ssl.create_default_context()
+    try:
+        with urllib.request.urlopen(
+            request, timeout=timeout, context=ssl_context
+        ) as response:
+            payload = response.read()
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        reason = getattr(exc, "reason", exc)
+        certificate_hint = ""
+        if isinstance(reason, ssl.SSLCertVerificationError):
+            certificate_hint = (
+                "；请先执行 pip install -r requirements.txt。"
+                "仅在确认地址为可信设备时才使用 --insecure"
+            )
+        raise RuntimeError("无法取得摄像头快照：%s%s" % (exc, certificate_hint)) from exc
+    image = cv2.imdecode(np.frombuffer(payload, dtype=np.uint8), cv2.IMREAD_COLOR)
+    if image is None:
+        raise RuntimeError("摄像头返回内容不是有效图片")
+    return image
+
+
+_ROOT = Path(__file__).resolve().parent
+_EXTRAS_DIR = str(_ROOT)
+if _EXTRAS_DIR not in sys.path:
+    sys.path.insert(0, _EXTRAS_DIR)
+
+import xyzcal_nozzle_detector as _nozzle_detector
+from xyzcal_nozzle_detector import (
     CameraProfile,
     NozzleTracker,
     draw_detection,
@@ -85,7 +141,7 @@ class NozzleDetectionService:
 
     def _flush_snapshots(self, url, count, tag_prefix, allow_insecure):
         for index in range(max(0, int(count))):
-            _webcam_detect.fetch_snapshot(
+            fetch_snapshot(
                 _cache_busted_url(url, "%s-%d" % (tag_prefix, index)),
                 timeout=15.0,
                 allow_insecure_certificate=allow_insecure,
@@ -98,7 +154,7 @@ class NozzleDetectionService:
         if fresh and n < 2:
             n = 2
         self._flush_snapshots(snap_url, n, "flush", allow_insecure)
-        bgr = _webcam_detect.fetch_snapshot(
+        bgr = fetch_snapshot(
             _cache_busted_url(snap_url, "detect"),
             timeout=15.0,
             allow_insecure_certificate=allow_insecure,
@@ -222,7 +278,7 @@ class NozzleDetectionService:
                         snap_url, extra, "stale-%d" % stale_flush_retries, allow_insecure
                     )
                     total_flushed += extra
-                    bgr = _webcam_detect.fetch_snapshot(
+                    bgr = fetch_snapshot(
                         _cache_busted_url(
                             snap_url, "detect-stale-%d" % stale_flush_retries
                         ),
@@ -464,7 +520,7 @@ def _sha256_file(path: Path) -> str:
 
 
 DETECTOR_PATH = Path(_nozzle_detector.__file__).resolve()
-WEBCAM_PATH = Path(_webcam_detect.__file__).resolve()
+WEBCAM_PATH = Path(__file__).resolve()
 DETECTOR_SHA256 = _sha256_file(DETECTOR_PATH)
 WEBCAM_SHA256 = _sha256_file(WEBCAM_PATH)
 
@@ -472,11 +528,11 @@ WEBCAM_SHA256 = _sha256_file(WEBCAM_PATH)
 def _runtime_metadata() -> dict:
     """Return enough identity data to prove which backend is actually running."""
     return {
-        "service": "xycal-detect",
+        "service": "xyzcal-detect",
         "service_version": SERVICE_VERSION,
         "algorithm": ALGORITHM_VERSION,
         "detector_sha256": DETECTOR_SHA256,
-        "webcam_sha256": WEBCAM_SHA256,
+        "detect_module_sha256": WEBCAM_SHA256,
         "detector_path": str(DETECTOR_PATH),
         "opencv_version": str(cv2.__version__),
     }
@@ -595,7 +651,7 @@ def make_handler(default_snapshot: str):
             path = urlparse(self.path).path.rstrip("/") or "/"
             if path in ("/health", "/"):
                 health = _runtime_metadata()
-                health.update({"ok": True, "source": "webcam_detect.detect_from_url"})
+                health.update({"ok": True, "source": "xyzcal_detect"})
                 self._send(200, health)
                 return
             if path == "/shutdown":
@@ -642,6 +698,409 @@ def create_http_server(host, port, default_snapshot):
     return _Server((host, int(port)), handler)
 
 
+
+# --- Klipper plugin ---
+
+class XyCalDetect:
+    def __init__(self, config):
+        self.printer = config.get_printer()
+        self.reactor = self.printer.get_reactor()
+        self.gcode = self.printer.lookup_object("gcode")
+
+        self.snapshot_url = config.get(
+            "snapshot_url", "http://127.0.0.1:8080/?action=snapshot"
+        )
+        self.listen_host = config.get("listen_host", "127.0.0.1")
+        self.listen_port = config.getint("listen_port", 18765, minval=0, maxval=65535)
+        self.min_confidence = config.getfloat(
+            "min_confidence", 0.36, above=0.0, maxval=1.0
+        )
+        self.enable_http = config.getboolean("enable_http", True)
+        self.nozzle_radius_px = config.getfloat(
+            "nozzle_radius_px", 0.0, minval=0.0
+        )
+        self.nozzle_radius_tol = config.getfloat(
+            "nozzle_radius_tol", 0.15, above=0.0, maxval=1.0
+        )
+
+        self._api = None
+        self._service = None
+        self._server = None
+        self._http_thread = None
+        self._last_result = {}
+        self._import_error = None
+        self._busy = False
+        self._detect_seq = 0
+
+        try:
+            self._api = sys.modules[__name__]
+            self._service = NozzleDetectionService(
+                self.snapshot_url, min_confidence=self.min_confidence
+            )
+        except Exception as exc:
+            self._import_error = str(exc)
+            logging.exception("xyzcal_detect: failed to import detect_api")
+
+        self.gcode.register_command(
+            "XYZCAL_DETECT",
+            self.cmd_XYZCAL_DETECT,
+            desc=self.cmd_XYZCAL_DETECT_help,
+        )
+        self.gcode.register_command(
+            "XYZCAL_DETECT_STATUS",
+            self.cmd_XYZCAL_DETECT_STATUS,
+            desc=self.cmd_XYZCAL_DETECT_STATUS_help,
+        )
+        # Phase 2 short alias (same as XYZCAL_DETECT_STATUS)
+        self.gcode.register_command(
+            "XYZCAL_STATUS",
+            self.cmd_XYZCAL_DETECT_STATUS,
+            desc=self.cmd_XYZCAL_DETECT_STATUS_help,
+        )
+        self.gcode.register_command(
+            "XYZCAL_SET_NOZZLE_RADIUS",
+            self.cmd_XYZCAL_SET_NOZZLE_RADIUS,
+            desc=self.cmd_XYZCAL_SET_NOZZLE_RADIUS_help,
+        )
+        self.printer.register_event_handler("klippy:ready", self._handle_ready)
+        self.printer.register_event_handler("klippy:disconnect", self._handle_disconnect)
+
+    def _handle_ready(self):
+        if self._api is None:
+            logging.error(
+                "xyzcal_detect: OpenCV/detect_api unavailable: %s",
+                self._import_error,
+            )
+            return
+        if self._service is None:
+            self._service = NozzleDetectionService(
+                self.snapshot_url, min_confidence=self.min_confidence
+            )
+        if not self.enable_http or self.listen_port <= 0:
+            logging.info(
+                "xyzcal_detect: HTTP disabled (enable_http=%s listen_port=%s); "
+                "XYZCAL_DETECT still available",
+                self.enable_http,
+                self.listen_port,
+            )
+            return
+        try:
+            self._server = create_http_server(
+                self.listen_host, self.listen_port, self.snapshot_url
+            )
+        except Exception:
+            logging.exception(
+                "xyzcal_detect: cannot bind %s:%s (stop old xyzcal_detect_server first)",
+                self.listen_host,
+                self.listen_port,
+            )
+            self._server = None
+            return
+
+        def _serve():
+            logging.info(
+                "xyzcal_detect: HTTP on http://%s:%s snapshot=%s",
+                self.listen_host,
+                self.listen_port,
+                self.snapshot_url,
+            )
+            try:
+                self._server.serve_forever()
+            except Exception:
+                logging.exception("xyzcal_detect: HTTP server stopped with error")
+
+        self._http_thread = threading.Thread(
+            target=_serve, name="xyzcal_detect_http", daemon=True
+        )
+        self._http_thread.start()
+
+    def _handle_disconnect(self):
+        server = self._server
+        self._server = None
+        if server is None:
+            return
+        try:
+            server.shutdown()
+        except Exception:
+            logging.exception("xyzcal_detect: HTTP shutdown failed")
+        try:
+            server.server_close()
+        except Exception:
+            pass
+
+    def reset_tracker(self):
+        if self._service is not None:
+            self._service.reset()
+
+    def calibrated_radius_band(self):
+        """Return (min, max) from saved nozzle radius, or None if unset."""
+        r = float(self.nozzle_radius_px or 0.0)
+        if r <= 0.0:
+            return None
+        half = max(1.5, r * float(self.nozzle_radius_tol))
+        return (max(5.0, r - half), min(60.0, r + half))
+
+    def _inject_radius_band(self, body):
+        if not isinstance(body, dict):
+            return body
+        if body.get("min_radius_px") is not None or body.get("max_radius_px") is not None:
+            return body
+        band = self.calibrated_radius_band()
+        if band is None:
+            return body
+        body = dict(body)
+        body["min_radius_px"] = band[0]
+        body["max_radius_px"] = band[1]
+        return body
+
+    def detect_once(self, body):
+        """Run one detect for other extras (xyzcal_calib). Updates last result/seq."""
+        if self._api is None:
+            return {
+                "ok": False,
+                "error": "DETECT_UNAVAILABLE",
+                "detail": self._import_error or "import failed",
+                "cx_px": -1,
+                "cy_px": -1,
+                "radius_px": 0,
+                "confidence": 0.0,
+            }
+        if not isinstance(body, dict):
+            body = {}
+        body = self._inject_radius_band(body)
+        eventtime = self.reactor.monotonic()
+        result_box = []
+        was_busy = self._busy
+        self._busy = True
+
+        def _work():
+            try:
+                kwargs = _parse_body_detect_args(body, self.snapshot_url)
+                svc = self._service
+                if svc is None:
+                    svc = get_shared_service(
+                        kwargs.get("url") or self.snapshot_url,
+                        kwargs.get("min_confidence"),
+                    )
+                result_box.append(svc.detect(**kwargs))
+            except Exception as exc:
+                result_box.append(
+                    {
+                        "ok": False,
+                        "error": "DETECT_EXCEPTION",
+                        "detail": str(exc),
+                        "cx_px": -1,
+                        "cy_px": -1,
+                        "radius_px": 0,
+                        "confidence": 0.0,
+                    }
+                )
+
+        th = threading.Thread(target=_work, name="xyzcal_detect_once")
+        result = {"ok": False, "error": "NO_RESULT"}
+        try:
+            th.start()
+            while th.is_alive():
+                eventtime = self.reactor.pause(eventtime + 0.05)
+            th.join(timeout=0.1)
+            result = result_box[0] if result_box else {"ok": False, "error": "NO_RESULT"}
+            self._last_result = result
+            self._detect_seq += 1
+        finally:
+            self._busy = was_busy
+        return result
+
+    cmd_XYZCAL_DETECT_help = (
+        "Run one nozzle tip detect (OpenCV worker). "
+        "Params: URL= RESET_FOLLOW= FLUSH= FRESH= MODE= EXPECTED_X/Y= "
+        "MIN_CONF= MIN_RADIUS= MAX_RADIUS= SEARCH_W= SEARCH_H= "
+        "SEARCH_DX= SEARCH_DY="
+    )
+
+    def cmd_XYZCAL_DETECT(self, gcmd):
+        if self._api is None:
+            raise gcmd.error(
+                "xyzcal_detect unavailable: %s (install opencv-python-headless)"
+                % (self._import_error or "import failed")
+            )
+        url = gcmd.get("URL", self.snapshot_url)
+        reset_follow = gcmd.get_int("RESET_FOLLOW", 0)
+        flush_n = gcmd.get_int("FLUSH", 0, minval=0, maxval=8)
+        fresh = gcmd.get_int("FRESH", 0, minval=0, maxval=1)
+        mode = gcmd.get("MODE", None)
+        expect_x = gcmd.get_float("EXPECTED_X", None)
+        expect_y = gcmd.get_float("EXPECTED_Y", None)
+        min_conf = gcmd.get_float(
+            "MIN_CONF", self.min_confidence, above=0.0, maxval=1.0
+        )
+        search_w = gcmd.get_float("SEARCH_W", 80.0, above=8.0)
+        search_h = gcmd.get_float("SEARCH_H", 72.0, above=8.0)
+        search_dx = gcmd.get_float("SEARCH_DX", None, above=0.0)
+        search_dy = gcmd.get_float("SEARCH_DY", None, above=0.0)
+        min_radius = gcmd.get_float("MIN_RADIUS", None, above=0.0)
+        max_radius = gcmd.get_float("MAX_RADIUS", None, above=0.0)
+        body = {
+            "url": url,
+            "min_confidence": min_conf,
+            "search_width_px": search_w,
+            "search_height_px": search_h,
+            "flush_snapshot_count": flush_n,
+            "fresh_frame": bool(fresh),
+            "reset_follow": bool(reset_follow),
+            "insecure": True,
+        }
+        if mode:
+            body["mode"] = str(mode).strip().lower()
+        if search_dx is not None and search_dy is not None:
+            body["search_delta_x"] = search_dx
+            body["search_delta_y"] = search_dy
+        if min_radius is not None:
+            body["min_radius_px"] = min_radius
+        if max_radius is not None:
+            body["max_radius_px"] = max_radius
+        body = self._inject_radius_band(body)
+        if expect_x is not None and expect_y is not None:
+            body["expected_x"] = expect_x
+            body["expected_y"] = expect_y
+        elif expect_x is not None or expect_y is not None:
+            raise gcmd.error("EXPECTED_X and EXPECTED_Y must be set together")
+        if (search_dx is None) != (search_dy is None):
+            raise gcmd.error("SEARCH_DX and SEARCH_DY must be set together")
+
+        self._busy = True
+        try:
+            result = self.detect_once(body)
+        finally:
+            self._busy = False
+        ok = bool(result.get("ok"))
+        cx = result.get("cx_px", -1)
+        cy = result.get("cy_px", -1)
+        r = result.get("radius_px", 0)
+        conf = result.get("confidence", 0)
+        gcmd.respond_info(
+            "XYZCAL_DETECT ok=%s cx=%.1f cy=%.1f r=%.1f conf=%.3f seq=%d err=%s"
+            % (
+                ok,
+                float(cx) if cx is not None else -1.0,
+                float(cy) if cy is not None else -1.0,
+                float(r) if r is not None else 0.0,
+                float(conf) if conf is not None else 0.0,
+                self._detect_seq,
+                result.get("error") or result.get("reject_reason") or "",
+            )
+        )
+
+    cmd_XYZCAL_DETECT_STATUS_help = (
+        "Report last XYZCAL_DETECT result and HTTP bind (alias: XYZCAL_STATUS)"
+    )
+
+    def cmd_XYZCAL_DETECT_STATUS(self, gcmd):
+        api_ok = self._api is not None
+        http_on = self._server is not None
+        r = self._last_result or {}
+        gcmd.respond_info(
+            "xyzcal_detect api=%s busy=%s seq=%s http=%s://%s:%s "
+            "last_ok=%s last_cx=%s last_cy=%s last_r=%s conf=%s err=%s"
+            % (
+                api_ok,
+                self._busy,
+                self._detect_seq,
+                "http" if http_on else "off",
+                self.listen_host,
+                self.listen_port,
+                r.get("ok"),
+                r.get("cx_px"),
+                r.get("cy_px"),
+                r.get("radius_px"),
+                r.get("confidence"),
+                r.get("error") or r.get("reject_reason") or "",
+            )
+        )
+        if self._import_error:
+            gcmd.respond_info("import_error: %s" % self._import_error)
+
+    cmd_XYZCAL_SET_NOZZLE_RADIUS_help = (
+        "Set calibrated nozzle rim radius (px). Params: R= TOL= (optional)"
+    )
+
+    def cmd_XYZCAL_SET_NOZZLE_RADIUS(self, gcmd):
+        r = gcmd.get_float("R", None, above=0.0)
+        if r is None:
+            raise gcmd.error("XYZCAL_SET_NOZZLE_RADIUS requires R=")
+        tol = gcmd.get_float("TOL", self.nozzle_radius_tol, above=0.0, maxval=1.0)
+        self.nozzle_radius_px = float(r)
+        self.nozzle_radius_tol = float(tol)
+        band = self.calibrated_radius_band()
+        gcmd.respond_info(
+            "XYZCAL_SET_NOZZLE_RADIUS r=%.2f tol=%.3f band=%.2f..%.2f"
+            % (self.nozzle_radius_px, self.nozzle_radius_tol, band[0], band[1])
+        )
+
+    def _status_list(self, value):
+        if value is None:
+            return None
+        if isinstance(value, (list, tuple)):
+            out = []
+            for item in value:
+                try:
+                    out.append(float(item))
+                except (TypeError, ValueError):
+                    return None
+            return out
+        return None
+
+    def get_status(self, eventtime=None):
+        r = self._last_result or {}
+        # Moonraker objects/query：同时提供 last_* 与 HTTP 同名字段，方便屏端映射
+        return {
+            "http_enabled": bool(self.enable_http and self.listen_port > 0),
+            "listen_host": self.listen_host,
+            "listen_port": self.listen_port,
+            "snapshot_url": self.snapshot_url,
+            "nozzle_radius_px": float(self.nozzle_radius_px or 0.0),
+            "nozzle_radius_tol": float(self.nozzle_radius_tol or 0.15),
+            "api_ready": self._api is not None,
+            "import_error": self._import_error or "",
+            "busy": bool(self._busy),
+            "detect_seq": int(self._detect_seq),
+            "last_ok": bool(r.get("ok")),
+            "last_cx": r.get("cx_px", -1),
+            "last_cy": r.get("cy_px", -1),
+            "last_radius": r.get("radius_px", 0),
+            "last_confidence": r.get("confidence", 0.0),
+            "last_frame_w": r.get("frame_w", 0),
+            "last_frame_h": r.get("frame_h", 0),
+            "last_error": r.get("error") or "",
+            "last_detail": r.get("detail") or "",
+            "last_reject_reason": r.get("reject_reason") or "",
+            "last_allowed_roi": self._status_list(r.get("allowed_roi")),
+            "last_allowed_circle": self._status_list(r.get("allowed_circle")),
+            # HTTP-shaped aliases (Phase 2 UI)
+            "ok": bool(r.get("ok")),
+            "cx_px": r.get("cx_px", -1),
+            "cy_px": r.get("cy_px", -1),
+            "radius_px": r.get("radius_px", 0),
+            "confidence": r.get("confidence", 0.0),
+            "frame_w": r.get("frame_w", 0),
+            "frame_h": r.get("frame_h", 0),
+            "error": r.get("error") or "",
+            "detail": r.get("detail") or "",
+            "reject_reason": r.get("reject_reason") or "",
+            "allowed_roi": self._status_list(r.get("allowed_roi")),
+            "allowed_circle": self._status_list(r.get("allowed_circle")),
+            "algorithm": getattr(self._api, "ALGORITHM_VERSION", "")
+            if self._api
+            else "",
+            "service_version": getattr(self._api, "SERVICE_VERSION", "")
+            if self._api
+            else "",
+        }
+
+
+def load_config(config):
+    return XyCalDetect(config)
+
+
 def main():
     ap = argparse.ArgumentParser(description="XY calib nozzle detect HTTP server")
     ap.add_argument("--host", default=DEFAULT_HOST)
@@ -655,7 +1114,7 @@ def main():
 
     server = create_http_server(args.host, args.port, args.snapshot)
     print(
-        "xycal-detect (klippy/xycal) listening on http://%s:%d  fallback_snapshot=%s"
+        "xyzcal-detect (extras/xyzcal_detect) listening on http://%s:%d  fallback_snapshot=%s"
         % (args.host, args.port, args.snapshot),
         flush=True,
     )
