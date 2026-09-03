@@ -194,19 +194,45 @@ class XyCalCalib:
         coord[idx] = pos[idx] + float(delta_mm)
         self._abs_move(coord)
 
-    def _detect(self, gcmd, reset_follow=False, flush=0, expected=None):
+    def _detect(
+        self,
+        gcmd,
+        reset_follow=False,
+        flush=0,
+        expected=None,
+        fresh_frame=False,
+        mode=None,
+    ):
         det = self._detect_obj()
         if det is None:
             raise gcmd.error("xycal_detect not loaded; include [xycal_detect] first")
+        flush_n = int(flush)
+        # flush>=2 historically meant motion-fresh frames
+        if flush_n >= 2:
+            fresh_frame = True
+        if fresh_frame and flush_n < 2:
+            flush_n = 2
+        if getattr(self, "_need_detect_reset", False):
+            reset_follow = True
+            self._need_detect_reset = False
+            if not mode:
+                mode = "acquire"
         body = {
             "url": self._snap_url(gcmd),
             "min_confidence": self.min_confidence,
             "search_width_px": 80,
             "search_height_px": 72,
-            "flush_snapshot_count": int(flush),
+            "flush_snapshot_count": flush_n,
+            "fresh_frame": bool(fresh_frame),
             "reset_follow": bool(reset_follow),
             "insecure": True,
         }
+        if mode:
+            body["mode"] = str(mode)
+        elif expected is not None:
+            body["mode"] = "track"
+        elif reset_follow:
+            body["mode"] = "acquire"
         if expected is not None:
             body["expected_x"] = float(expected[0])
             body["expected_y"] = float(expected[1])
@@ -237,11 +263,39 @@ class XyCalCalib:
                 self._last_allowed_circle = None
         else:
             self._last_allowed_circle = None
-        # 检出成功后：下一窗跟当前 tip（与屏端「识别后再跟圆心」一致）
         if self._looks_like_tip(result) and self._last_cx >= 0 and self._last_cy >= 0:
             self._last_expect_x = float(self._last_cx)
             self._last_expect_y = float(self._last_cy)
         return result
+
+    def _detect_tip(
+        self,
+        gcmd,
+        *,
+        expected=None,
+        after_motion=False,
+        mode=None,
+    ):
+        """Detect tip; on miss, reacquire with tracker reset."""
+        use_mode = mode
+        if use_mode is None:
+            use_mode = "track" if expected is not None else "acquire"
+        tip = self._detect(
+            gcmd,
+            fresh_frame=bool(after_motion),
+            flush=2 if after_motion else 0,
+            expected=expected,
+            mode=use_mode,
+        )
+        if self._looks_like_tip(tip):
+            return tip
+        return self._detect(
+            gcmd,
+            reset_follow=True,
+            fresh_frame=True,
+            flush=2,
+            mode="reacquire",
+        )
 
     def _looks_like_tip(self, result):
         if not result or not result.get("ok"):
@@ -285,6 +339,7 @@ class XyCalCalib:
             site = "SECOND"
         else:
             site = "MAIN"
+        prev = getattr(self, "_last_goto_site", None)
         script = "XYCAL_GOTO SITE=%s X=%.3f Y=%.3f Z=%.3f" % (
             site,
             float(x),
@@ -293,6 +348,9 @@ class XyCalCalib:
         )
         self.gcode.run_script_from_command(script)
         self._check_cancel(gcmd)
+        if prev is not None and prev != site:
+            self._need_detect_reset = True
+        self._last_goto_site = site
 
     def _z_min_mm(self, gcmd):
         return gcmd.get_float("Z_MIN", self.z_min_mm, above=0.0)
@@ -351,9 +409,7 @@ class XyCalCalib:
 
         self._rel_move("Y", span)
         self._check_cancel(gcmd, "XYCAL_DCXZ")
-        tip_pos = self._detect(gcmd, flush=2, expected=_est(span))
-        if not self._looks_like_tip(tip_pos):
-            tip_pos = self._detect(gcmd, flush=2, reset_follow=True)
+        tip_pos = self._detect_tip(gcmd, after_motion=True, expected=_est(span))
         if not self._looks_like_tip(tip_pos):
             return None
         cx_pos = float(tip_pos["cx_px"])
@@ -361,9 +417,9 @@ class XyCalCalib:
         self._rel_move("Y", -2.0 * span)
         self._check_cancel(gcmd, "XYCAL_DCXZ")
         # 从 +span 再走到 -span：相对 tip0 为 -span；相对 tip_pos 为 -2*span
-        tip_neg = self._detect(
+        tip_neg = self._detect_tip(
             gcmd,
-            flush=2,
+            after_motion=True,
             expected=_est(-span)
             if _est(-span) is not None
             else (
@@ -372,8 +428,6 @@ class XyCalCalib:
                 else None
             ),
         )
-        if not self._looks_like_tip(tip_neg):
-            tip_neg = self._detect(gcmd, flush=1, reset_follow=True)
         if not self._looks_like_tip(tip_neg):
             self._rel_move("Y", span)
             return None
@@ -466,9 +520,7 @@ class XyCalCalib:
                 % (off, z_abs, i + 1, n),
             )
             self._run_z_point_macro(gcmd, "SECOND", sec_x, sec_y, z_abs, 0.0)
-            tip0 = self._detect(gcmd, flush=1)
-            if not self._looks_like_tip(tip0):
-                tip0 = self._detect(gcmd, flush=2, reset_follow=True)
+            tip0 = self._detect_tip(gcmd, after_motion=True)
             if not self._looks_like_tip(tip0):
                 rows.append(
                     {
@@ -526,9 +578,7 @@ class XyCalCalib:
     def _z_detect_after_shift(self, gcmd, shift_axis, shift_mm, label="XYCAL_Z"):
         self._rel_move(shift_axis, shift_mm)
         self._check_cancel(gcmd, label)
-        tip = self._detect(gcmd, flush=2)
-        if not self._looks_like_tip(tip):
-            tip = self._detect(gcmd, flush=2, reset_follow=True)
+        tip = self._detect_tip(gcmd, after_motion=True)
         return tip
 
     def _z_ghost_ladder_match(
@@ -734,11 +784,11 @@ class XyCalCalib:
         gcmd.respond_info("XYCAL_CENTER: span Y +%.1f" % span)
         self._rel_move("Y", span)
         self._check_cancel(gcmd)
-        tip_pos = self._detect(gcmd, flush=2, expected=(
-            cx0 + span * ref_x, cy0 + span * ref_y
-        ))
-        if not self._looks_like_tip(tip_pos):
-            tip_pos = self._detect(gcmd, flush=2)
+        tip_pos = self._detect_tip(
+            gcmd,
+            after_motion=True,
+            expected=(cx0 + span * ref_x, cy0 + span * ref_y),
+        )
         if not self._looks_like_tip(tip_pos):
             self._rel_move("Y", -span)
             raise gcmd.error("XYCAL_CENTER: no tip at Y+%.1f" % span)
@@ -755,12 +805,14 @@ class XyCalCalib:
         gcmd.respond_info("XYCAL_CENTER: span Y +%.1f → -%.1f" % (span, span))
         self._rel_move("Y", -2.0 * span)
         self._check_cancel(gcmd)
-        tip_neg = self._detect(gcmd, flush=2, expected=(
-            pos_cx - 2.0 * span * self._vy_x,
-            pos_cy - 2.0 * span * self._vy_y,
-        ))
-        if not self._looks_like_tip(tip_neg):
-            tip_neg = self._detect(gcmd, flush=2)
+        tip_neg = self._detect_tip(
+            gcmd,
+            after_motion=True,
+            expected=(
+                pos_cx - 2.0 * span * self._vy_x,
+                pos_cy - 2.0 * span * self._vy_y,
+            ),
+        )
         if not self._looks_like_tip(tip_neg):
             self._rel_move("Y", span)
             raise gcmd.error("XYCAL_CENTER: no tip at Y-%.1f" % span)
@@ -775,9 +827,13 @@ class XyCalCalib:
         gcmd.respond_info("XYCAL_CENTER: return from Y-%.1f" % span)
         self._rel_move("Y", span)
         self._check_cancel(gcmd)
-        tip_home = self._detect(gcmd, reset_follow=True, flush=3)
+        tip_home = self._detect(
+            gcmd, reset_follow=True, fresh_frame=True, mode="acquire"
+        )
         if not self._looks_like_tip(tip_home):
-            tip_home = self._detect(gcmd, reset_follow=True, flush=2)
+            tip_home = self._detect(
+                gcmd, reset_follow=True, fresh_frame=True, mode="reacquire"
+            )
         if not self._looks_like_tip(tip_home):
             raise gcmd.error("XYCAL_CENTER: no tip after ±span return")
         home_err = max(
@@ -834,7 +890,7 @@ class XyCalCalib:
         try:
             self._set_phase("need_tip", "need tip")
             gcmd.respond_info("XYCAL_CENTER: detect tip…")
-            tip = self._detect(gcmd, reset_follow=True, flush=1)
+            tip = self._detect(gcmd, reset_follow=True, fresh_frame=True, mode="acquire")
             self._check_cancel(gcmd)
             if not self._looks_like_tip(tip):
                 raise gcmd.error(
@@ -849,7 +905,7 @@ class XyCalCalib:
             gcmd.respond_info("XYCAL_CENTER: probe X +%.2f" % probe_mm)
             self._rel_move("X", probe_mm)
             self._check_cancel(gcmd)
-            tip_x = self._detect(gcmd, flush=2)
+            tip_x = self._detect(gcmd, fresh_frame=True, mode="track")
             if not self._looks_like_tip(tip_x):
                 raise gcmd.error("XYCAL_CENTER: lost tip after +X")
             ok, detail = self._apply_probe(
@@ -864,7 +920,7 @@ class XyCalCalib:
             gcmd.respond_info("XYCAL_CENTER: probe Y +%.2f" % probe_mm)
             self._rel_move("Y", probe_mm)
             self._check_cancel(gcmd)
-            tip_y = self._detect(gcmd, flush=2)
+            tip_y = self._detect(gcmd, fresh_frame=True, mode="track")
             if not self._looks_like_tip(tip_y):
                 raise gcmd.error("XYCAL_CENTER: lost tip after +Y")
             ok, detail = self._apply_probe(
@@ -884,9 +940,7 @@ class XyCalCalib:
             self._rel_move("X", -probe_mm)
             self._rel_move("Y", -probe_mm)
             self._check_cancel(gcmd)
-            tip = self._detect(gcmd, reset_follow=True, flush=3)
-            if not self._looks_like_tip(tip):
-                tip = self._detect(gcmd, reset_follow=True, flush=2)
+            tip = self._detect_tip(gcmd, after_motion=True, mode="acquire")
             if not self._looks_like_tip(tip):
                 raise gcmd.error(
                     "XYCAL_CENTER: lost tip after undo (%s)"
@@ -941,11 +995,12 @@ class XyCalCalib:
                         self._rel_move("Y", d_y)
                     tip = self._detect(
                         gcmd,
-                        flush=2,
+                        fresh_frame=True,
+                        mode="track",
                         expected=(self._last_cx, self._last_cy),
                     )
                     if not self._looks_like_tip(tip):
-                        tip = self._detect(gcmd, flush=1, reset_follow=False)
+                        tip = self._detect(gcmd, fresh_frame=True, flush=1, mode="track")
                     if not self._looks_like_tip(tip):
                         raise gcmd.error("XYCAL_CENTER: lost tip during correct")
 
@@ -1152,7 +1207,7 @@ class XyCalCalib:
         self._fity_span_pos_cx = None
         self._fity_span_pos_cy = None
         self._set_phase("fity_tip", "FitY need tip")
-        tip = self._detect(gcmd, reset_follow=True, flush=2)
+        tip = self._detect(gcmd, reset_follow=True, fresh_frame=True, mode="acquire")
         self._check_cancel(gcmd, "XYCAL_FITY")
         if not self._looks_like_tip(tip):
             raise gcmd.error("XYCAL_FITY: fresh centered tip required")
@@ -1188,10 +1243,10 @@ class XyCalCalib:
             for attempt in range(6):
                 self._check_cancel(gcmd, "XYCAL_FITY")
                 tip_pt = self._detect(
-                    gcmd, flush=flush_n if attempt == 0 else 1, expected=est
+                    gcmd, fresh_frame=True, flush=(flush_n if attempt == 0 else 1), expected=est, mode="track"
                 )
                 if not self._looks_like_tip(tip_pt):
-                    tip_pt = self._detect(gcmd, flush=1)
+                    tip_pt = self._detect(gcmd, fresh_frame=True, flush=1)
                 if not self._looks_like_tip(tip_pt):
                     continue
                 cx = float(tip_pt["cx_px"])
@@ -1261,7 +1316,7 @@ class XyCalCalib:
         self._fity_dcx45 = fit_dcx if fit_ok else (raw_dcx if raw_ok else None)
         self._rebuild_fity_report()
         self._fity_home_y()
-        self._detect(gcmd, reset_follow=True, flush=2)
+        self._detect(gcmd, reset_follow=True, fresh_frame=True, mode="acquire")
         self._set_phase(
             "done",
             "FitY done n=%d dcx45=%s"
@@ -1350,9 +1405,7 @@ class XyCalCalib:
         self._set_phase("z_shift_main", "Z shift main")
         self._rel_move(shift_axis, shift_mm)
         self._check_cancel(gcmd, "XYCAL_Z")
-        tip = self._detect(gcmd, flush=2)
-        if not self._looks_like_tip(tip):
-            tip = self._detect(gcmd, flush=2, reset_follow=True)
+        tip = self._detect_tip(gcmd, after_motion=True)
         if not self._looks_like_tip(tip):
             raise gcmd.error("XYCAL_Z: no tip after main shift")
         self._ghost_cx = float(tip["cx_px"])
@@ -1376,9 +1429,7 @@ class XyCalCalib:
         self._set_phase("z_shift_second", "Z shift 2nd")
         self._rel_move(shift_axis, shift_mm)
         self._check_cancel(gcmd, "XYCAL_Z")
-        tip2 = self._detect(gcmd, flush=2)
-        if not self._looks_like_tip(tip2):
-            tip2 = self._detect(gcmd, flush=2, reset_follow=True)
+        tip2 = self._detect_tip(gcmd, after_motion=True)
         if not self._looks_like_tip(tip2):
             raise gcmd.error("XYCAL_Z: no tip after 2nd shift")
 
@@ -1451,20 +1502,34 @@ class XyCalCalib:
     def _dcx_rebuild_report(self, main_dcx, rows):
         lines = []
         lines.append("main dcx45=%.2f" % float(main_dcx))
-        for r in rows:
+        # Only expand the latest FitY10 / pm45 detail block — older rows stay one-liners
+        # so the UI report does not grow by 10 lines per Z step.
+        last_detail_i = -1
+        for i, r in enumerate(rows):
+            if r.get("ok") and (
+                r.get("fity_samples") or r.get("cx_pos") is not None
+            ):
+                last_detail_i = i
+        for i, r in enumerate(rows):
             tag = "[%s]" % r.get("pass", "?")
             off = float(r.get("off", 0))
             z = float(r.get("z", 0))
             if r.get("ok"):
-                lines.append("%s off=%+.2f z=%.2f" % (tag, off, z))
+                vs = float(r["dcx"]) - float(main_dcx)
+                lines.append(
+                    "%s off=%+.2f z=%.2f dcx=%.2f vs=%.2f"
+                    % (tag, off, z, float(r["dcx"]), vs)
+                )
+                if i != last_detail_i:
+                    continue
                 samples = r.get("fity_samples")
                 if samples:
-                    for i, s in enumerate(samples):
+                    for j, s in enumerate(samples):
                         mm = float(s.get("mm", 0))
                         lines.append(
                             "  [%d] Y%+.1fmm (cx, cy)=(%.2f, %.2f) px"
                             % (
-                                i + 1,
+                                j + 1,
                                 mm,
                                 float(s.get("cx", 0)),
                                 float(s.get("cy", 0)),
@@ -1488,16 +1553,11 @@ class XyCalCalib:
                         % float(r["dcx"])
                     )
                 else:
-                    lines.append(
-                        "  Δcx@±4.5  %.2f px" % float(r["dcx"])
-                    )
-                lines.append(
-                    "  vs main=%+.2f" % (float(r["dcx"]) - float(main_dcx))
-                )
+                    lines.append("  Δcx@±4.5  %.2f px" % float(r["dcx"]))
             else:
                 lines.append(
                     "%s off=%+.2f z=%.2f FAIL %s"
-                    % (tag, off, z, r.get("reason", ""))
+                    % (tag, off, z, r.get("reason") or "")
                 )
         if self._dcx_solved_offset is not None:
             lines.append("offset*=%.2f" % float(self._dcx_solved_offset))

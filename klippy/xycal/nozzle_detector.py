@@ -116,6 +116,77 @@ class Detection:
     score: float
     output_path: Optional[Path] = None
 
+
+@dataclass(frozen=True)
+class CameraProfile:
+    """Per-camera defaults; not per-call knobs.
+
+    ``default_search_delta`` is half-width / half-height in pixels
+    (e.g. (40, 36) → 80×72 window).
+    """
+
+    frame_size: tuple[int, int] = (640, 480)
+    allowed_bounds: Optional[tuple[float, float, float, float]] = (
+        160.0,
+        96.0,
+        480.0,
+        384.0,
+    )
+    default_search_delta: tuple[float, float] = (40.0, 36.0)
+    default_radius_range: tuple[float, float] = (13.5, 17.0)
+    require_hex_lock: bool = True
+    allow_fixed640_relocation: bool = False
+
+    @classmethod
+    def from_image(cls, image: np.ndarray) -> "CameraProfile":
+        h, w = int(image.shape[0]), int(image.shape[1])
+        if w == 640 and h == 480:
+            return cls(
+                frame_size=(640, 480),
+                allowed_bounds=(160.0, 96.0, 480.0, 384.0),
+                default_search_delta=(40.0, 36.0),
+                default_radius_range=(13.5, 17.0),
+                require_hex_lock=True,
+                allow_fixed640_relocation=False,
+            )
+        if w == 1280 and h == 720:
+            return cls(
+                frame_size=(1280, 720),
+                allowed_bounds=(320.0, 180.0, 960.0, 540.0),
+                default_search_delta=(40.0, 36.0),
+                default_radius_range=(18.0, 32.0),
+                require_hex_lock=True,
+                allow_fixed640_relocation=False,
+            )
+        return cls(
+            frame_size=(w, h),
+            allowed_bounds=None,
+            default_search_delta=(40.0, 36.0),
+            default_radius_range=(13.5, 17.0),
+            require_hex_lock=False,
+            allow_fixed640_relocation=True,
+        )
+
+
+def _normalize_detect_mode(mode: Optional[str], has_expected: bool) -> str:
+    raw = str(mode or "").strip().lower()
+    if raw in ("acquire", "track", "reacquire"):
+        return raw
+    # Legacy: expected ⇒ track, else acquire
+    return "track" if has_expected else "acquire"
+
+
+def _search_bounds_from_delta(
+    expected_center: tuple[float, float],
+    search_delta: tuple[float, float],
+) -> tuple[float, float, float, float]:
+    cx, cy = float(expected_center[0]), float(expected_center[1])
+    dx, dy = float(search_delta[0]), float(search_delta[1])
+    if not all(math.isfinite(v) for v in (cx, cy, dx, dy)) or dx <= 0 or dy <= 0:
+        raise ValueError("search_delta 必须是正的半宽/半高")
+    return (cx - dx, cy - dy, cx + dx, cy + dy)
+
+
 class _HexLockError(RuntimeError):
     """Camera-mode candidate failed the local metal-face containment gate."""
 
@@ -4105,24 +4176,33 @@ def detect_nozzle(
     search_bounds: Optional[tuple[float, float, float, float]] = None,
     expected_center: Optional[tuple[float, float]] = None,
     search_circle: Optional[tuple[float, float, float]] = None,
+    *,
+    search_delta: Optional[tuple[float, float]] = None,
+    radius_range: Optional[tuple[float, float]] = None,
+    mode: Optional[str] = None,
 ) -> Detection:
-    """Detect one nozzle inside a compact camera ROI; return full-image pixels.
+    """Detect one nozzle in an already-captured image (no camera I/O).
 
-    The default no-fill ROI is the middle half of both image axes, i.e. 25% of
-    the original pixel area.  Under LED/blue fill, the detector first locks a
-    metal hex over the full frame and then fits the complete bright nozzle rim.
-    Without fill light, the original dark-cavity pipeline
-    and adaptive upper/centre/lower ROI remain active.  ``min_radius_px`` and
-    ``max_radius_px`` can override the automatic bounds for a calibrated
-    camera.  General mode has no automatic radius limit unless explicit pixel
-    bounds are supplied.  ``search_bounds=(x0, y0, x1, y1)`` is a hard
-    full-image pixel window for a calibrated machine or a continuous-frame
-    tracker; candidates outside it are never considered.
-    ``search_circle=(cx, cy, radius)`` is a stricter circular region: the
-    complete detected nozzle circle, not just its centre, must fit inside it.
+    Preferred call knobs: ``expected_center``, ``search_delta`` (half-width /
+    half-height), ``radius_range``, ``min_confidence``, ``mode`` in
+    ``acquire|track|reacquire``.
+
+    Deprecated transition knobs (still accepted): ``search_bounds``,
+    ``search_circle``, ``roi_width_fraction``, ``roi_height_fraction``,
+    ``fast_camera_mode``, ``fallback_general``, ``adaptive_vertical_roi``,
+    ``min_radius_px`` / ``max_radius_px``. Prefer ``search_delta`` /
+    ``radius_range`` / ``CameraProfile`` instead.
     """
     if image is None or image.ndim != 3 or image.shape[2] not in (3, 4):
         raise ValueError("image 必须是 OpenCV BGR/BGRA 彩色图像")
+
+    if radius_range is not None:
+        if len(radius_range) != 2:
+            raise ValueError("radius_range 必须是 (rmin, rmax)")
+        if min_radius_px is None:
+            min_radius_px = float(radius_range[0])
+        if max_radius_px is None:
+            max_radius_px = float(radius_range[1])
 
     for name, value in (("min_radius_px", min_radius_px), ("max_radius_px", max_radius_px)):
         if value is not None and (not math.isfinite(value) or value <= 0.0):
@@ -4130,11 +4210,25 @@ def detect_nozzle(
     if min_radius_px is not None and max_radius_px is not None and min_radius_px > max_radius_px:
         raise ValueError("min_radius_px 不能大于 max_radius_px")
     explicit_expected_center = expected_center is not None
+    detect_mode = _normalize_detect_mode(mode, explicit_expected_center)
+    if detect_mode == "track" and not explicit_expected_center:
+        raise ValueError("mode=track 需要 expected_center")
     if expected_center is not None and (
         len(expected_center) != 2
         or not all(math.isfinite(float(value)) for value in expected_center)
     ):
         raise ValueError("expected_center 必须是两个有限像素坐标")
+    if search_delta is not None and search_bounds is None and expected_center is not None:
+        profile = CameraProfile.from_image(image)
+        delta = search_delta
+        if delta is None:
+            delta = profile.default_search_delta
+        if detect_mode == "reacquire":
+            delta = (float(delta[0]) * 1.5, float(delta[1]) * 1.5)
+        search_bounds = _search_bounds_from_delta(
+            (float(expected_center[0]), float(expected_center[1])),
+            (float(delta[0]), float(delta[1])),
+        )
     if search_circle is not None:
         if (
             len(search_circle) != 3
@@ -4143,6 +4237,9 @@ def detect_nozzle(
         ):
             raise ValueError("search_circle 必须是有限数值 (cx, cy, radius)，且半径为正")
         search_circle = tuple(map(float, search_circle))
+
+    # acquire/reacquire: strict face proof; track: lighter local proof
+    require_face_support = detect_mode != "track"
 
     hard_bounds: Optional[tuple[int, int, int, int]] = None
     if search_bounds is not None:
@@ -4262,11 +4359,11 @@ def detect_nozzle(
             # Treating it as such rejected valid circles near a ROI edge.
             expected_center=expected_center,
             allowed_region_circle=search_circle,
-            # A hard ROI is only a location limit, not proof that the object is
-            # a nozzle.  Initial acquisition still needs 3--6 metal-face edges.
-            # Only a caller-provided motion/follow prediction may use the
-            # lighter local proof needed while the carriage is moving.
-            require_face_support=not explicit_expected_center,
+            # mode=track → lighter local proof while following; acquire /
+            # reacquire keep full metal-face proof even if expected is set.
+            # mode=track → lighter local proof while following; acquire /
+            # reacquire keep full metal-face proof even if expected is set.
+            require_face_support=require_face_support,
         )
         if direct_rim is not None and _circle_fits_inside_region(
             direct_rim.circle,
@@ -4705,6 +4802,7 @@ class NozzleTracker:
         *,
         expansion: float = 1.0,
         expected_center: Optional[tuple[float, float]] = None,
+        mode: Optional[str] = None,
     ) -> Detection:
         strict_bounds = self._strict_position_bounds(image, expected_center)
         self.last_allowed_roi = strict_bounds
@@ -4798,6 +4896,9 @@ class NozzleTracker:
             elif self._stable is not None:
                 window_expected_center = self._predicted_center()
         self.last_follow_roi = bounds
+        detect_kwargs = dict(self._options)
+        if mode is not None:
+            detect_kwargs["mode"] = mode
         return detect_nozzle(
             image,
             min_radius_px=min_radius,
@@ -4805,13 +4906,14 @@ class NozzleTracker:
             search_bounds=bounds,
             expected_center=window_expected_center,
             search_circle=self.last_allowed_circle,
-            **self._options,
+            **detect_kwargs,
         )
 
     def update(
         self,
         image: np.ndarray,
         expected_center: Optional[tuple[float, float]] = None,
+        mode: Optional[str] = None,
     ) -> Detection:
         """Process one frame and return the current non-jumping lock."""
         if expected_center is not None and (
@@ -4821,6 +4923,7 @@ class NozzleTracker:
             raise ValueError("expected_center 必须是两个有限像素坐标")
         fixed_640 = image.shape[:2] == (480, 640)
         explicit_expected = expected_center is not None
+        detect_mode = _normalize_detect_mode(mode, explicit_expected)
         recovery_expected = False
         if explicit_expected and fixed_640:
             assert expected_center is not None
@@ -4845,6 +4948,7 @@ class NozzleTracker:
                 image,
                 local_lock=local_requested,
                 expected_center=expected_center,
+                mode=detect_mode,
             )
         except RuntimeError as local_error:
             if fixed_640 and self.strict_position_lock:

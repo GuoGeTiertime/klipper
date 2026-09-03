@@ -35,6 +35,7 @@ class XyCalDetect:
         self.enable_http = config.getboolean("enable_http", True)
 
         self._api = None
+        self._service = None
         self._server = None
         self._http_thread = None
         self._last_result = {}
@@ -45,6 +46,9 @@ class XyCalDetect:
         try:
             import detect_api as api  # noqa: WPS433 — path inserted above
             self._api = api
+            self._service = api.NozzleDetectionService(
+                self.snapshot_url, min_confidence=self.min_confidence
+            )
         except Exception as exc:
             self._import_error = str(exc)
             logging.exception("xycal_detect: failed to import detect_api")
@@ -75,6 +79,10 @@ class XyCalDetect:
                 self._import_error,
             )
             return
+        if self._service is None:
+            self._service = self._api.NozzleDetectionService(
+                self.snapshot_url, min_confidence=self.min_confidence
+            )
         if not self.enable_http or self.listen_port <= 0:
             logging.info(
                 "xycal_detect: HTTP disabled (enable_http=%s listen_port=%s); "
@@ -127,6 +135,10 @@ class XyCalDetect:
         except Exception:
             pass
 
+    def reset_tracker(self):
+        if self._service is not None:
+            self._service.reset()
+
     def detect_once(self, body):
         """Run one detect for other extras (xycal_calib). Updates last result/seq."""
         if self._api is None:
@@ -148,7 +160,14 @@ class XyCalDetect:
 
         def _work():
             try:
-                result_box.append(self._api.run_detect(body, self.snapshot_url))
+                kwargs = self._api._parse_body_detect_args(body, self.snapshot_url)
+                svc = self._service
+                if svc is None:
+                    svc = self._api.get_shared_service(
+                        kwargs.get("url") or self.snapshot_url,
+                        kwargs.get("min_confidence"),
+                    )
+                result_box.append(svc.detect(**kwargs))
             except Exception as exc:
                 result_box.append(
                     {
@@ -178,8 +197,9 @@ class XyCalDetect:
 
     cmd_XYCAL_DETECT_help = (
         "Run one nozzle tip detect (OpenCV worker). "
-        "Params: URL= RESET_FOLLOW= FLUSH= EXPECTED_X/Y= "
-        "MIN_CONF= MIN_RADIUS= MAX_RADIUS= SEARCH_W= SEARCH_H="
+        "Params: URL= RESET_FOLLOW= FLUSH= FRESH= MODE= EXPECTED_X/Y= "
+        "MIN_CONF= MIN_RADIUS= MAX_RADIUS= SEARCH_W= SEARCH_H= "
+        "SEARCH_DX= SEARCH_DY="
     )
 
     def cmd_XYCAL_DETECT(self, gcmd):
@@ -191,6 +211,8 @@ class XyCalDetect:
         url = gcmd.get("URL", self.snapshot_url)
         reset_follow = gcmd.get_int("RESET_FOLLOW", 0)
         flush_n = gcmd.get_int("FLUSH", 0, minval=0, maxval=8)
+        fresh = gcmd.get_int("FRESH", 0, minval=0, maxval=1)
+        mode = gcmd.get("MODE", None)
         expect_x = gcmd.get_float("EXPECTED_X", None)
         expect_y = gcmd.get_float("EXPECTED_Y", None)
         min_conf = gcmd.get_float(
@@ -198,6 +220,8 @@ class XyCalDetect:
         )
         search_w = gcmd.get_float("SEARCH_W", 80.0, above=8.0)
         search_h = gcmd.get_float("SEARCH_H", 72.0, above=8.0)
+        search_dx = gcmd.get_float("SEARCH_DX", None, above=0.0)
+        search_dy = gcmd.get_float("SEARCH_DY", None, above=0.0)
         min_radius = gcmd.get_float("MIN_RADIUS", None, above=0.0)
         max_radius = gcmd.get_float("MAX_RADIUS", None, above=0.0)
         body = {
@@ -206,9 +230,15 @@ class XyCalDetect:
             "search_width_px": search_w,
             "search_height_px": search_h,
             "flush_snapshot_count": flush_n,
+            "fresh_frame": bool(fresh),
             "reset_follow": bool(reset_follow),
             "insecure": True,
         }
+        if mode:
+            body["mode"] = str(mode).strip().lower()
+        if search_dx is not None and search_dy is not None:
+            body["search_delta_x"] = search_dx
+            body["search_delta_y"] = search_dy
         if min_radius is not None:
             body["min_radius_px"] = min_radius
         if max_radius is not None:
@@ -218,6 +248,8 @@ class XyCalDetect:
             body["expected_y"] = expect_y
         elif expect_x is not None or expect_y is not None:
             raise gcmd.error("EXPECTED_X and EXPECTED_Y must be set together")
+        if (search_dx is None) != (search_dy is None):
+            raise gcmd.error("SEARCH_DX and SEARCH_DY must be set together")
 
         self._busy = True
         try:
