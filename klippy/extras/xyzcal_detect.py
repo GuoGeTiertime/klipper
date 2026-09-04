@@ -482,7 +482,7 @@ def _parse_body_detect_args(body, default_url):
         if min_radius_px is None or max_radius_px is None:
             # Allow one-sided override via Service/Tracker configured radii
             radius_range = (
-                min_radius_px if min_radius_px is not None else 13.5,
+                min_radius_px if min_radius_px is not None else 10.0,
                 max_radius_px if max_radius_px is not None else 17.0,
             )
         else:

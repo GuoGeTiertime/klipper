@@ -133,7 +133,8 @@ class CameraProfile:
         384.0,
     )
     default_search_delta: tuple[float, float] = (40.0, 36.0)
-    default_radius_range: tuple[float, float] = (13.5, 17.0)
+    # 默认先宽门控便于首检；设备校准后再收窄
+    default_radius_range: tuple[float, float] = (10.0, 17.0)
     require_hex_lock: bool = True
     allow_fixed640_relocation: bool = False
 
@@ -145,7 +146,7 @@ class CameraProfile:
                 frame_size=(640, 480),
                 allowed_bounds=(160.0, 96.0, 480.0, 384.0),
                 default_search_delta=(40.0, 36.0),
-                default_radius_range=(13.5, 17.0),
+                default_radius_range=(10.0, 17.0),
                 require_hex_lock=True,
                 allow_fixed640_relocation=False,
             )
@@ -162,7 +163,7 @@ class CameraProfile:
             frame_size=(w, h),
             allowed_bounds=None,
             default_search_delta=(40.0, 36.0),
-            default_radius_range=(13.5, 17.0),
+            default_radius_range=(10.0, 17.0),
             require_hex_lock=False,
             allow_fixed640_relocation=True,
         )
@@ -4299,10 +4300,8 @@ def detect_nozzle(
         automatic_min = 18.0
         automatic_max = 32.0
     elif fixed_640_profile:
-        # Two real 640x480 live positions measure r=14.2 and r=14.3 px.
-        # The wider band tolerates focus/exposure changes while excluding the
-        # second nozzle, holder openings and background rings by physical size.
-        automatic_min = 13.5
+        # 默认先宽（10--17）保证多数机能首检；确认R后再收窄。
+        automatic_min = 10.0
         automatic_max = 17.0
 
     active_min_radius = (
@@ -4313,12 +4312,12 @@ def detect_nozzle(
     )
     if fixed_640_profile:
         # Explicit caller band (device-calibrated) is authoritative; only soft
-        # safety clamps apply. Default profile still uses 13.5--17 px.
+        # safety clamps apply. Default profile uses 10--17 px.
         if min_radius_px is not None and max_radius_px is not None:
             active_min_radius = max(5.0, min(60.0, float(active_min_radius)))
             active_max_radius = max(5.0, min(60.0, float(active_max_radius)))
         else:
-            active_min_radius = max(13.5, float(active_min_radius))
+            active_min_radius = max(10.0, float(active_min_radius))
             active_max_radius = min(17.0, float(active_max_radius))
         if active_min_radius > active_max_radius:
             raise RuntimeError("640x480 喷嘴跟踪半径范围不相交")
