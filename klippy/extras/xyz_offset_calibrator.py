@@ -3,7 +3,9 @@
 # Copyright (C) 2026 TierTime
 # This file may be distributed under the terms of the GNU GPLv3 license.
 
-from dataclasses import dataclass
+import math
+
+from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Optional
 
@@ -36,6 +38,8 @@ class NozzleDetectionProfile:
     radius_max_px: float                  # 可接受的喷嘴孔最大半径，单位 pixel
     min_confidence: float                 # 后续检测可接受的最低置信度
     fresh_frame_flush_count: int          # 后续取新帧前需要丢弃的缓存帧数
+    x_axis_maps_to_height: Optional[bool] = None  # X 轴是否对应图像高度方向
+    pixels_per_mm: Optional[float] = None         # 坐标轴每移动 1 mm 对应的像素数
 
 
 def _parse_tool(value):
@@ -48,7 +52,7 @@ def _parse_tool(value):
 
 
 class XYZOffsetCalibrator:
-    """Build the immutable detection profile from one initial capture."""
+    """Initialize and calibrate the dual-nozzle camera profile."""
 
     def __init__(self, config):
         self.printer = config.get_printer()
@@ -59,9 +63,18 @@ class XYZOffsetCalibrator:
         self.radius_tolerance = config.getfloat("radius_tolerance", 0.30, above=0.0, maxval=1.0)
         self.min_confidence = config.getfloat("min_confidence", 0.36, minval=0.0, maxval=1.0)
         self.fresh_frame_flush_count = config.getint("fresh_frame_flush_count", 2, minval=0)
+        self.xy_probe_mm = config.getfloat("xy_probe_mm", 0.5, above=0.0)
+        self.xy_reverse_mm = config.getfloat("xy_reverse_mm", 3.0, above=0.0)
+        self.move_speed = config.getfloat("move_speed", 10.0, above=0.0)
+        self.xy_settle_time = config.getfloat("xy_settle_time", 0.3, minval=0.0)
+        self.xy_min_move_px = config.getfloat("xy_min_move_px", 3.0, above=0.0)
+        self.xy_scale_tolerance = config.getfloat(
+            "xy_scale_tolerance", 0.35, above=0.0, maxval=1.0
+        )
 
         self.profile = None
         self.initial_point = None
+        self.xy_points = []
         self.initialized = False
         self.last_error = "not initialized"
 
@@ -75,11 +88,100 @@ class XYZOffsetCalibrator:
             self.cmd_XYZ_OFFSET_STATUS,
             desc=self.cmd_XYZ_OFFSET_STATUS_help,
         )
+        self.gcode.register_command(
+            "XYZ_OFFSET_CALIBRATE_XY",
+            self.cmd_XYZ_OFFSET_CALIBRATE_XY,
+            desc=self.cmd_XYZ_OFFSET_CALIBRATE_XY_help,
+        )
 
     def _current_position(self):
         toolhead = self.printer.lookup_object("toolhead")
         position = toolhead.get_position()
         return float(position[0]), float(position[1]), float(position[2])
+
+    def _abs_move(self, coordinate, speed=None):
+        """Move non-None XYZ coordinates to absolute machine positions."""
+        if len(coordinate) != 3:
+            raise ValueError("absolute move coordinate must contain X, Y, Z")
+        move_speed = self.move_speed if speed is None else float(speed)
+        if not math.isfinite(move_speed) or move_speed <= 0.0:
+            raise ValueError("move speed must be positive")
+        target = []
+        for value in coordinate:
+            if value is None:
+                target.append(None)
+                continue
+            value = float(value)
+            if not math.isfinite(value):
+                raise ValueError("absolute move position must be finite")
+            target.append(value)
+
+        toolhead = self.printer.lookup_object("toolhead")
+        toolhead.manual_move(target, move_speed)
+        if self.xy_settle_time > 0.0:
+            toolhead.dwell(self.xy_settle_time)
+        toolhead.wait_moves()
+
+    def _rel_move(self, delta, speed=None):
+        """Move non-None XYZ values relative to current machine positions."""
+        if len(delta) != 3:
+            raise ValueError("relative move delta must contain X, Y, Z")
+        toolhead = self.printer.lookup_object("toolhead")
+        position = toolhead.get_position()
+        coordinate = []
+        for axis_index, value in enumerate(delta):
+            if value is None:
+                coordinate.append(None)
+                continue
+            value = float(value)
+            if not math.isfinite(value):
+                raise ValueError("relative move distance must be finite")
+            coordinate.append(float(position[axis_index]) + value)
+        self._abs_move(coordinate, speed)
+
+    def _detect_at(self, expected_x, expected_y, tool):
+        profile = self.profile
+        finder = self.printer.lookup_object("nozzle_finder", None)
+        if finder is None:
+            raise RuntimeError("nozzle_finder is not defined or loaded")
+        expected_radius = 0.5 * (
+            profile.radius_min_px + profile.radius_max_px
+        )
+        finder.configure(
+            expected_x,
+            expected_y,
+            2.0 * profile.search_delta_x,
+            2.0 * profile.search_delta_y,
+            2.0 * expected_radius,
+        )
+        finder.set_diameter_scales(
+            profile.radius_min_px / expected_radius,
+            profile.radius_max_px / expected_radius,
+        )
+        result = finder.execute()
+        if not result.get("ok"):
+            raise RuntimeError(
+                "%s: %s"
+                % (
+                    result.get("error", "DETECT_FAILED"),
+                    result.get("detail", ""),
+                )
+            )
+        if (
+            int(result.get("frame_width", 0)) != profile.image_width
+            or int(result.get("frame_height", 0)) != profile.image_height
+        ):
+            raise RuntimeError("camera image size changed during XY calibration")
+        x, y, z = self._current_position()
+        return XYZPixelPoint(
+            x=x,
+            y=y,
+            z=z,
+            tool=tool,
+            pixel_x=float(result["cx"]),
+            pixel_y=float(result["cy"]),
+            detected=True,
+        )
 
     def initialize(self, tool=ToolType.MAIN):
         """Capture once, find the current nozzle, and build the profile."""
@@ -95,6 +197,7 @@ class XYZOffsetCalibrator:
         point = XYZPixelPoint(x=x, y=y, z=z, tool=tool)
         self.profile = None
         self.initial_point = point
+        self.xy_points = [point]
         self.initialized = False
 
         image = camera.capture()
@@ -163,6 +266,64 @@ class XYZOffsetCalibrator:
         self.last_error = ""
         return point, radius
 
+    def calibrate_xy(self):
+        """Measure image-axis mapping and pixels/mm with two Y moves."""
+        if not self.initialized or self.profile is None:
+            raise RuntimeError("run XYZ_OFFSET_INIT before XY calibration")
+        start = self.initial_point
+        if start is None or not start.detected:
+            raise RuntimeError("initial nozzle point is not available")
+        if self.xy_reverse_mm <= self.xy_probe_mm:
+            raise RuntimeError("xy_reverse_mm must be greater than xy_probe_mm")
+
+        self.xy_points = [start]
+        self._rel_move([None, self.xy_probe_mm, None])
+        probe = self._detect_at(start.pixel_x, start.pixel_y, start.tool)
+        self.xy_points.append(probe)
+
+        probe_y_mm = probe.y - start.y
+        if probe_y_mm <= 0.0:
+            raise RuntimeError("first Y movement did not reach the requested direction")
+        coarse_x = (probe.pixel_x - start.pixel_x) / probe_y_mm
+        coarse_y = (probe.pixel_y - start.pixel_y) / probe_y_mm
+        coarse_pixels_per_mm = math.hypot(coarse_x, coarse_y)
+        if coarse_pixels_per_mm * probe_y_mm < self.xy_min_move_px:
+            raise RuntimeError("first Y movement is too small in the image")
+        coarse_y_maps_to_height = abs(coarse_y) >= abs(coarse_x)
+
+        expected_x = probe.pixel_x - self.xy_reverse_mm * coarse_x
+        expected_y = probe.pixel_y - self.xy_reverse_mm * coarse_y
+        self._rel_move([None, -self.xy_reverse_mm, None])
+        final = self._detect_at(expected_x, expected_y, start.tool)
+        self.xy_points.append(final)
+
+        total_y_mm = start.y - final.y
+        if total_y_mm <= 0.0:
+            raise RuntimeError("final Y movement did not cross the initial position")
+        final_x = (start.pixel_x - final.pixel_x) / total_y_mm
+        final_y = (start.pixel_y - final.pixel_y) / total_y_mm
+        pixels_per_mm = math.hypot(final_x, final_y)
+        if pixels_per_mm * total_y_mm < self.xy_min_move_px:
+            raise RuntimeError("final Y movement is too small in the image")
+
+        final_y_maps_to_height = abs(final_y) >= abs(final_x)
+        if final_y_maps_to_height != coarse_y_maps_to_height:
+            raise RuntimeError("Y image-axis mapping is inconsistent")
+        dot = coarse_x * final_x + coarse_y * final_y
+        if dot <= 0.0:
+            raise RuntimeError("Y image direction is inconsistent")
+        scale_error = abs(pixels_per_mm - coarse_pixels_per_mm) / pixels_per_mm
+        if scale_error > self.xy_scale_tolerance:
+            raise RuntimeError("coarse and final pixels/mm are inconsistent")
+
+        self.profile = replace(
+            self.profile,
+            x_axis_maps_to_height=not final_y_maps_to_height,
+            pixels_per_mm=pixels_per_mm,
+        )
+        self.last_error = ""
+        return self.profile
+
     cmd_XYZ_OFFSET_INIT_help = (
         "Capture and initialize the dual-nozzle detection profile. "
         "Params: TOOL=MAIN|SECOND"
@@ -185,6 +346,25 @@ class XYZOffsetCalibrator:
             "XYZ_OFFSET_INIT ok=True tool=%s machine=(%.3f,%.3f,%.3f) "
             "pixel=(%.2f,%.2f), radius=%.2f"
             % (point.tool.value, point.x,  point.y, point.z, point.pixel_x, point.pixel_y, radius,)
+        )
+
+    cmd_XYZ_OFFSET_CALIBRATE_XY_help = (
+        "Calibrate image-axis mapping and pixels/mm with two Y movements"
+    )
+
+    def cmd_XYZ_OFFSET_CALIBRATE_XY(self, gcmd):
+        try:
+            profile = self.calibrate_xy()
+        except Exception as exc:
+            self.last_error = str(exc)
+            raise gcmd.error("XYZ_OFFSET_CALIBRATE_XY failed: %s" % (exc,))
+        gcmd.respond_info(
+            "XYZ_OFFSET_CALIBRATE_XY ok=True "
+            "x_axis_maps_to_height=%d pixels_per_mm=%.4f"
+            % (
+                1 if profile.x_axis_maps_to_height else 0,
+                profile.pixels_per_mm,
+            )
         )
 
     cmd_XYZ_OFFSET_STATUS_help = "Report the initialized detection profile"
@@ -214,6 +394,15 @@ class XYZOffsetCalibrator:
                 profile.fresh_frame_flush_count,
             )
         )
+        if profile.pixels_per_mm is not None:
+            gcmd.respond_info(
+                "XYZ_OFFSET_STATUS xy x_axis_maps_to_height=%d "
+                "pixels_per_mm=%.4f"
+                % (
+                    1 if profile.x_axis_maps_to_height else 0,
+                    profile.pixels_per_mm,
+                )
+            )
         gcmd.respond_info(
             "XYZ_OFFSET_STATUS point tool=%s machine=(%.3f,%.3f,%.3f) "
             "pixel=(%.2f,%.2f) detected=%d"
@@ -244,6 +433,8 @@ class XYZOffsetCalibrator:
                 "radius_max_px": profile.radius_max_px,
                 "min_confidence": profile.min_confidence,
                 "fresh_frame_flush_count": profile.fresh_frame_flush_count,
+                "x_axis_maps_to_height": profile.x_axis_maps_to_height,
+                "pixels_per_mm": profile.pixels_per_mm,
             },
             "initial_point": None if point is None else {
                 "x": point.x,
@@ -254,6 +445,18 @@ class XYZOffsetCalibrator:
                 "pixel_y": point.pixel_y,
                 "detected": point.detected,
             },
+            "xy_points": [
+                {
+                    "x": item.x,
+                    "y": item.y,
+                    "z": item.z,
+                    "tool": item.tool.value,
+                    "pixel_x": item.pixel_x,
+                    "pixel_y": item.pixel_y,
+                    "detected": item.detected,
+                }
+                for item in self.xy_points
+            ],
             "last_error": self.last_error,
         }
 
