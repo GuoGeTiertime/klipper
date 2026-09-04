@@ -40,6 +40,10 @@ class NozzleDetectionProfile:
     fresh_frame_flush_count: int          # 后续取新帧前需要丢弃的缓存帧数
     x_axis_maps_to_height: Optional[bool] = None  # X 轴是否对应图像高度方向
     pixels_per_mm: Optional[float] = None         # 坐标轴每移动 1 mm 对应的像素数
+    x_axis_pixel_x_per_mm: Optional[float] = None  # 机器 +X 引起的 Pixel X 变化量
+    x_axis_pixel_y_per_mm: Optional[float] = None  # 机器 +X 引起的 Pixel Y 变化量
+    y_axis_pixel_x_per_mm: Optional[float] = None  # 机器 +Y 引起的 Pixel X 变化量
+    y_axis_pixel_y_per_mm: Optional[float] = None  # 机器 +Y 引起的 Pixel Y 变化量
 
 
 def _parse_tool(value):
@@ -70,6 +74,9 @@ class XYZOffsetCalibrator:
         self.xy_min_move_px = config.getfloat("xy_min_move_px", 3.0, above=0.0)
         self.xy_scale_tolerance = config.getfloat(
             "xy_scale_tolerance", 0.35, above=0.0, maxval=1.0
+        )
+        self.xy_orthogonality_tolerance = config.getfloat(
+            "xy_orthogonality_tolerance", 0.35, minval=0.0, maxval=1.0
         )
 
         self.profile = None
@@ -267,7 +274,7 @@ class XYZOffsetCalibrator:
         return point, radius
 
     def calibrate_xy(self):
-        """Measure image-axis mapping and pixels/mm with two Y moves."""
+        """Measure signed XY image vectors with two Y moves and one X move."""
         if not self.initialized or self.profile is None:
             raise RuntimeError("run XYZ_OFFSET_INIT before XY calibration")
         start = self.initial_point
@@ -316,10 +323,49 @@ class XYZOffsetCalibrator:
         if scale_error > self.xy_scale_tolerance:
             raise RuntimeError("coarse and final pixels/mm are inconsistent")
 
+        self._rel_move([self.xy_probe_mm, None, None])
+        x_probe = self._detect_at(
+            final.pixel_x,
+            final.pixel_y,
+            start.tool,
+        )
+        self.xy_points.append(x_probe)
+
+        probe_x_mm = x_probe.x - final.x
+        if probe_x_mm <= 0.0:
+            raise RuntimeError("X movement did not reach the requested direction")
+        x_vector_x = (x_probe.pixel_x - final.pixel_x) / probe_x_mm
+        x_vector_y = (x_probe.pixel_y - final.pixel_y) / probe_x_mm
+        x_pixels_per_mm = math.hypot(x_vector_x, x_vector_y)
+        if x_pixels_per_mm * probe_x_mm < self.xy_min_move_px:
+            raise RuntimeError("X movement is too small in the image")
+
+        x_maps_to_height = abs(x_vector_y) >= abs(x_vector_x)
+        if x_maps_to_height == final_y_maps_to_height:
+            raise RuntimeError("X and Y map to the same image axis")
+        axis_scale_error = abs(x_pixels_per_mm - pixels_per_mm) / pixels_per_mm
+        if axis_scale_error > self.xy_scale_tolerance:
+            raise RuntimeError("X and Y pixels/mm are inconsistent")
+        normalized_dot = abs(
+            x_vector_x * final_x + x_vector_y * final_y
+        ) / (x_pixels_per_mm * pixels_per_mm)
+        if normalized_dot > self.xy_orthogonality_tolerance:
+            raise RuntimeError("X and Y image vectors are not orthogonal")
+
+        # 两轴独立测量并保留符号；允许镜像映射，行列式可正可负。
+        determinant = x_vector_x * final_y - x_vector_y * final_x
+        if not math.isfinite(determinant) or abs(determinant) < 1e-6:
+            raise RuntimeError("XY image mapping is singular or invalid")
+
+        pixels_per_mm = 0.5 * (x_pixels_per_mm + pixels_per_mm)
         self.profile = replace(
             self.profile,
-            x_axis_maps_to_height=not final_y_maps_to_height,
+            x_axis_maps_to_height=x_maps_to_height,
             pixels_per_mm=pixels_per_mm,
+            x_axis_pixel_x_per_mm=x_vector_x,
+            x_axis_pixel_y_per_mm=x_vector_y,
+            y_axis_pixel_x_per_mm=final_x,
+            y_axis_pixel_y_per_mm=final_y,
         )
         self.last_error = ""
         return self.profile
@@ -349,7 +395,7 @@ class XYZOffsetCalibrator:
         )
 
     cmd_XYZ_OFFSET_CALIBRATE_XY_help = (
-        "Calibrate image-axis mapping and pixels/mm with two Y movements"
+        "Calibrate signed XY image vectors with two Y moves and one X move"
     )
 
     def cmd_XYZ_OFFSET_CALIBRATE_XY(self, gcmd):
@@ -360,10 +406,15 @@ class XYZOffsetCalibrator:
             raise gcmd.error("XYZ_OFFSET_CALIBRATE_XY failed: %s" % (exc,))
         gcmd.respond_info(
             "XYZ_OFFSET_CALIBRATE_XY ok=True "
-            "x_axis_maps_to_height=%d pixels_per_mm=%.4f"
+            "x_axis_maps_to_height=%d pixels_per_mm=%.4f "
+            "vx=(%.4f,%.4f) vy=(%.4f,%.4f)"
             % (
                 1 if profile.x_axis_maps_to_height else 0,
                 profile.pixels_per_mm,
+                profile.x_axis_pixel_x_per_mm,
+                profile.x_axis_pixel_y_per_mm,
+                profile.y_axis_pixel_x_per_mm,
+                profile.y_axis_pixel_y_per_mm,
             )
         )
 
@@ -403,6 +454,15 @@ class XYZOffsetCalibrator:
                     profile.pixels_per_mm,
                 )
             )
+            gcmd.respond_info(
+                "XYZ_OFFSET_STATUS vectors vx=(%.4f,%.4f) vy=(%.4f,%.4f)"
+                % (
+                    profile.x_axis_pixel_x_per_mm,
+                    profile.x_axis_pixel_y_per_mm,
+                    profile.y_axis_pixel_x_per_mm,
+                    profile.y_axis_pixel_y_per_mm,
+                )
+            )
         gcmd.respond_info(
             "XYZ_OFFSET_STATUS point tool=%s machine=(%.3f,%.3f,%.3f) "
             "pixel=(%.2f,%.2f) detected=%d"
@@ -435,6 +495,10 @@ class XYZOffsetCalibrator:
                 "fresh_frame_flush_count": profile.fresh_frame_flush_count,
                 "x_axis_maps_to_height": profile.x_axis_maps_to_height,
                 "pixels_per_mm": profile.pixels_per_mm,
+                "x_axis_pixel_x_per_mm": profile.x_axis_pixel_x_per_mm,
+                "x_axis_pixel_y_per_mm": profile.x_axis_pixel_y_per_mm,
+                "y_axis_pixel_x_per_mm": profile.y_axis_pixel_x_per_mm,
+                "y_axis_pixel_y_per_mm": profile.y_axis_pixel_y_per_mm,
             },
             "initial_point": None if point is None else {
                 "x": point.x,
