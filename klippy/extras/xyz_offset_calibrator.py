@@ -84,13 +84,23 @@ class XYZOffsetCalibrator:
         self.center_max_iterations = config.getint(
             "center_max_iterations", 5, minval=1, maxval=5
         )
+        self.center_coarse_tolerance_px = config.getfloat(
+            "center_coarse_tolerance_px", 1.0, above=0.0
+        )
+        self.center_sample_distance_mm = config.getfloat(
+            "center_sample_distance_mm", 1.0, above=0.0
+        )
 
         self.profile = None
         self.initial_point = None
         self.xy_points = []
         self.center_points = []
+        self.center_sample_points = []
         self.center_point = None
         self.center_iterations = 0
+        self.center_mode = 0
+        self.center_average_pixel_x = None
+        self.center_average_pixel_y = None
         self.initialized = False
         self.last_error = "not initialized"
 
@@ -220,8 +230,12 @@ class XYZOffsetCalibrator:
         self.initial_point = point
         self.xy_points = [point]
         self.center_points = []
+        self.center_sample_points = []
         self.center_point = None
         self.center_iterations = 0
+        self.center_mode = 0
+        self.center_average_pixel_x = None
+        self.center_average_pixel_y = None
         self.initialized = False
 
         image = camera.capture()
@@ -413,29 +427,40 @@ class XYZOffsetCalibrator:
             raise RuntimeError("calculated XY center movement is invalid")
         return move_x, move_y
 
-    def center_xy_iterative(self):
+    def center_xy_iterative(self, tolerance_px=None):
         """Move the current nozzle to image center in at most five moves."""
         self._xy_mapping()
         if not self.xy_points:
             raise RuntimeError("no measured nozzle point is available")
 
         profile = self.profile
-        reference = self.xy_points[-1]
+        tolerance = (
+            self.center_tolerance_px
+            if tolerance_px is None
+            else float(tolerance_px)
+        )
+        if not math.isfinite(tolerance) or tolerance <= 0.0:
+            raise ValueError("center tolerance must be positive")
+        reference = self.center_point or self.xy_points[-1]
         current = self._detect_at(
             reference.pixel_x,
             reference.pixel_y,
             reference.tool,
         )
         self.center_points = [current]
+        self.center_sample_points = []
         self.center_point = None
         self.center_iterations = 0
+        self.center_mode = 0
+        self.center_average_pixel_x = None
+        self.center_average_pixel_y = None
 
         for iteration in range(self.center_max_iterations + 1):
             error_x = profile.center_pixel_x - current.pixel_x
             error_y = profile.center_pixel_y - current.pixel_y
             if (
-                abs(error_x) <= self.center_tolerance_px
-                and abs(error_y) <= self.center_tolerance_px
+                abs(error_x) <= tolerance
+                and abs(error_y) <= tolerance
             ):
                 self.center_point = current
                 self.center_iterations = iteration
@@ -461,6 +486,68 @@ class XYZOffsetCalibrator:
             "nozzle did not reach image center within %d movements"
             % (self.center_max_iterations,)
         )
+
+    def _sample_after_move(self, delta_x, delta_y, reference):
+        profile = self.profile
+        vx_x, vx_y, vy_x, vy_y, _ = self._xy_mapping()
+        expected_x = reference.pixel_x + vx_x * delta_x + vy_x * delta_y
+        expected_y = reference.pixel_y + vx_y * delta_x + vy_y * delta_y
+        self._rel_move([delta_x, delta_y, None])
+        return self._detect_at(
+            expected_x,
+            expected_y,
+            reference.tool,
+        )
+
+    def center_xy_five_point(self):
+        """Estimate image-center machine XY from center and four axial points."""
+        coarse = self.center_xy_iterative(self.center_coarse_tolerance_px)
+        distance = self.center_sample_distance_mm
+        samples = [coarse]
+
+        positive_x = self._sample_after_move(distance, 0.0, coarse)
+        samples.append(positive_x)
+        negative_x = self._sample_after_move(-2.0 * distance, 0.0, positive_x)
+        samples.append(negative_x)
+
+        self._rel_move([distance, None, None])
+        positive_y = self._sample_after_move(0.0, distance, coarse)
+        samples.append(positive_y)
+        negative_y = self._sample_after_move(0.0, -2.0 * distance, positive_y)
+        samples.append(negative_y)
+
+        sample_count = float(len(samples))
+        average_x = sum(point.x for point in samples) / sample_count
+        average_y = sum(point.y for point in samples) / sample_count
+        average_pixel_x = sum(point.pixel_x for point in samples) / sample_count
+        average_pixel_y = sum(point.pixel_y for point in samples) / sample_count
+        pixel_error_x = self.profile.center_pixel_x - average_pixel_x
+        pixel_error_y = self.profile.center_pixel_y - average_pixel_y
+        correction_x, correction_y = self._machine_delta_for_pixel_delta(
+            pixel_error_x,
+            pixel_error_y,
+        )
+        center_x = average_x + correction_x
+        center_y = average_y + correction_y
+        if not math.isfinite(center_x) or not math.isfinite(center_y):
+            raise RuntimeError("five-point center estimate is invalid")
+
+        self._abs_move([center_x, center_y, None])
+        self.center_sample_points = samples
+        self.center_average_pixel_x = average_pixel_x
+        self.center_average_pixel_y = average_pixel_y
+        self.center_point = XYZPixelPoint(
+            x=center_x,
+            y=center_y,
+            z=coarse.z,
+            tool=coarse.tool,
+            pixel_x=self.profile.center_pixel_x,
+            pixel_y=self.profile.center_pixel_y,
+            detected=True,
+        )
+        self.center_mode = 2
+        self.last_error = ""
+        return self.center_point
 
     cmd_XYZ_OFFSET_INIT_help = (
         "Capture and initialize the dual-nozzle detection profile. "
@@ -511,22 +598,27 @@ class XYZOffsetCalibrator:
         )
 
     cmd_XYZ_OFFSET_CENTER_help = (
-        "Center the current nozzle. Params: MODE=1"
+        "Center the current nozzle. Params: MODE=1|2"
     )
 
     def cmd_XYZ_OFFSET_CENTER(self, gcmd):
         mode = str(gcmd.get("MODE", "1")).strip().upper()
-        if mode not in ("1", "ITERATIVE", "CENTER"):
-            raise gcmd.error("XYZ_OFFSET_CENTER currently supports MODE=1")
         try:
-            point = self.center_xy_iterative()
+            if mode in ("1", "ITERATIVE", "CENTER"):
+                point = self.center_xy_iterative()
+                self.center_mode = 1
+            elif mode in ("2", "FIVE_POINT", "FIVE-POINT"):
+                point = self.center_xy_five_point()
+            else:
+                raise ValueError("MODE must be 1 or 2")
         except Exception as exc:
             self.last_error = str(exc)
             raise gcmd.error("XYZ_OFFSET_CENTER failed: %s" % (exc,))
         gcmd.respond_info(
-            "XYZ_OFFSET_CENTER ok=True mode=1 iterations=%d "
+            "XYZ_OFFSET_CENTER ok=True mode=%d iterations=%d "
             "machine=(%.4f,%.4f,%.4f) pixel=(%.3f,%.3f)"
             % (
+                self.center_mode,
                 self.center_iterations,
                 point.x,
                 point.y,
@@ -583,9 +675,10 @@ class XYZOffsetCalibrator:
             )
         if self.center_point is not None:
             gcmd.respond_info(
-                "XYZ_OFFSET_STATUS center iterations=%d "
+                "XYZ_OFFSET_STATUS center mode=%d iterations=%d "
                 "machine=(%.4f,%.4f,%.4f) pixel=(%.3f,%.3f)"
                 % (
+                    self.center_mode,
                     self.center_iterations,
                     self.center_point.x,
                     self.center_point.y,
@@ -594,6 +687,14 @@ class XYZOffsetCalibrator:
                     self.center_point.pixel_y,
                 )
             )
+            if self.center_mode == 2:
+                gcmd.respond_info(
+                    "XYZ_OFFSET_STATUS five_point average_pixel=(%.3f,%.3f)"
+                    % (
+                        self.center_average_pixel_x,
+                        self.center_average_pixel_y,
+                    )
+                )
         gcmd.respond_info(
             "XYZ_OFFSET_STATUS point tool=%s machine=(%.3f,%.3f,%.3f) "
             "pixel=(%.2f,%.2f) detected=%d"
@@ -662,6 +763,9 @@ class XYZOffsetCalibrator:
                 "detected": self.center_point.detected,
             },
             "center_iterations": self.center_iterations,
+            "center_mode": self.center_mode,
+            "center_average_pixel_x": self.center_average_pixel_x,
+            "center_average_pixel_y": self.center_average_pixel_y,
             "center_points": [
                 {
                     "x": item.x,
@@ -673,6 +777,18 @@ class XYZOffsetCalibrator:
                     "detected": item.detected,
                 }
                 for item in self.center_points
+            ],
+            "center_sample_points": [
+                {
+                    "x": item.x,
+                    "y": item.y,
+                    "z": item.z,
+                    "tool": item.tool.value,
+                    "pixel_x": item.pixel_x,
+                    "pixel_y": item.pixel_y,
+                    "detected": item.detected,
+                }
+                for item in self.center_sample_points
             ],
             "last_error": self.last_error,
         }
