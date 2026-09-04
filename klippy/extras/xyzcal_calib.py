@@ -1056,8 +1056,18 @@ class XyCalCalib:
 
     cmd_XYZCAL_CENTER_help = (
         "Host Center: probe X/Y, ±span FitY vy, fine correct. "
-        "Params: URL= PROBE_MM= TOL_PX= MAX_ITER= SPAN_MM="
+        "Params: URL= PROBE_MM= TOL_PX= MAX_ITER= SPAN_MM= TOOL=MAIN|SECOND"
     )
+
+    def _emit_center_session(self, gcmd):
+        session = self.printer.lookup_object("xyzcal_session", None)
+        if session is None:
+            return
+        tool_raw = gcmd.get("TOOL", "MAIN")
+        try:
+            session.on_center_done(self, gcmd, tool=tool_raw)
+        except Exception:
+            logging.exception("xyzcal_session: on_center_done failed")
 
     def cmd_XYZCAL_CENTER(self, gcmd):
         if self._busy:
@@ -1177,6 +1187,7 @@ class XyCalCalib:
                                 self._fity_vy_ok,
                             )
                         )
+                        self._emit_center_session(gcmd)
                         return
                     if last_err is not None and err_main > last_err + max(
                         8.0, 0.25 * last_err
