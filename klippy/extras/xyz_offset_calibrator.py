@@ -90,6 +90,7 @@ class XYZOffsetCalibrator:
         self.center_sample_distance_mm = config.getfloat(
             "center_sample_distance_mm", 1.0, above=0.0
         )
+        self.secondary_tool_macro = config.get("secondary_tool_macro", "").strip()
 
         self.profile = None
         self.initial_point = None
@@ -101,6 +102,10 @@ class XYZOffsetCalibrator:
         self.center_mode = 0
         self.center_average_pixel_x = None
         self.center_average_pixel_y = None
+        self.current_tool = ToolType.MAIN
+        self.tool_center_points = {}
+        self.xy_offset_x = None
+        self.xy_offset_y = None
         self.initialized = False
         self.last_error = "not initialized"
 
@@ -123,6 +128,11 @@ class XYZOffsetCalibrator:
             "XYZ_OFFSET_CENTER",
             self.cmd_XYZ_OFFSET_CENTER,
             desc=self.cmd_XYZ_OFFSET_CENTER_help,
+        )
+        self.gcode.register_command(
+            "XYZ_OFFSET_CALIBRATE_SECONDARY",
+            self.cmd_XYZ_OFFSET_CALIBRATE_SECONDARY,
+            desc=self.cmd_XYZ_OFFSET_CALIBRATE_SECONDARY_help,
         )
 
     def _current_position(self):
@@ -228,6 +238,10 @@ class XYZOffsetCalibrator:
         point = XYZPixelPoint(x=x, y=y, z=z, tool=tool)
         self.profile = None
         self.initial_point = point
+        self.current_tool = tool
+        self.tool_center_points = {}
+        self.xy_offset_x = None
+        self.xy_offset_y = None
         self.xy_points = [point]
         self.center_points = []
         self.center_sample_points = []
@@ -441,7 +455,19 @@ class XYZOffsetCalibrator:
         )
         if not math.isfinite(tolerance) or tolerance <= 0.0:
             raise ValueError("center tolerance must be positive")
-        reference = self.center_point or self.xy_points[-1]
+        reference = None
+        if (
+            self.center_point is not None
+            and self.center_point.tool == self.current_tool
+        ):
+            reference = self.center_point
+        if reference is None:
+            for measured_point in reversed(self.xy_points):
+                if measured_point.tool == self.current_tool:
+                    reference = measured_point
+                    break
+        if reference is None:
+            raise RuntimeError("no measured point for the current tool")
         current = self._detect_at(
             reference.pixel_x,
             reference.pixel_y,
@@ -464,6 +490,7 @@ class XYZOffsetCalibrator:
             ):
                 self.center_point = current
                 self.center_iterations = iteration
+                self.xy_points.append(current)
                 self.last_error = ""
                 return current
             if iteration >= self.center_max_iterations:
@@ -546,8 +573,53 @@ class XYZOffsetCalibrator:
             detected=True,
         )
         self.center_mode = 2
+        self.xy_points.append(self.center_point)
         self.last_error = ""
         return self.center_point
+
+    def _save_tool_center(self, point):
+        self.tool_center_points[point.tool] = point
+        main = self.tool_center_points.get(ToolType.MAIN)
+        secondary = self.tool_center_points.get(ToolType.SECOND)
+        if main is not None and secondary is not None:
+            self.xy_offset_x = secondary.x - main.x
+            self.xy_offset_y = secondary.y - main.y
+
+    def _center_by_mode(self, mode):
+        mode = str(mode).strip().upper()
+        if mode in ("1", "ITERATIVE", "CENTER"):
+            point = self.center_xy_iterative()
+            self.center_mode = 1
+            return point
+        if mode in ("2", "FIVE_POINT", "FIVE-POINT"):
+            return self.center_xy_five_point()
+        raise ValueError("MODE must be 1 or 2")
+
+    def calibrate_secondary(self, mode="1"):
+        if ToolType.MAIN not in self.tool_center_points:
+            raise RuntimeError("center the main tool before calibrating secondary")
+        if not self.secondary_tool_macro:
+            raise RuntimeError("secondary_tool_macro is not configured")
+
+        self.gcode.run_script_from_command(self.secondary_tool_macro)
+        toolhead = self.printer.lookup_object("toolhead")
+        toolhead.wait_moves()
+        self.current_tool = ToolType.SECOND
+        self.center_point = None
+        self.center_sample_points = []
+        self.center_average_pixel_x = None
+        self.center_average_pixel_y = None
+
+        profile = self.profile
+        secondary_start = self._detect_at(
+            profile.center_pixel_x,
+            profile.center_pixel_y,
+            ToolType.SECOND,
+        )
+        self.xy_points.append(secondary_start)
+        point = self._center_by_mode(mode)
+        self._save_tool_center(point)
+        return point
 
     cmd_XYZ_OFFSET_INIT_help = (
         "Capture and initialize the dual-nozzle detection profile. "
@@ -604,13 +676,8 @@ class XYZOffsetCalibrator:
     def cmd_XYZ_OFFSET_CENTER(self, gcmd):
         mode = str(gcmd.get("MODE", "1")).strip().upper()
         try:
-            if mode in ("1", "ITERATIVE", "CENTER"):
-                point = self.center_xy_iterative()
-                self.center_mode = 1
-            elif mode in ("2", "FIVE_POINT", "FIVE-POINT"):
-                point = self.center_xy_five_point()
-            else:
-                raise ValueError("MODE must be 1 or 2")
+            point = self._center_by_mode(mode)
+            self._save_tool_center(point)
         except Exception as exc:
             self.last_error = str(exc)
             raise gcmd.error("XYZ_OFFSET_CENTER failed: %s" % (exc,))
@@ -625,6 +692,32 @@ class XYZOffsetCalibrator:
                 point.z,
                 point.pixel_x,
                 point.pixel_y,
+            )
+        )
+
+    cmd_XYZ_OFFSET_CALIBRATE_SECONDARY_help = (
+        "Switch to and center the secondary tool. Params: MODE=1|2"
+    )
+
+    def cmd_XYZ_OFFSET_CALIBRATE_SECONDARY(self, gcmd):
+        mode = str(gcmd.get("MODE", "1")).strip().upper()
+        try:
+            point = self.calibrate_secondary(mode)
+        except Exception as exc:
+            self.last_error = str(exc)
+            raise gcmd.error(
+                "XYZ_OFFSET_CALIBRATE_SECONDARY failed: %s" % (exc,)
+            )
+        gcmd.respond_info(
+            "XYZ_OFFSET_CALIBRATE_SECONDARY ok=True mode=%d "
+            "machine=(%.4f,%.4f,%.4f) xy_offset=(%.4f,%.4f)"
+            % (
+                self.center_mode,
+                point.x,
+                point.y,
+                point.z,
+                self.xy_offset_x,
+                self.xy_offset_y,
             )
         )
 
@@ -695,6 +788,11 @@ class XYZOffsetCalibrator:
                         self.center_average_pixel_y,
                     )
                 )
+        if self.xy_offset_x is not None and self.xy_offset_y is not None:
+            gcmd.respond_info(
+                "XYZ_OFFSET_STATUS tool_offset secondary_minus_main=(%.4f,%.4f)"
+                % (self.xy_offset_x, self.xy_offset_y)
+            )
         gcmd.respond_info(
             "XYZ_OFFSET_STATUS point tool=%s machine=(%.3f,%.3f,%.3f) "
             "pixel=(%.2f,%.2f) detected=%d"
@@ -790,6 +888,19 @@ class XYZOffsetCalibrator:
                 }
                 for item in self.center_sample_points
             ],
+            "tool_center_points": {
+                tool.value: {
+                    "x": item.x,
+                    "y": item.y,
+                    "z": item.z,
+                    "pixel_x": item.pixel_x,
+                    "pixel_y": item.pixel_y,
+                    "detected": item.detected,
+                }
+                for tool, item in self.tool_center_points.items()
+            },
+            "xy_offset_x": self.xy_offset_x,
+            "xy_offset_y": self.xy_offset_y,
             "last_error": self.last_error,
         }
 
