@@ -16,8 +16,11 @@ import math
 import sys
 import threading
 import time
+from dataclasses import asdict, dataclass
+from enum import Enum
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from typing import Optional
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import cv2
@@ -700,6 +703,69 @@ def create_http_server(host, port, default_snapshot):
 
 
 # --- Klipper plugin ---
+# Center session Profile/Point (migrated from xyzcal_session; Phase 2 will scale by frame size)
+
+
+class ToolType(str, Enum):
+    MAIN = "MAIN"
+    SECOND = "SECOND"
+
+
+@dataclass
+class XYZPixelPoint:
+    x: float
+    y: float
+    z: float
+    tool: ToolType
+    pixel_x: Optional[float] = None
+    pixel_y: Optional[float] = None
+    detected: bool = False
+
+
+@dataclass(frozen=True)
+class NozzleDetectionProfile:
+    snapshot_url: str
+    target_pixel_x: float
+    target_pixel_y: float
+    search_delta_x: float
+    search_delta_y: float
+    radius_min_px: float
+    radius_max_px: float
+    calib_px_mm: float
+    min_confidence: float
+    fresh_frame_flush_count: int = 2
+
+
+@dataclass
+class DetectCallContext:
+    """Per-call Detect params (not part of frozen Profile)."""
+
+    expected_pixel_x: Optional[float] = None
+    expected_pixel_y: Optional[float] = None
+    mode: str = ""
+    reset_tracker: bool = False
+
+
+def _parse_tool(raw):
+    s = str(raw or "MAIN").strip().upper()
+    if s in ("SEC", "SECOND", "T1", "1"):
+        return ToolType.SECOND
+    return ToolType.MAIN
+
+
+_PROFILE_STATUS_KEYS = (
+    "snapshot_url",
+    "target_pixel_x",
+    "target_pixel_y",
+    "search_delta_x",
+    "search_delta_y",
+    "radius_min_px",
+    "radius_max_px",
+    "calib_px_mm",
+    "min_confidence",
+    "fresh_frame_flush_count",
+)
+
 
 class XyCalDetect:
     def __init__(self, config):
@@ -732,6 +798,13 @@ class XyCalDetect:
         self._busy = False
         self._detect_seq = 0
 
+        # Center session snapshot (filled on XYZCAL_CENTER success)
+        self.profile = None  # type: Optional[NozzleDetectionProfile]
+        self.point = None  # type: Optional[XYZPixelPoint]
+        self.last_detect = DetectCallContext()
+        self.session_ready = False
+        self._session_message = ""
+
         try:
             self._api = sys.modules[__name__]
             self._service = NozzleDetectionService(
@@ -761,6 +834,17 @@ class XyCalDetect:
             "XYZCAL_SET_NOZZLE_RADIUS",
             self.cmd_XYZCAL_SET_NOZZLE_RADIUS,
             desc=self.cmd_XYZCAL_SET_NOZZLE_RADIUS_help,
+        )
+        self.gcode.register_command(
+            "XYZCAL_PROFILE_DUMP",
+            self.cmd_XYZCAL_PROFILE_DUMP,
+            desc=self.cmd_XYZCAL_PROFILE_DUMP_help,
+        )
+        # Compat alias (was xyzcal_session)
+        self.gcode.register_command(
+            "XYZCAL_SESSION_DUMP",
+            self.cmd_XYZCAL_PROFILE_DUMP,
+            desc=self.cmd_XYZCAL_PROFILE_DUMP_help,
         )
         self.printer.register_event_handler("klippy:ready", self._handle_ready)
         self.printer.register_event_handler("klippy:disconnect", self._handle_disconnect)
@@ -1036,6 +1120,185 @@ class XyCalDetect:
             % (self.nozzle_radius_px, self.nozzle_radius_tol, band[0], band[1])
         )
 
+    def build_profile_from_center(self, calib, tool=ToolType.MAIN):
+        """Fill Profile + Point from a successful Center run on calib."""
+        url = str(self.snapshot_url or "")
+        if not url:
+            url = str(getattr(calib, "snapshot_url", "") or "")
+        try:
+            tol = float(self.nozzle_radius_tol or 0.15)
+        except (TypeError, ValueError):
+            tol = 0.15
+
+        fw = float(getattr(calib, "_last_fw", 0) or 0)
+        fh = float(getattr(calib, "_last_fh", 0) or 0)
+        if fw < 40 or fh < 40:
+            fw, fh = 640.0, 480.0
+
+        # Match xyzcal_calib._detect hard window 80x72
+        search_dx = 40.0
+        search_dy = 36.0
+
+        r = float(getattr(calib, "_last_r", 0) or 0)
+        if r > 0.0:
+            half = max(1.5, r * tol)
+            r_min = max(5.0, r - half)
+            r_max = min(60.0, r + half)
+        else:
+            r_min, r_max = 10.0, 17.0
+
+        if getattr(calib, "_fity_vy_ok", False):
+            vx = float(getattr(calib, "_fity_vy_x", 0) or 0)
+            vy = float(getattr(calib, "_fity_vy_y", 0) or 0)
+        else:
+            vx = float(getattr(calib, "_vy_x", 0) or 0)
+            vy = float(getattr(calib, "_vy_y", 0) or 0)
+        calib_px_mm = math.hypot(vx, vy)
+        if not math.isfinite(calib_px_mm) or calib_px_mm < 1.0:
+            calib_px_mm = 0.0
+
+        conf = float(getattr(calib, "min_confidence", self.min_confidence) or self.min_confidence)
+
+        self.profile = NozzleDetectionProfile(
+            snapshot_url=url,
+            target_pixel_x=0.5 * fw,
+            target_pixel_y=0.5 * fh,
+            search_delta_x=search_dx,
+            search_delta_y=search_dy,
+            radius_min_px=r_min,
+            radius_max_px=r_max,
+            calib_px_mm=calib_px_mm,
+            min_confidence=conf,
+            fresh_frame_flush_count=2,
+        )
+
+        cx = float(getattr(calib, "_last_cx", -1) or -1)
+        cy = float(getattr(calib, "_last_cy", -1) or -1)
+        detected = cx >= 0.0 and cy >= 0.0 and r > 0.0
+        thx = getattr(calib, "_toolhead_x", None)
+        thy = getattr(calib, "_toolhead_y", None)
+        thz = getattr(calib, "_toolhead_z", None)
+        self.point = XYZPixelPoint(
+            x=float(thx) if thx is not None else 0.0,
+            y=float(thy) if thy is not None else 0.0,
+            z=float(thz) if thz is not None else 0.0,
+            tool=tool if isinstance(tool, ToolType) else _parse_tool(tool),
+            pixel_x=cx if detected else None,
+            pixel_y=cy if detected else None,
+            detected=detected,
+        )
+
+        ex = getattr(calib, "_last_expect_x", None)
+        ey = getattr(calib, "_last_expect_y", None)
+        self.last_detect = DetectCallContext(
+            expected_pixel_x=float(ex) if ex is not None else None,
+            expected_pixel_y=float(ey) if ey is not None else None,
+            mode="track",
+            reset_tracker=False,
+        )
+        self.session_ready = True
+        self._session_message = "center_ok"
+        return self.profile, self.point
+
+    def apply_radius_from_profile(self):
+        """Push tip radius into runtime so later Detect uses the band."""
+        if not self.session_ready or self.profile is None or self.point is None:
+            return
+        if not self.point.detected:
+            return
+        r_min = float(self.profile.radius_min_px)
+        r_max = float(self.profile.radius_max_px)
+        r = 0.5 * (r_min + r_max)
+        calib = self.printer.lookup_object("xyzcal_calib", None)
+        if calib is not None:
+            tip_r = float(getattr(calib, "_last_r", 0) or 0)
+            if tip_r > 0.0:
+                r = tip_r
+        self.nozzle_radius_px = float(r)
+        # Center 后略放宽 tol，避免 tip±15% 过窄导致随后 track 拒检
+        self.nozzle_radius_tol = max(float(self.nozzle_radius_tol or 0.15), 0.20)
+        band = self.calibrated_radius_band()
+        logging.info(
+            "xyzcal_detect: profile nozzle_radius_px=%.2f band=%s tol=%.3f",
+            r,
+            band,
+            self.nozzle_radius_tol,
+        )
+
+    def on_center_done(self, calib, gcmd, tool=ToolType.MAIN):
+        tool_e = tool if isinstance(tool, ToolType) else _parse_tool(tool)
+        self.build_profile_from_center(calib, tool=tool_e)
+        self.apply_radius_from_profile()
+        self.emit_profile(gcmd)
+
+    def emit_profile(self, gcmd):
+        if not self.session_ready or self.profile is None or self.point is None:
+            gcmd.respond_info("XYZCAL_PROFILE ready=0 (run XYZCAL_CENTER first)")
+            return
+        p = self.profile
+        pt = self.point
+        d = self.last_detect
+        gcmd.respond_info(
+            "XYZCAL_PROFILE profile "
+            "snapshot_url=%s "
+            "target_pixel_x=%.1f target_pixel_y=%.1f "
+            "search_delta_x=%.1f search_delta_y=%.1f "
+            "radius_min_px=%.2f radius_max_px=%.2f "
+            "calib_px_mm=%.3f "
+            "min_confidence=%.3f "
+            "fresh_frame_flush_count=%d"
+            % (
+                p.snapshot_url,
+                p.target_pixel_x,
+                p.target_pixel_y,
+                p.search_delta_x,
+                p.search_delta_y,
+                p.radius_min_px,
+                p.radius_max_px,
+                p.calib_px_mm,
+                p.min_confidence,
+                p.fresh_frame_flush_count,
+            )
+        )
+        gcmd.respond_info(
+            "XYZCAL_PROFILE point "
+            "x=%.3f y=%.3f z=%.3f "
+            "tool=%s "
+            "pixel_x=%s pixel_y=%s "
+            "detected=%d"
+            % (
+                pt.x,
+                pt.y,
+                pt.z,
+                pt.tool.value,
+                ("%.2f" % pt.pixel_x) if pt.pixel_x is not None else "nan",
+                ("%.2f" % pt.pixel_y) if pt.pixel_y is not None else "nan",
+                1 if pt.detected else 0,
+            )
+        )
+        gcmd.respond_info(
+            "XYZCAL_PROFILE detect "
+            "expected_pixel_x=%s expected_pixel_y=%s "
+            "mode=%s reset_tracker=%d"
+            % (
+                ("%.2f" % d.expected_pixel_x)
+                if d.expected_pixel_x is not None
+                else "nan",
+                ("%.2f" % d.expected_pixel_y)
+                if d.expected_pixel_y is not None
+                else "nan",
+                d.mode or "",
+                1 if d.reset_tracker else 0,
+            )
+        )
+
+    cmd_XYZCAL_PROFILE_DUMP_help = (
+        "Dump last Center Profile + Point (alias: XYZCAL_SESSION_DUMP). No params."
+    )
+
+    def cmd_XYZCAL_PROFILE_DUMP(self, gcmd):
+        self.emit_profile(gcmd)
+
     def _status_list(self, value):
         if value is None:
             return None
@@ -1049,10 +1312,51 @@ class XyCalDetect:
             return out
         return None
 
+    def _profile_status(self):
+        out = {
+            "session_ready": bool(self.session_ready),
+            "session_message": self._session_message or "",
+            # Compat keys previously on xyzcal_session
+            "ready": bool(self.session_ready),
+            "message": self._session_message or "",
+        }
+        if self.profile is not None:
+            for k, v in asdict(self.profile).items():
+                out["profile_%s" % k] = v
+        else:
+            for k in _PROFILE_STATUS_KEYS:
+                out["profile_%s" % k] = None if k == "snapshot_url" else 0
+        if self.point is not None:
+            out["point_x"] = self.point.x
+            out["point_y"] = self.point.y
+            out["point_z"] = self.point.z
+            out["point_tool"] = self.point.tool.value
+            out["point_pixel_x"] = self.point.pixel_x
+            out["point_pixel_y"] = self.point.pixel_y
+            out["point_detected"] = bool(self.point.detected)
+        else:
+            out.update(
+                {
+                    "point_x": 0.0,
+                    "point_y": 0.0,
+                    "point_z": 0.0,
+                    "point_tool": "",
+                    "point_pixel_x": None,
+                    "point_pixel_y": None,
+                    "point_detected": False,
+                }
+            )
+        d = self.last_detect
+        out["detect_expected_x"] = d.expected_pixel_x
+        out["detect_expected_y"] = d.expected_pixel_y
+        out["detect_mode"] = d.mode or ""
+        out["detect_reset_tracker"] = bool(d.reset_tracker)
+        return out
+
     def get_status(self, eventtime=None):
         r = self._last_result or {}
         # Moonraker objects/query：同时提供 last_* 与 HTTP 同名字段，方便屏端映射
-        return {
+        out = {
             "http_enabled": bool(self.enable_http and self.listen_port > 0),
             "listen_host": self.listen_host,
             "listen_port": self.listen_port,
@@ -1095,6 +1399,8 @@ class XyCalDetect:
             if self._api
             else "",
         }
+        out.update(self._profile_status())
+        return out
 
 
 def load_config(config):

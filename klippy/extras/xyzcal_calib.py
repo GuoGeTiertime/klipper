@@ -909,14 +909,14 @@ class XyCalCalib:
     )
 
     def _emit_center_session(self, gcmd):
-        session = self.printer.lookup_object("xyzcal_session", None)
-        if session is None:
+        det = self.printer.lookup_object("xyzcal_detect", None)
+        if det is None:
             return
         tool_raw = gcmd.get("TOOL", "MAIN")
         try:
-            session.on_center_done(self, gcmd, tool=tool_raw)
+            det.on_center_done(self, gcmd, tool=tool_raw)
         except Exception:
-            logging.exception("xyzcal_session: on_center_done failed")
+            logging.exception("xyzcal_detect: on_center_done failed")
 
     def cmd_XYZCAL_CENTER(self, gcmd):
         if self._busy:
