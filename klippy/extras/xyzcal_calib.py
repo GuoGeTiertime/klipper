@@ -6,11 +6,8 @@
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
 
-import json
 import logging
 import math
-import os
-import time
 
 
 # Same Y offsets as ScreenQML fitYOffsetsMm
@@ -73,11 +70,6 @@ class XyCalCalib:
         self.z_ghost_fine = _cfg_float_list(
             config, "z_ghost_fine", DEFAULT_Z_GHOST_FINE
         )
-        # 每次校准单独存档；空则 ~/printer_data/logs/xyzcal
-        self.calib_log_dir = config.get("calib_log_dir", "").strip()
-        self._last_calib_file = ""
-        self._calib_session = ""
-
         self._busy = False
         self._cancel = False
         self._phase = "idle"
@@ -513,27 +505,6 @@ class XyCalCalib:
                 ),
             )
         )
-        # 主喷基线也按「一个 Z」存详细点位
-        _, _, mz_now = self._toolhead_xyz()
-        main_row = {
-            "pass": "main",
-            "off": 0.0,
-            "z": float(mz_now) if mz_now is not None else float(main_z),
-            "ok": True,
-            "dcx": self._dcx_main_dcx45,
-            "fity_dcx45": self._fity_dcx45,
-            "fity_dcx45_raw": self._fity_dcx45_raw,
-            "fity_samples": [
-                {
-                    "mm": float(s.get("mm", 0)),
-                    "cx": float(s.get("cx", 0)),
-                    "cy": float(s.get("cy", 0)),
-                    "r": float(s.get("r", 0) or 0),
-                }
-                for s in self._fity_samples
-            ],
-        }
-        self._write_dcxz_z_record(gcmd, main_row)
         return self._dcx_main_dcx45
 
 
@@ -559,7 +530,6 @@ class XyCalCalib:
                     }
                 )
                 self._dcx_rebuild_report(self._dcx_main_dcx45 or 0.0, rows)
-                self._write_dcxz_z_record(gcmd, rows[-1])
                 continue
             self._set_phase(
                 "dcx_scan",
@@ -605,7 +575,6 @@ class XyCalCalib:
                     }
                 )
             self._dcx_rebuild_report(self._dcx_main_dcx45 or 0.0, rows)
-            self._write_dcxz_z_record(gcmd, rows[-1])
 
     def _run_dcxz_scan_pm45(
         self, gcmd, main_z, sec_x, sec_y, offsets, pass_tag, rows
@@ -759,126 +728,6 @@ class XyCalCalib:
         if gcmd.get("T1_REF", None) is not None:
             return gcmd.get_float("T1_REF", default)
         return self._read_save_var_float("t1_offset_z", default)
-
-    def _resolve_calib_log_dir(self):
-        candidates = []
-        if self.calib_log_dir:
-            candidates.append(os.path.expanduser(self.calib_log_dir))
-        candidates.extend(
-            [
-                os.path.expanduser("~/printer_data/logs/xyzcal"),
-                "/tmp/xyzcal_calib",
-            ]
-        )
-        for path in candidates:
-            try:
-                if not os.path.isdir(path):
-                    os.makedirs(path)
-                if os.path.isdir(path) and os.access(path, os.W_OK):
-                    return path
-            except Exception:
-                continue
-        return None
-
-    def _dcxz_record_payload(self):
-        return {
-            "main_dcx45": self._dcx_main_dcx45,
-            "main_dcx45_raw": self._dcx_main_dcx45_raw,
-            "solved_offset": self._dcx_solved_offset,
-            "report": self._dcx_report,
-            "rows": list(self._dcx_rows),
-        }
-
-    def _write_calib_record(self, kind, data, gcmd=None, file_tag=""):
-        """写独立 JSON；失败只记 log，不影响校准。"""
-        try:
-            directory = self._resolve_calib_log_dir()
-            if not directory:
-                logging.warning("xyzcal calib file: no writable calib_log_dir")
-                return ""
-            stamp = time.strftime("%Y%m%d_%H%M%S")
-            tag = str(file_tag or kind or "calib").replace(" ", "")
-            # 避免同秒多档互相覆盖
-            name = "xyzcal_%s_%s.json" % (stamp, tag)
-            path = os.path.join(directory, name)
-            if os.path.exists(path):
-                name = "xyzcal_%s_%s_%d.json" % (stamp, tag, int(time.time() * 1000) % 1000)
-                path = os.path.join(directory, name)
-            payload = {
-                "kind": str(kind or "calib"),
-                "session": self._calib_session or stamp,
-                "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                "unix": time.time(),
-            }
-            if isinstance(data, dict):
-                payload.update(data)
-            with open(path, "w") as f:
-                json.dump(payload, f, indent=2, sort_keys=False)
-                f.write("\n")
-            self._last_calib_file = path
-            logging.info("xyzcal calib file saved: %s", path)
-            if gcmd is not None:
-                try:
-                    gcmd.respond_info("XYZCAL calib file: %s" % path)
-                except Exception:
-                    pass
-            return path
-        except Exception:
-            logging.exception("xyzcal calib file write failed")
-            return ""
-
-    def _write_dcxz_z_record(self, gcmd, row):
-        """每个 Z 档测完存一份详细数据（含 FitY 点位 / pm45 坐标）。"""
-        if not isinstance(row, dict):
-            return ""
-        pass_tag = str(row.get("pass") or "z")
-        off = float(row.get("off", 0) or 0)
-        z = float(row.get("z", 0) or 0)
-        main = self._dcx_main_dcx45
-        dcx = row.get("dcx")
-        vs = None
-        if row.get("ok") and dcx is not None and main is not None:
-            vs = float(dcx) - float(main)
-        samples = row.get("fity_samples")
-        if not samples and pass_tag == "fine" and self._fity_samples:
-            samples = [
-                {
-                    "mm": float(s.get("mm", 0)),
-                    "cx": float(s.get("cx", 0)),
-                    "cy": float(s.get("cy", 0)),
-                    "r": float(s.get("r", 0) or 0),
-                }
-                for s in self._fity_samples
-            ]
-        detail = {
-            "pass": pass_tag,
-            "off": off,
-            "z": z,
-            "ok": bool(row.get("ok")),
-            "dcx": float(dcx) if dcx is not None else None,
-            "vs_main": vs,
-            "reason": row.get("reason") or "",
-            "main_dcx45": self._dcx_main_dcx45,
-            "main_dcx45_raw": self._dcx_main_dcx45_raw,
-            "fity_dcx45": row.get("fity_dcx45", self._fity_dcx45),
-            "fity_dcx45_raw": row.get(
-                "fity_dcx45_raw", self._fity_dcx45_raw
-            ),
-            "fity_samples": list(samples or []),
-            "cx_pos": row.get("cx_pos"),
-            "cy_pos": row.get("cy_pos"),
-            "cx_neg": row.get("cx_neg"),
-            "cy_neg": row.get("cy_neg"),
-            "tip": {
-                "cx": self._last_cx,
-                "cy": self._last_cy,
-                "r": self._last_r,
-            },
-        }
-        file_tag = "%s_off%+.2f_z%.2f" % (pass_tag, off, z)
-        return self._write_calib_record(
-            "dcxz_z", detail, gcmd=gcmd, file_tag=file_tag
-        )
 
     def _circle_match(self, ghost_cx, ghost_cy, ghost_r, result, tol_px, dr_tol):
         if not result or not self._looks_like_tip(result):
@@ -1116,7 +965,13 @@ class XyCalCalib:
             gcmd.respond_info("XYZCAL_CENTER: probe X +%.2f" % probe_mm)
             self._rel_move("X", probe_mm)
             self._check_cancel(gcmd)
-            tip_x = self._detect(gcmd, fresh_frame=True, mode="track")
+            # track 必须带 expected；探针前尚无矩阵，用上一 tip 作窗心（0.6mm≈14px 仍落在 80×72 内）
+            tip_x = self._detect_tip(
+                gcmd,
+                after_motion=True,
+                expected=(cx0, cy0),
+                mode="track",
+            )
             if not self._looks_like_tip(tip_x):
                 raise gcmd.error("XYZCAL_CENTER: lost tip after +X")
             ok, detail = self._apply_probe(
@@ -1131,7 +986,12 @@ class XyCalCalib:
             gcmd.respond_info("XYZCAL_CENTER: probe Y +%.2f" % probe_mm)
             self._rel_move("Y", probe_mm)
             self._check_cancel(gcmd)
-            tip_y = self._detect(gcmd, fresh_frame=True, mode="track")
+            tip_y = self._detect_tip(
+                gcmd,
+                after_motion=True,
+                expected=(cx0, cy0),
+                mode="track",
+            )
             if not self._looks_like_tip(tip_y):
                 raise gcmd.error("XYZCAL_CENTER: lost tip after +Y")
             ok, detail = self._apply_probe(
@@ -1151,7 +1011,20 @@ class XyCalCalib:
             self._rel_move("X", -probe_mm)
             self._rel_move("Y", -probe_mm)
             self._check_cancel(gcmd)
-            tip = self._detect_tip(gcmd, after_motion=True, mode="acquire")
+            undo_ex = (
+                float(tip_y["cx_px"])
+                - probe_mm * float(self._vx_x)
+                - probe_mm * float(self._vy_x),
+                float(tip_y["cy_px"])
+                - probe_mm * float(self._vx_y)
+                - probe_mm * float(self._vy_y),
+            )
+            tip = self._detect_tip(
+                gcmd,
+                after_motion=True,
+                expected=undo_ex,
+                mode="track",
+            )
             if not self._looks_like_tip(tip):
                 raise gcmd.error(
                     "XYZCAL_CENTER: lost tip after undo (%s)"
@@ -1761,27 +1634,6 @@ class XyCalCalib:
                 else None
             )
             gcmd.respond_info("XYZCAL_DCXZ: main dcx45=%.2f" % self._dcx_main_dcx45)
-            self._write_dcxz_z_record(
-                gcmd,
-                {
-                    "pass": "main",
-                    "off": 0.0,
-                    "z": float(main_z),
-                    "ok": True,
-                    "dcx": self._dcx_main_dcx45,
-                    "fity_dcx45": self._fity_dcx45,
-                    "fity_dcx45_raw": self._fity_dcx45_raw,
-                    "fity_samples": [
-                        {
-                            "mm": float(s.get("mm", 0)),
-                            "cx": float(s.get("cx", 0)),
-                            "cy": float(s.get("cy", 0)),
-                            "r": float(s.get("r", 0) or 0),
-                        }
-                        for s in self._fity_samples
-                    ],
-                },
-            )
 
         off = float(off_hi)
         off_lo = float(off_lo)
@@ -1800,7 +1652,6 @@ class XyCalCalib:
                         "reason": "z<min",
                     }
                 )
-                self._write_dcxz_z_record(gcmd, rows[-1])
                 off = round((off - step) * 1000.0) / 1000.0
                 continue
             self._set_phase(
@@ -1859,7 +1710,6 @@ class XyCalCalib:
                         "reason": str(exc),
                     }
                 )
-            self._write_dcxz_z_record(gcmd, rows[-1])
             off = round((off - step) * 1000.0) / 1000.0
         return self._dcx_main_dcx45
 
@@ -1961,7 +1811,6 @@ class XyCalCalib:
             write = bool(write_override)
         else:
             write = gcmd.get_int("WRITE", 0, minval=0, maxval=1) != 0
-        self._calib_session = time.strftime("%Y%m%d_%H%M%S")
         # Auto 流水线：用已居中精修坐标，避免回粗定位后再二次 Center
         if auto and self._auto_main_x is not None:
             mx = float(self._auto_main_x)
@@ -2282,8 +2131,6 @@ class XyCalCalib:
             "ox": self._auto_ox,
             "oy": self._auto_oy,
             "dcxz_measure_mode": self.dcxz_measure_mode,
-            "calib_file_last": self._last_calib_file,
-            "calib_session": self._calib_session,
         }
 
 

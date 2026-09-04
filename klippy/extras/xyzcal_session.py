@@ -185,11 +185,15 @@ class XyzCalSession:
         if tip_r and tip_r > 0.0:
             r = tip_r
         det.nozzle_radius_px = float(r)
+        # 会话写入后略放宽 tol，避免 tip±15% 过窄导致随后 Center/track 拒检
+        cur_tol = float(getattr(det, "nozzle_radius_tol", 0.15) or 0.15)
+        det.nozzle_radius_tol = max(cur_tol, 0.20)
         band = det.calibrated_radius_band()
         logging.info(
-            "xyzcal_session: set detect nozzle_radius_px=%.2f band=%s",
+            "xyzcal_session: set detect nozzle_radius_px=%.2f band=%s tol=%.3f",
             r,
             band,
+            det.nozzle_radius_tol,
         )
 
     def on_center_done(self, calib, gcmd, tool=ToolType.MAIN):

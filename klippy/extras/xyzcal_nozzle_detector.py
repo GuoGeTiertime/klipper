@@ -1304,12 +1304,19 @@ def _detect_fixed_640_center_rim(
         ):
             continue
         closure = _bright_rim_closure(gray, refined)
+        # track：圆周门槛放宽（跟随帧）；acquire 保持原严格证明
+        if require_face_support:
+            rim_min, opposed_min, sector_min = 92.0, 0.76, 0.86
+            drop_med, drop_lo = 48.0, 26.0
+        else:
+            rim_min, opposed_min, sector_min = 80.0, 0.62, 0.72
+            drop_med, drop_lo = 40.0, 20.0
         if (
-            rim_score < 92.0
-            or closure.median_drop < 48.0
-            or closure.lower_drop < 26.0
-            or closure.opposed_coverage < 0.76
-            or closure.sector_coverage < 0.86
+            rim_score < rim_min
+            or closure.median_drop < drop_med
+            or closure.lower_drop < drop_lo
+            or closure.opposed_coverage < opposed_min
+            or closure.sector_coverage < sector_min
         ):
             continue
         support: Optional[_LocalHexSupport] = None
@@ -4373,6 +4380,9 @@ def detect_nozzle(
             search_circle,
         ):
             return direct_rim
+        # track+expected：快路径未过则拒检，禁止回退整幅 R16（避免 ~10s）
+        if detect_mode == "track" and explicit_expected_center:
+            raise RuntimeError("NO_DETECT")
 
     if _has_led_fill_lighting(image):
         if fixed_640_profile:
