@@ -16,7 +16,7 @@ import math
 import sys
 import threading
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from enum import Enum
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -924,6 +924,37 @@ class XyCalDetect:
         half = max(1.5, r * float(self.nozzle_radius_tol))
         return (max(5.0, r - half), min(60.0, r + half))
 
+    def ensure_profile(self):
+        """Cold NozzleDetectionProfile matching legacy 80x72 / 10..17 defaults."""
+        if self.profile is not None:
+            return self.profile
+        self.profile = NozzleDetectionProfile(
+            snapshot_url=str(self.snapshot_url or ""),
+            target_pixel_x=320.0,
+            target_pixel_y=240.0,
+            search_delta_x=40.0,
+            search_delta_y=36.0,
+            radius_min_px=10.0,
+            radius_max_px=17.0,
+            calib_px_mm=0.0,
+            min_confidence=float(self.min_confidence),
+            fresh_frame_flush_count=2,
+        )
+        return self.profile
+
+    def profile_search_wh(self):
+        p = self.ensure_profile()
+        return (
+            max(8.0, 2.0 * float(p.search_delta_x)),
+            max(8.0, 2.0 * float(p.search_delta_y)),
+        )
+
+    def note_snapshot_url(self, url):
+        """Remember last request URL on profile (for Center dump / later Detect)."""
+        if not url:
+            return
+        self.profile = replace(self.ensure_profile(), snapshot_url=str(url))
+
     def _inject_radius_band(self, body):
         if not isinstance(body, dict):
             return body
@@ -931,7 +962,8 @@ class XyCalDetect:
             return body
         band = self.calibrated_radius_band()
         if band is None:
-            return body
+            p = self.ensure_profile()
+            band = (float(p.radius_min_px), float(p.radius_max_px))
         body = dict(body)
         body["min_radius_px"] = band[0]
         body["max_radius_px"] = band[1]
@@ -1007,7 +1039,9 @@ class XyCalDetect:
                 "xyzcal_detect unavailable: %s (install opencv-python-headless)"
                 % (self._import_error or "import failed")
             )
-        url = gcmd.get("URL", self.snapshot_url)
+        p = self.ensure_profile()
+        def_sw, def_sh = self.profile_search_wh()
+        url = gcmd.get("URL", p.snapshot_url or self.snapshot_url)
         reset_follow = gcmd.get_int("RESET_FOLLOW", 0)
         flush_n = gcmd.get_int("FLUSH", 0, minval=0, maxval=8)
         fresh = gcmd.get_int("FRESH", 0, minval=0, maxval=1)
@@ -1015,10 +1049,10 @@ class XyCalDetect:
         expect_x = gcmd.get_float("EXPECTED_X", None)
         expect_y = gcmd.get_float("EXPECTED_Y", None)
         min_conf = gcmd.get_float(
-            "MIN_CONF", self.min_confidence, above=0.0, maxval=1.0
+            "MIN_CONF", float(p.min_confidence), above=0.0, maxval=1.0
         )
-        search_w = gcmd.get_float("SEARCH_W", 80.0, above=8.0)
-        search_h = gcmd.get_float("SEARCH_H", 72.0, above=8.0)
+        search_w = gcmd.get_float("SEARCH_W", float(def_sw), above=8.0)
+        search_h = gcmd.get_float("SEARCH_H", float(def_sh), above=8.0)
         search_dx = gcmd.get_float("SEARCH_DX", None, above=0.0)
         search_dy = gcmd.get_float("SEARCH_DY", None, above=0.0)
         min_radius = gcmd.get_float("MIN_RADIUS", None, above=0.0)
@@ -1050,6 +1084,9 @@ class XyCalDetect:
             raise gcmd.error("EXPECTED_X and EXPECTED_Y must be set together")
         if (search_dx is None) != (search_dy is None):
             raise gcmd.error("SEARCH_DX and SEARCH_DY must be set together")
+
+        # Remember last request URL on profile (explicit GCode still wins for this call)
+        self.note_snapshot_url(url)
 
         self._busy = True
         try:

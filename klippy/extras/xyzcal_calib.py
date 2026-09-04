@@ -217,11 +217,24 @@ class XyCalCalib:
             self._need_detect_reset = False
             if not mode:
                 mode = "acquire"
+        # Defaults from detect.profile (cold 80x72 / min_conf); explicit body wins later
+        if hasattr(det, "ensure_profile"):
+            p = det.ensure_profile()
+        else:
+            p = getattr(det, "profile", None)
+        if p is not None:
+            search_w = max(8.0, 2.0 * float(p.search_delta_x))
+            search_h = max(8.0, 2.0 * float(p.search_delta_y))
+            min_conf = float(p.min_confidence)
+        else:
+            search_w, search_h = 80.0, 72.0
+            min_conf = float(self.min_confidence)
+        snap_url = self._snap_url(gcmd)
         body = {
-            "url": self._snap_url(gcmd),
-            "min_confidence": self.min_confidence,
-            "search_width_px": 80,
-            "search_height_px": 72,
+            "url": snap_url,
+            "min_confidence": min_conf,
+            "search_width_px": search_w,
+            "search_height_px": search_h,
             "flush_snapshot_count": flush_n,
             "fresh_frame": bool(fresh_frame),
             "reset_follow": bool(reset_follow),
@@ -242,6 +255,8 @@ class XyCalCalib:
             self._last_expect_x = None
             self._last_expect_y = None
         result = det.detect_once(body)
+        if hasattr(det, "note_snapshot_url"):
+            det.note_snapshot_url(snap_url)
         self._last_cx = float(result.get("cx_px", -1) or -1)
         self._last_cy = float(result.get("cy_px", -1) or -1)
         self._last_r = float(result.get("radius_px", 0) or 0)
