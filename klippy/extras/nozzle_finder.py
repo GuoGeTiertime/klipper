@@ -21,9 +21,9 @@ class NozzleFinder:
         self.center_y = config.getfloat("center_y", minval=0.0)
         self.region_width = config.getfloat("region_width", above=0.0)
         self.region_height = config.getfloat("region_height", above=0.0)
-        self.expected_diameter = config.getfloat(
-            "expected_diameter", above=0.0
-        )
+        self.expected_diameter = config.getfloat("expected_diameter", above=0.0)
+        self.diameter_max_scale = config.getfloat("diameter_max_scale", 2.0, above=1.0)
+        self.diameter_min_scale = config.getfloat("diameter_min_scale", 0.5, above=0.0, maxval=1.0)
 
         self.gcode.register_command(
             "NOZZLE_FIND_CONFIG",
@@ -65,6 +65,10 @@ class NozzleFinder:
             self.region_height,
             self.expected_diameter,
         ) = values
+
+    def set_diameter_scales(self, diameter_min_scale, diameter_max_scale):
+        self.diameter_min_scale = diameter_min_scale
+        self.diameter_max_scale = diameter_max_scale
 
     def _crop_region(self, image):
         image_height, image_width = image.shape[:2]
@@ -183,8 +187,8 @@ class NozzleFinder:
 
     def _find_candidates(self, gray):
         expected_radius = 0.5 * self.expected_diameter
-        min_radius = max(3, int(round(expected_radius * 0.60)))
-        max_radius = max(min_radius + 2, int(round(expected_radius * 1.40)))
+        min_radius = max(3, int(round(expected_radius * self.diameter_min_scale)))
+        max_radius = max(min_radius + 2, int(round(expected_radius * self.diameter_max_scale)))
         blurred = cv2.GaussianBlur(gray, (0, 0), 1.2)
         candidates = []
 
@@ -221,24 +225,14 @@ class NozzleFinder:
                 candidates.append((float(x), float(y), float(radius)))
         return candidates
 
-    def execute(self, url=None):
-        """Capture an image and return the best nozzle circle."""
-        camera = self.printer.lookup_object("camera_capture", None)
-        if camera is None:
+    def find(self, image):
+        """Find the best nozzle circle in an already captured BGR image."""
+        if image is None or not hasattr(image, "shape") or image.ndim < 2:
             return {
                 "ok": False,
-                "error": "CAMERA_NOT_LOADED",
-                "detail": "camera_capture is not loaded",
+                "error": "INVALID_IMAGE",
+                "detail": "image must be a decoded OpenCV image",
             }
-        try:
-            image = camera.capture(url)
-        except Exception as exc:
-            return {
-                "ok": False,
-                "error": "CAPTURE_FAILED",
-                "detail": str(exc),
-            }
-
         try:
             region, offset_x, offset_y = self._crop_region(image)
         except NozzleFinderError as exc:
@@ -321,6 +315,19 @@ class NozzleFinder:
             "frame_width": int(image.shape[1]),
             "frame_height": int(image.shape[0]),
         }
+
+    def execute(self, url=None):
+        """Capture an image and return the best nozzle circle."""
+        camera = self.printer.lookup_object("camera_capture")
+        try:
+            image = camera.capture(url)
+        except Exception as exc:
+            return {
+                "ok": False,
+                "error": "CAPTURE_FAILED",
+                "detail": str(exc),
+            }
+        return self.find(image)
 
     cmd_NOZZLE_FIND_CONFIG_help = (
         "Configure nozzle search. Params: CENTER_X= CENTER_Y= WIDTH= HEIGHT= "
