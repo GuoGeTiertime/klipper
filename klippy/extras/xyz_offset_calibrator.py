@@ -4,10 +4,14 @@
 # This file may be distributed under the terms of the GNU GPLv3 license.
 
 import math
+import statistics
 
 from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Optional
+
+
+Y_CENTER_DIFFERENCE_OFFSETS = (4.3, 4.4, 4.5, 4.6, 4.7)
 
 
 class ToolType(str, Enum):
@@ -106,6 +110,9 @@ class XYZOffsetCalibrator:
         self.tool_center_points = {}
         self.xy_offset_x = None
         self.xy_offset_y = None
+        self.y_center_difference = None
+        self.main_y_center_difference = None
+        self.secondary_y_center_differences = []
         self.initialized = False
         self.last_error = "not initialized"
 
@@ -133,6 +140,11 @@ class XYZOffsetCalibrator:
             "XYZ_OFFSET_CALIBRATE_SECONDARY",
             self.cmd_XYZ_OFFSET_CALIBRATE_SECONDARY,
             desc=self.cmd_XYZ_OFFSET_CALIBRATE_SECONDARY_help,
+        )
+        self.gcode.register_command(
+            "XYZ_OFFSET_MEASURE_Y_DIFF",
+            self.cmd_XYZ_OFFSET_MEASURE_Y_DIFF,
+            desc=self.cmd_XYZ_OFFSET_MEASURE_Y_DIFF_help,
         )
 
     def _current_position(self):
@@ -242,6 +254,9 @@ class XYZOffsetCalibrator:
         self.tool_center_points = {}
         self.xy_offset_x = None
         self.xy_offset_y = None
+        self.y_center_difference = None
+        self.main_y_center_difference = None
+        self.secondary_y_center_differences = []
         self.xy_points = [point]
         self.center_points = []
         self.center_sample_points = []
@@ -621,6 +636,101 @@ class XYZOffsetCalibrator:
         self._save_tool_center(point)
         return point
 
+    def _calculate_y_center_difference(self, negative_points, positive_points):
+        """Return the larger signed pixel-axis difference between both sides."""
+        vy_x = float(self.profile.y_axis_pixel_x_per_mm)
+        vy_y = float(self.profile.y_axis_pixel_y_per_mm)
+        group_averages = []
+        for points in (negative_points, positive_points):
+            valid = [point for point in points if point.detected]
+            if len(valid) < 3:
+                raise RuntimeError("Y center difference needs at least 3 points per side")
+
+            target_y = sum(point.y for point in valid) / float(len(valid))
+            normalized = [
+                (
+                    point.pixel_x + vy_x * (target_y - point.y),
+                    point.pixel_y + vy_y * (target_y - point.y),
+                )
+                for point in valid
+            ]
+            median_x = statistics.median(value[0] for value in normalized)
+            median_y = statistics.median(value[1] for value in normalized)
+            distances = [
+                math.hypot(value[0] - median_x, value[1] - median_y)
+                for value in normalized
+            ]
+            median_distance = statistics.median(distances)
+            mad = statistics.median(
+                abs(distance - median_distance) for distance in distances
+            )
+            limit = median_distance + max(0.75, 3.0 * 1.4826 * mad)
+            filtered = [
+                value for value, distance in zip(normalized, distances)
+                if distance <= limit
+            ]
+            if len(filtered) < 3:
+                raise RuntimeError("too many Y center difference outliers")
+            group_averages.append(
+                (
+                    sum(value[0] for value in filtered) / float(len(filtered)),
+                    sum(value[1] for value in filtered) / float(len(filtered)),
+                )
+            )
+        difference_x = group_averages[0][0] - group_averages[1][0]
+        difference_y = group_averages[0][1] - group_averages[1][1]
+        if abs(difference_x) >= abs(difference_y):
+            return difference_x
+        return difference_y
+
+    def measure_y_center_difference(self, tool, offsets=None):
+        """Measure symmetric Y points at current Z and save their center difference."""
+        tool = tool if isinstance(tool, ToolType) else _parse_tool(tool)
+        if tool != self.current_tool:
+            raise RuntimeError("requested tool is not the current tool")
+        center = self.tool_center_points.get(tool)
+        if center is None:
+            raise RuntimeError("center the requested tool before Y difference measurement")
+        self._xy_mapping()
+        offsets = tuple(
+            float(value)
+            for value in (offsets or Y_CENTER_DIFFERENCE_OFFSETS)
+        )
+        if not offsets or any(value <= 0.0 for value in offsets):
+            raise ValueError("Y difference offsets must be positive")
+
+        _, _, measure_z = self._current_position()
+        negative_points = []
+        positive_points = []
+        vy_x = float(self.profile.y_axis_pixel_x_per_mm)
+        vy_y = float(self.profile.y_axis_pixel_y_per_mm)
+        try:
+            for side, output in ((-1.0, negative_points), (1.0, positive_points)):
+                for offset in offsets:
+                    delta_y = side * offset
+                    self._abs_move([center.x, center.y + delta_y, measure_z])
+                    output.append(
+                        self._detect_at(
+                            self.profile.center_pixel_x + vy_x * delta_y,
+                            self.profile.center_pixel_y + vy_y * delta_y,
+                            tool,
+                        )
+                    )
+            difference = self._calculate_y_center_difference(
+                negative_points,
+                positive_points,
+            )
+        finally:
+            self._abs_move([center.x, center.y, measure_z])
+
+        self.y_center_difference = difference
+        result = (measure_z, difference)
+        if tool == ToolType.MAIN:
+            self.main_y_center_difference = result
+        else:
+            self.secondary_y_center_differences.append(result)
+        return difference
+
     cmd_XYZ_OFFSET_INIT_help = (
         "Capture and initialize the dual-nozzle detection profile. "
         "Params: TOOL=MAIN|SECOND"
@@ -721,6 +831,36 @@ class XYZOffsetCalibrator:
             )
         )
 
+    cmd_XYZ_OFFSET_MEASURE_Y_DIFF_help = (
+        "Measure robust pixel difference at symmetric Y points. "
+        "Params: TOOL=MAIN|SECOND COUNT=3..5"
+    )
+
+    def cmd_XYZ_OFFSET_MEASURE_Y_DIFF(self, gcmd):
+        try:
+            tool = _parse_tool(gcmd.get("TOOL", self.current_tool.value))
+            count = gcmd.get_int(
+                "COUNT",
+                len(Y_CENTER_DIFFERENCE_OFFSETS),
+                minval=3,
+                maxval=len(Y_CENTER_DIFFERENCE_OFFSETS),
+            )
+            difference = self.measure_y_center_difference(
+                tool,
+                Y_CENTER_DIFFERENCE_OFFSETS[:count],
+            )
+            _, _, measure_z = self._current_position()
+        except Exception as exc:
+            self.last_error = str(exc)
+            raise gcmd.error(
+                "XYZ_OFFSET_MEASURE_Y_DIFF failed: %s" % (exc,)
+            )
+        gcmd.respond_info(
+            "XYZ_OFFSET_MEASURE_Y_DIFF ok=True tool=%s z=%.4f "
+            "count_per_side=%d center_difference_px=%.4f"
+            % (tool.value, measure_z, count, difference)
+        )
+
     cmd_XYZ_OFFSET_STATUS_help = "Report the initialized detection profile"
 
     def cmd_XYZ_OFFSET_STATUS(self, gcmd):
@@ -792,6 +932,11 @@ class XYZOffsetCalibrator:
             gcmd.respond_info(
                 "XYZ_OFFSET_STATUS tool_offset secondary_minus_main=(%.4f,%.4f)"
                 % (self.xy_offset_x, self.xy_offset_y)
+            )
+        if self.y_center_difference is not None:
+            gcmd.respond_info(
+                "XYZ_OFFSET_STATUS y_center_difference=%.4f"
+                % (self.y_center_difference,)
             )
         gcmd.respond_info(
             "XYZ_OFFSET_STATUS point tool=%s machine=(%.3f,%.3f,%.3f) "
@@ -901,6 +1046,11 @@ class XYZOffsetCalibrator:
             },
             "xy_offset_x": self.xy_offset_x,
             "xy_offset_y": self.xy_offset_y,
+            "y_center_difference": self.y_center_difference,
+            "main_y_center_difference": self.main_y_center_difference,
+            "secondary_y_center_differences": list(
+                self.secondary_y_center_differences
+            ),
             "last_error": self.last_error,
         }
 
